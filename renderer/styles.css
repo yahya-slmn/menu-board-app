@@ -1,0 +1,327 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+:root {
+  --ink: #1E2A24;
+  --paper: #FBF8F2;
+  --paper-dim: #F1ECE1;
+  --line: #DDD5C3;
+  --sage: #4F7358;
+  --sage-dark: #3A5641;
+  --gold: #C79A3C;
+  --chicken: #C79A3C;
+  --beef: #A6473D;
+  --lamb: #6B4A2F;
+  --veg: #5B7F5E;
+  --neutral: #8A8477;
+  --danger: #A6473D;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 14px;
+}
+
+h1, h2, h3, .display {
+  font-family: 'Fraunces', serif;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100vh;
+}
+
+/* ---------------- Sidebar ---------------- */
+.sidebar {
+  background: var(--ink);
+  color: var(--paper-dim);
+  display: flex;
+  flex-direction: column;
+  padding: 24px 16px;
+}
+.sidebar .brand {
+  font-family: 'Fraunces', serif;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--paper);
+  margin-bottom: 4px;
+}
+.sidebar .tagline {
+  font-size: 11px;
+  color: var(--gold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 28px;
+}
+.sidebar .section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8FA396;
+  margin: 18px 0 8px;
+}
+.nav-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--paper-dim);
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  font-family: inherit;
+}
+.nav-btn:hover { background: rgba(255,255,255,0.06); }
+.nav-btn.active { background: var(--sage-dark); color: white; font-weight: 500; }
+
+/* ---------------- Main content ---------------- */
+.main { padding: 28px 36px; overflow-y: auto; }
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 22px;
+}
+.topbar h1 { font-size: 26px; }
+.section-pill {
+  display: inline-block;
+  background: var(--paper-dim);
+  border: 1px solid var(--line);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--sage-dark);
+  font-weight: 500;
+}
+
+button.primary {
+  background: var(--sage);
+  color: white;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+}
+button.primary:hover { background: var(--sage-dark); }
+button.secondary {
+  background: white;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 9px 16px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+button.secondary:hover { border-color: var(--sage); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.search-bar { margin-bottom: 18px; }
+.search-bar input {
+  width: 100%; max-width: 360px; padding: 9px 12px;
+  border: 1px solid var(--line); border-radius: 8px; font-family: inherit; font-size: 13.5px;
+}
+.search-bar input:focus { outline: none; border-color: var(--sage); }
+
+/* ---------------- Items table ---------------- */
+/* Single table across all categories with fixed column widths -- keeps Tags/RC aligned in
+   the same place for every row, instead of each category having its own auto-sized table. */
+table.items-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table.items-table col.col-category, table.items-table th:nth-child(1), table.items-table td:nth-child(1) { width: 160px; }
+table.items-table th:nth-child(3), table.items-table td:nth-child(3) { width: 180px; }
+table.items-table th:nth-child(4), table.items-table td:nth-child(4) { width: 130px; }
+table.items-table th:nth-child(5), table.items-table td:nth-child(5) { width: 110px; }
+table.items-table td, table.items-table th {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+table.items-table th { color: var(--neutral); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+table.items-table td.cat-cell {
+  background: var(--paper-dim); font-weight: 600; font-size: 12px; color: var(--sage-dark);
+  vertical-align: top; border-right: 1px solid var(--line);
+}
+
+.rc-input {
+  width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+  font-family: inherit; font-size: 12.5px; background: white;
+}
+.rc-input:focus { outline: none; border-color: var(--sage); }
+.rc-input.rc-missing { border-color: var(--gold); color: var(--danger); font-style: italic; }
+.rc-input.rc-missing::placeholder { color: var(--danger); opacity: 0.7; }
+
+.chip {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+}
+.chip.chicken { background: var(--chicken); }
+.chip.beef { background: var(--beef); }
+.chip.lamb { background: var(--lamb); }
+.chip.daily { background: var(--neutral); }
+
+.icon-btn {
+  background: none; border: none; cursor: pointer; color: var(--neutral); font-size: 13px;
+  padding: 2px 6px;
+}
+.icon-btn:hover { color: var(--sage-dark); }
+.icon-btn.danger:hover { color: var(--danger); }
+
+/* ---------------- Generate view ---------------- */
+.generate-controls {
+  display: flex; flex-wrap: wrap; gap: 14px; align-items: end; background: white;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 24px;
+}
+
+/* ---------------- Build Menu view ---------------- */
+/* Build Menu splits .main into its own scroll region (.build-scroll) plus a docked footer
+   (.builder-tabs) -- unlike position:sticky, this keeps the tab strip fully outside the
+   scrolling content so it never overlaps the grid while scrolling through it. */
+.main.build-mode { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.build-scroll { flex: 1 1 auto; overflow-y: auto; padding: 28px 36px; }
+
+/* Sheet tabs docked flush at the very bottom, like Excel's workbook tab strip --
+   kept low and compact (small padding/font, no wrap) so it reads as a thin strip, not a row of buttons. */
+.builder-tabs {
+  flex: 0 0 auto; display: flex; gap: 1px; flex-wrap: nowrap;
+  padding: 4px 36px; background: var(--paper-dim); border-top: 1px solid var(--line);
+}
+.builder-tabs .nav-btn {
+  background: #E7E1D2; color: var(--ink); border: 1px solid var(--line); border-bottom: none;
+  border-radius: 4px 4px 0 0; padding: 5px 12px; margin-bottom: 0; font-size: 12px; white-space: nowrap;
+}
+.builder-tabs .nav-btn.active {
+  background: white; color: var(--sage-dark); font-weight: 600;
+  box-shadow: 0 -2px 0 var(--sage) inset;
+}
+.builder-select { width: 100%; padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 12.5px; }
+
+/* Each day as a vertical table -- category column on the left, one row per item
+   stacked top-to-bottom -- mirroring the row layout of the Excel blank menu export. */
+.day-table-wrap { margin-bottom: 18px; }
+.day-table { width: 100%; border-collapse: collapse; background: white; border: 1px solid var(--line); }
+.day-table thead th {
+  background: var(--sage); color: white; text-align: left; padding: 10px 18px;
+  font-family: 'Fraunces', serif; font-weight: 600; font-size: 15px;
+}
+.day-table thead th .date {
+  font-size: 12px; font-weight: 400; font-family: 'IBM Plex Sans', sans-serif;
+  margin-left: 10px; opacity: 0.85;
+}
+.day-table td { border-top: 1px solid var(--line); padding: 8px 14px; font-size: 13px; vertical-align: middle; }
+.day-table .cat-cell {
+  background: var(--paper-dim); font-weight: 600; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--sage-dark); width: 160px; text-align: center;
+}
+.day-table .item-name { font-size: 13.5px; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 11px; color: var(--neutral); text-transform: uppercase; letter-spacing: 0.04em; }
+.field input, .field select, .field textarea {
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 13.5px;
+}
+.field textarea { width: 100%; resize: vertical; }
+
+.warning-banner {
+  background: #FBF0DD; border: 1px solid var(--gold); border-radius: 8px;
+  padding: 10px 14px; font-size: 12.5px; color: #6B4A0F; margin-bottom: 16px;
+}
+
+.day-card {
+  background: white; border: 1px solid var(--line); border-radius: var(--radius);
+  margin-bottom: 14px; overflow: hidden;
+}
+.day-card .day-head {
+  background: var(--paper-dim); padding: 10px 18px; font-family: 'Fraunces', serif;
+  font-weight: 600; font-size: 15px; display: flex; justify-content: space-between; align-items: center;
+}
+.day-card .day-head .date { font-size: 12px; color: var(--neutral); font-weight: 400; font-family: 'IBM Plex Sans', sans-serif; }
+.day-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0; }
+.day-item {
+  padding: 10px 18px; border-top: 1px solid var(--line); border-left: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.day-item .cat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--neutral); }
+.day-item .item-name { font-size: 13.5px; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+
+select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--line); max-width: 90px; }
+
+.history-list { list-style: none; padding: 0; }
+.history-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; background: white; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; cursor: pointer;
+}
+.history-item:hover { border-color: var(--sage); }
+.history-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.history-toolbar label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--neutral); cursor: pointer; }
+
+/* ---------------- Recipe Book ---------------- */
+.recipes-table, .recipe-ingredients-table { width: 100%; border-collapse: collapse; background: white; }
+.recipes-table td, .recipes-table th, .recipe-ingredients-table td, .recipe-ingredients-table th {
+  padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.recipes-table th, .recipe-ingredients-table th {
+  color: var(--neutral); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.recipe-ingredients-table input {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 12.5px;
+}
+.recipe-ingredients-table input:focus { outline: none; border-color: var(--sage); }
+
+.recipe-month-group { background: white; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; }
+.recipe-month-head { background: var(--paper-dim); padding: 10px 16px; font-family: 'Fraunces', serif; font-size: 15px; }
+.recipe-month-head label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.recipe-month-group .recipes-table { margin: 0; }
+
+/* Ingredient anti-typo autocomplete -- dropdown floats under the Ingredient cell's input,
+   matched against the canonical `ingredients` table so spelling is always identical. */
+.autocomplete-wrap { position: relative; }
+.autocomplete-list {
+  position: absolute; top: 100%; left: 0; right: 0; margin-top: 2px;
+  background: white; border: 1px solid var(--line); border-radius: 8px;
+  max-height: 220px; overflow-y: auto; z-index: 30;
+  box-shadow: 0 6px 18px rgba(30,42,36,0.14);
+}
+.autocomplete-item {
+  padding: 7px 10px; cursor: pointer; display: flex; justify-content: space-between;
+  align-items: center; gap: 8px; font-size: 12.5px; border-bottom: 1px solid var(--paper-dim);
+}
+.autocomplete-item:last-child { border-bottom: none; }
+.autocomplete-item:hover { background: var(--paper-dim); }
+.autocomplete-item .autocomplete-meta { color: var(--neutral); font-size: 10.5px; white-space: nowrap; }
+.autocomplete-item.autocomplete-add { color: var(--sage-dark); font-weight: 600; }
+
+/* ---------------- Modal ---------------- */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(30,42,36,0.45);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal {
+  background: white; border-radius: 12px; padding: 26px 28px; width: 460px; max-height: 84vh; overflow-y: auto;
+}
+.modal h2 { font-size: 18px; margin-bottom: 16px; }
+.modal .field { margin-bottom: 12px; }
+.modal .field input, .modal .field select { width: 100%; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.portion-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.empty-state { text-align: center; padding: 60px 20px; color: var(--neutral); }
+.empty-state .display { font-size: 20px; margin-bottom: 8px; color: var(--ink); }

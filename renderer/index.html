@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Menu Board</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <nav class="sidebar">
+      <div class="brand">Menu Board</div>
+      <div class="tagline">School Nutrition Planning</div>
+
+      <div class="section-label">Section</div>
+      <div id="section-nav"></div>
+
+      <div class="section-label">View</div>
+      <button class="nav-btn" data-view="items">Item Catalog</button>
+      <button class="nav-btn" data-view="generate">Generate Menu</button>
+      <button class="nav-btn" data-view="build">Build Menu</button>
+      <button class="nav-btn" data-view="history">History</button>
+      <button class="nav-btn" data-view="exportAll">Export All Sections</button>
+
+      <div class="section-label">Recipes</div>
+      <button class="nav-btn" data-view="recipes">Recipe Book</button>
+      <button class="nav-btn" data-view="calculator">Recipe Calculator</button>
+      <button class="nav-btn" data-view="ingredients">Ingredients</button>
+    </nav>
+
+    <main class="main" id="main"></main>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

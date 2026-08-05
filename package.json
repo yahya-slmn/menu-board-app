@@ -1,0 +1,55 @@
+{
+  "name": "menu-generator",
+  "version": "1.0.0",
+  "description": "School Menu Generator",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-builder install-app-deps",
+    "build:mac": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.menuboard.app",
+    "productName": "Menu Board",
+    "files": [
+      "main.js",
+      "preload.js",
+      "db/**/*",
+      "lib/**/*",
+      "renderer/**/*",
+      "node_modules/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    }
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "exceljs": "^4.4.0",
+    "ws": "^8.21.2"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.0.0"
+  }
+}

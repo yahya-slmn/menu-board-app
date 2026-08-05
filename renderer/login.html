@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Menu Board — Sign In</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    .login-card {
+      width: 320px;
+      background: var(--paper-dim);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 32px;
+    }
+    .login-card .brand {
+      font-family: 'Fraunces', serif;
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+    .login-card .tagline {
+      font-size: 11px;
+      color: var(--sage-dark);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 24px;
+    }
+    .login-card label {
+      display: block;
+      font-size: 12px;
+      margin: 14px 0 4px;
+      color: var(--ink);
+    }
+    .login-card input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-family: 'IBM Plex Sans', sans-serif;
+      font-size: 14px;
+      background: var(--paper);
+      color: var(--ink);
+    }
+    .login-card button {
+      width: 100%;
+      margin-top: 22px;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      background: var(--sage);
+      color: var(--paper);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .login-card button:hover { background: var(--sage-dark); }
+    .login-card button:disabled { opacity: 0.6; cursor: default; }
+    .error-msg {
+      color: var(--danger);
+      font-size: 12px;
+      margin-top: 12px;
+      min-height: 14px;
+    }
+  </style>
+</head>
+<body>
+  <form class="login-card" id="login-form">
+    <div class="brand">Menu Board</div>
+    <div class="tagline">Sign in to continue</div>
+    <label for="user-id">ID</label>
+    <input type="text" id="user-id" placeholder="e.g. tty01" required autocomplete="username" />
+    <label for="password">Password</label>
+    <input type="password" id="password" required autocomplete="current-password" />
+    <div class="error-msg" id="error-msg"></div>
+    <button type="submit" id="submit-btn">Sign In</button>
+  </form>
+  <script src="login.js"></script>
+</body>
+</html>
