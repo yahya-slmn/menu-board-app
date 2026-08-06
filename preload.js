@@ -30,7 +30,7 @@ contextBridge.exposeInMainWorld('api', {
   exportScaledRecipe: (payload) => ipcRenderer.invoke('export-scaled-recipe', payload),
 
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),
-  listGeneratedMenus: (sectionCode) => ipcRenderer.invoke('list-generated-menus', sectionCode),
+  listGeneratedMenus: () => ipcRenderer.invoke('list-generated-menus'),
   getLatestGeneratedMenu: (sectionCode) => ipcRenderer.invoke('get-latest-generated-menu', sectionCode),
   getGeneratedMenuDetail: (id) => ipcRenderer.invoke('get-generated-menu-detail', id),
   deleteGeneratedMenus: (menuIds) => ipcRenderer.invoke('delete-generated-menus', menuIds),

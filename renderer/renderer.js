@@ -383,15 +383,22 @@ function renderMenuResult(container, menuId, days, warnings) {
 // ============================================================
 // HISTORY VIEW
 // ============================================================
+// Unified across all sections (not filtered by the section nav) -- a bulk export (Export All
+// Sections, or Build Menu's "Export") saves 5 separate generated_menus rows sharing a
+// batch_id, and main.js's list-generated-menus collapses those into one entry tagged "All
+// Sections" here, with `menuIds` listing every real row it represents. Deleting that one entry
+// expands back to all 5 real ids before calling deleteGeneratedMenus, which is otherwise
+// unaware batches exist at all. Batch entries aren't clickable for the day-by-day detail view,
+// since there's no single coherent "one section's items" to show for 5 sections at once.
 async function renderHistoryView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>History</h1><span class="section-pill">${currentSectionName()}</span></div>
+      <div><h1>History</h1><span class="section-pill">Every generated menu, all sections</span></div>
     </div>
     <div id="history-list"></div>
     <div id="history-detail"></div>
   `;
-  const menus = await window.api.listGeneratedMenus(state.currentSection);
+  const menus = await window.api.listGeneratedMenus();
   const listEl = document.getElementById('history-list');
   if (menus.length === 0) {
     listEl.innerHTML = `<div class="empty-state"><div class="display">No menus generated yet</div>Head to "Generate Menu" to create one.</div>`;
@@ -405,11 +412,12 @@ async function renderHistoryView(main) {
       <button class="secondary" id="history-delete-btn" disabled>Delete Selected</button>
     </div>
     <ul class="history-list">${menus.map(m => `
-      <li class="history-item" data-id="${m.id}">
+      <li class="history-item" data-id="${m.id}" ${m.isBatch ? 'title="Bundled export across all sections — delete only, no combined detail view"' : ''}>
         <span>
           <input type="checkbox" class="history-row-check" data-select="${m.id}" />
           &nbsp; <strong>${m.label}</strong> &nbsp; <span style="color:var(--neutral)">${m.start_date}</span>
         </span>
+        <span class="chip daily">${m.tag}</span>
         <span class="chip daily">${m.status}</span>
       </li>
     `).join('')}</ul>
@@ -427,7 +435,7 @@ async function renderHistoryView(main) {
     // Stop the click from bubbling to the <li>'s own listener below, which opens the detail view.
     cb.addEventListener('click', (e) => e.stopPropagation());
     cb.addEventListener('change', () => {
-      const id = parseInt(cb.dataset.select, 10);
+      const id = cb.dataset.select;
       if (cb.checked) selected.add(id); else selected.delete(id);
       selectAllEl.checked = selected.size === menus.length;
       updateDeleteBtn();
@@ -437,7 +445,7 @@ async function renderHistoryView(main) {
   selectAllEl.addEventListener('change', () => {
     listEl.querySelectorAll('.history-row-check').forEach(cb => {
       cb.checked = selectAllEl.checked;
-      const id = parseInt(cb.dataset.select, 10);
+      const id = cb.dataset.select;
       if (selectAllEl.checked) selected.add(id); else selected.delete(id);
     });
     updateDeleteBtn();
@@ -447,19 +455,27 @@ async function renderHistoryView(main) {
     const count = selected.size;
     if (!confirm(`Delete ${count} selected menu${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
     deleteBtn.disabled = true;
-    await window.api.deleteGeneratedMenus([...selected]);
+    // Expand any selected batch entries back to every real generated_menus.id they represent --
+    // deleteGeneratedMenus itself has no concept of batches, it just deletes whatever ids it's given.
+    const idsToDelete = [...selected].flatMap(id => {
+      const entry = menus.find(m => m.id === id);
+      return entry ? entry.menuIds : [id];
+    });
+    await window.api.deleteGeneratedMenus(idsToDelete);
     renderHistoryView(main);
   });
 
   listEl.querySelectorAll('[data-id]').forEach(li => {
+    const entry = menus.find(m => m.id === li.dataset.id);
+    if (!entry || entry.isBatch) return; // no combined detail view across 5 sections
     li.addEventListener('click', async () => {
-      const days = await window.api.getGeneratedMenuDetail(li.dataset.id);
+      const days = await window.api.getGeneratedMenuDetail(entry.menuIds[0]);
       const formattedDays = days.map(d => ({
         date: d.menu_date, weekday: d.day_of_week,
         items: d.items.map(it => ({ category: it.category_code, name: it.name })),
       }));
-      state.currentGeneratedMenuId = li.dataset.id;
-      renderMenuResult(document.getElementById('history-detail'), li.dataset.id, formattedDays, []);
+      state.currentGeneratedMenuId = entry.menuIds[0];
+      renderMenuResult(document.getElementById('history-detail'), entry.menuIds[0], formattedDays, []);
     });
   });
 }
@@ -714,6 +730,9 @@ async function exportBuilderMenu() {
   document.getElementById('bm-export-btn').disabled = true;
   statusEl.textContent = 'Saving and exporting…';
 
+  // Build Menu's export saves all 5 sections too, but intentionally never sets a batch_id --
+  // only Export All Sections' batch groups into one History entry (see save-manual-menu note
+  // in main.js); these 5 saves stay individual, each tagged with its own section name.
   const menuIdsBySection = {};
   for (const code of Object.keys(sections)) {
     const { slots, selections } = sections[code];
@@ -1426,6 +1445,13 @@ function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick) {
 function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
   const { scaledRecipe, scaledIngredients } = scaleRecipeForExport(recipe, ingredients, multiplier);
 
+  // Sums every ingredient's raw quantity number regardless of unit (120 GR + 5 PC = 125) --
+  // same logic as the "Total Quantity" row in the Excel export, kept in sync with it.
+  const totalQuantity = roundNice(scaledIngredients.reduce((sum, ing) => {
+    const q = typeof ing.quantity === 'number' ? ing.quantity : parseFloat(ing.quantity);
+    return isNaN(q) ? sum : sum + q;
+  }, 0));
+
   container.innerHTML = `
     <div class="day-card">
       <div class="day-head">
@@ -1454,6 +1480,12 @@ function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
                 <td>${ing.method || ''}</td>
               </tr>
             `).join('')}
+            <tr style="font-weight:600;">
+              <td>Total Quantity</td>
+              <td>${totalQuantity}</td>
+              <td></td>
+              <td></td>
+            </tr>
           </tbody>
         </table>
 

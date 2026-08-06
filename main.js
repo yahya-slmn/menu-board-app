@@ -1,5 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
+const crypto = require('crypto');
+const { autoUpdater } = require('electron-updater');
 const { supabase, supaFail } = require('./lib/supabaseClient');
 const {
   loadReferenceData, getSections, getSectionByCode, getSectionById,
@@ -43,8 +45,45 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
+// ---------------------------------------------------------------
+// Auto-update (electron-updater, checking GitHub Releases on the repo configured in
+// package.json's build.publish). Downloads silently in the background; the user is only
+// interrupted once the update is fully downloaded and ready to install.
+// ---------------------------------------------------------------
+autoUpdater.autoDownload = true;
+
+autoUpdater.on('update-available', (info) => {
+  console.log(`[auto-updater] update available: v${info.version}, downloading in background...`);
+});
+
+autoUpdater.on('update-downloaded', (info) => {
+  dialog.showMessageBox(mainWindow || loginWindow, {
+    type: 'info',
+    title: 'Update Ready',
+    message: `Version ${info.version} has been downloaded.`,
+    detail: 'Restart Menu Board now to install it, or it will install automatically the next time you quit.',
+    buttons: ['Restart Now', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+  }).then((result) => {
+    if (result.response === 0) autoUpdater.quitAndInstall();
+  });
+});
+
+autoUpdater.on('error', (err) => {
+  console.error('[auto-updater] error:', err);
+});
+
+function checkForUpdates() {
+  // Unpacked dev runs (npm start) have no app-update.yml -- that file only exists inside a
+  // build produced by electron-builder -- so checkForUpdates() would just throw noisily.
+  if (!app.isPackaged) return;
+  autoUpdater.checkForUpdates().catch((err) => console.error('[auto-updater] check failed:', err));
+}
+
 app.whenReady().then(() => {
   createLoginWindow();
+  checkForUpdates();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       authenticated ? createWindow() : createLoginWindow();
@@ -531,12 +570,47 @@ ipcMain.handle('get-latest-generated-menu', async (e, sectionCode) => {
   return data[0] || null;
 });
 
-ipcMain.handle('list-generated-menus', async (e, sectionCode) => {
-  const section = getSectionByCode(sectionCode);
+// History is unified (not filtered by section) -- rows sharing a batch_id (set by
+// generate-and-export-all / Build Menu's export, both of which save all 5 sections in one
+// user action) collapse into a single "All Sections" entry. menuIds always lists every real
+// generated_menus.id an entry represents, so the renderer can expand a selection back to raw
+// ids for delete-generated-menus (unchanged -- it just deletes whatever ids it's given)
+// without this handler needing any batch-aware delete logic of its own.
+ipcMain.handle('list-generated-menus', async () => {
   const { data, error } = await supabase
-    .from('generated_menus').select('*').eq('section_id', section.id).order('created_at', { ascending: false });
+    .from('generated_menus').select('*').order('created_at', { ascending: false });
   if (error) throw supaFail('list-generated-menus', error);
-  return data;
+
+  const entries = [];
+  const seenBatches = new Set();
+  for (const row of data) {
+    if (row.batch_id) {
+      if (seenBatches.has(row.batch_id)) continue;
+      seenBatches.add(row.batch_id);
+      const batchRows = data.filter(r => r.batch_id === row.batch_id);
+      entries.push({
+        id: String(row.batch_id),
+        isBatch: true,
+        label: row.label,
+        start_date: row.start_date,
+        status: row.status,
+        tag: 'all_sections',
+        menuIds: batchRows.map(r => r.id),
+      });
+    } else {
+      const section = getSectionById(row.section_id);
+      entries.push({
+        id: String(row.id),
+        isBatch: false,
+        label: row.label,
+        start_date: row.start_date,
+        status: row.status,
+        tag: section?.name || '—',
+        menuIds: [row.id],
+      });
+    }
+  }
+  return entries;
 });
 
 ipcMain.handle('get-generated-menu-detail', async (e, generatedMenuId) => {
@@ -761,10 +835,12 @@ ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekd
   const sectionOrder = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];
   const menuIdsBySection = {};
   const warningsBySection = {};
+  // Same batch_id across all 5 sections so History can show/delete this run as one entry.
+  const batchId = crypto.randomUUID();
 
   for (const sectionCode of sectionOrder) {
     const gen = new MenuGenerator();
-    const { menuId } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays);
+    const { menuId } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays, batchId);
     menuIdsBySection[sectionCode] = menuId;
     warningsBySection[sectionCode] = gen.warnings;
   }
@@ -820,6 +896,9 @@ ipcMain.handle('builder-fill-suggestions', async (e, { sectionCode, startDate, n
   return { resultDays, warnings: gen.warnings };
 });
 
+// Never passes a batchId -- Build Menu's export saves all 5 sections too, but only Export
+// All Sections' batch groups into one History entry; Build Menu's 5 saves stay individual,
+// each tagged with its own section name.
 ipcMain.handle('save-manual-menu', async (e, { sectionCode, label, startDate, days }) => {
   const gen = new MenuGenerator();
   const menuId = await gen.persistMenu(sectionCode, label, new Date(startDate), days);
