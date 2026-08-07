@@ -50,6 +50,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
+    "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
     "ws": "^8.21.2"

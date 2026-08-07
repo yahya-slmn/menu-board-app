@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 const { autoUpdater } = require('electron-updater');
+const log = require('electron-log/main');
 const { supabase, supaFail } = require('./lib/supabaseClient');
 const {
   loadReferenceData, getSections, getSectionByCode, getSectionById,
@@ -49,14 +50,34 @@ function createWindow() {
 // Auto-update (electron-updater, checking GitHub Releases on the repo configured in
 // package.json's build.publish). Downloads silently in the background; the user is only
 // interrupted once the update is fully downloaded and ready to install.
+//
+// Logging only, added for debugging -- no update/signing behavior changed here. A packaged
+// .app has no attached terminal, so console.log/error were never visible in practice; this
+// routes everything (electron-log's own internal messages included, via autoUpdater.logger)
+// to a file instead. Default location on macOS: ~/Library/Logs/<productName>/main.log, i.e.
+// ~/Library/Logs/Menu Board/main.log once packaged (electron-log derives the folder name from
+// app.getName(), which electron-builder sets to package.json's build.productName).
 // ---------------------------------------------------------------
+log.transports.file.level = 'debug';
+log.transports.console.level = 'debug';
+autoUpdater.logger = log;
+
 autoUpdater.autoDownload = true;
 
+autoUpdater.on('checking-for-update', () => {
+  log.info('[auto-updater] checking-for-update event fired');
+});
+
 autoUpdater.on('update-available', (info) => {
-  console.log(`[auto-updater] update available: v${info.version}, downloading in background...`);
+  log.info(`[auto-updater] update-available: v${info.version} -- downloading in background`);
+});
+
+autoUpdater.on('update-not-available', (info) => {
+  log.info(`[auto-updater] update-not-available -- current app version is already latest (checked against v${info?.version})`);
 });
 
 autoUpdater.on('update-downloaded', (info) => {
+  log.info(`[auto-updater] update-downloaded: v${info.version} -- prompting to restart`);
   dialog.showMessageBox(mainWindow || loginWindow, {
     type: 'info',
     title: 'Update Ready',
@@ -71,14 +92,26 @@ autoUpdater.on('update-downloaded', (info) => {
 });
 
 autoUpdater.on('error', (err) => {
-  console.error('[auto-updater] error:', err);
+  log.error('[auto-updater] error event:', {
+    message: err?.message, code: err?.code, name: err?.name, stack: err?.stack,
+  });
 });
 
 function checkForUpdates() {
   // Unpacked dev runs (npm start) have no app-update.yml -- that file only exists inside a
   // build produced by electron-builder -- so checkForUpdates() would just throw noisily.
-  if (!app.isPackaged) return;
-  autoUpdater.checkForUpdates().catch((err) => console.error('[auto-updater] check failed:', err));
+  // This means dev-mode testing (npm start) will NEVER produce any auto-update log lines at
+  // all, by design -- to see anything here, test the actual packaged/installed .app.
+  if (!app.isPackaged) {
+    log.info('[auto-updater] skipped: app.isPackaged is false (dev run via npm start)');
+    return;
+  }
+  log.info(`[auto-updater] calling checkForUpdates() -- current app version is ${app.getVersion()}`);
+  autoUpdater.checkForUpdates().catch((err) => {
+    log.error('[auto-updater] checkForUpdates() promise rejected:', {
+      message: err?.message, code: err?.code, name: err?.name, stack: err?.stack,
+    });
+  });
 }
 
 app.whenReady().then(() => {
