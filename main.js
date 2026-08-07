@@ -314,12 +314,33 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
   return { success: true };
 });
 
+// menu_day_items.item_id -> menu_items.id is ON DELETE RESTRICT (added directly in Supabase),
+// so deleting an item still referenced by a generated menu throws a foreign_key_violation
+// (Postgres code 23503) -- caught here and reported back with a count of how many distinct
+// generated menus reference it, same pattern as delete-ingredient above. item_portions is still
+// deleted explicitly first even though it's now ON DELETE CASCADE, since that's harmless and
+// keeps this correct regardless of how the FK ends up defined.
 ipcMain.handle('delete-item', async (e, itemId) => {
-  // Delete portions explicitly rather than relying on an ON DELETE CASCADE existing on the
-  // Supabase side -- keeps this correct regardless of how the FK was defined there.
   await supabase.from('item_portions').delete().eq('item_id', itemId);
   const { error } = await supabase.from('menu_items').delete().eq('id', itemId);
-  if (error) throw supaFail('delete-item', error);
+  if (error) {
+    if (error.code === '23503') {
+      const { data: dayItemRows, error: diErr } = await supabase
+        .from('menu_day_items').select('menu_day_id').eq('item_id', itemId);
+      if (diErr) throw supaFail('delete-item: count usage (menu_day_items)', diErr);
+      const dayIds = [...new Set(dayItemRows.map(r => r.menu_day_id))];
+
+      let menuCount = 0;
+      if (dayIds.length) {
+        const { data: dayRows, error: dErr } = await supabase
+          .from('menu_days').select('generated_menu_id').in('id', dayIds);
+        if (dErr) throw supaFail('delete-item: count usage (menu_days)', dErr);
+        menuCount = new Set(dayRows.map(r => r.generated_menu_id)).size;
+      }
+      return { success: false, inUse: true, menuCount };
+    }
+    throw supaFail('delete-item', error);
+  }
   return { success: true };
 });
 
@@ -588,6 +609,14 @@ ipcMain.handle('list-generated-menus', async () => {
       if (seenBatches.has(row.batch_id)) continue;
       seenBatches.add(row.batch_id);
       const batchRows = data.filter(r => r.batch_id === row.batch_id);
+      // menuIdsBySection lets the renderer call export-all-sections-to-excel directly on a
+      // batch entry (same handler Export All Sections/Build Menu's own export already use)
+      // without needing a combined detail view to drive it from.
+      const menuIdsBySection = {};
+      for (const r of batchRows) {
+        const code = getSectionById(r.section_id)?.code;
+        if (code) menuIdsBySection[code] = r.id;
+      }
       entries.push({
         id: String(row.batch_id),
         isBatch: true,
@@ -596,6 +625,7 @@ ipcMain.handle('list-generated-menus', async () => {
         status: row.status,
         tag: 'all_sections',
         menuIds: batchRows.map(r => r.id),
+        menuIdsBySection,
       });
     } else {
       const section = getSectionById(row.section_id);

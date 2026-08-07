@@ -69,6 +69,14 @@ h1, h2, h3, .display {
   color: #8FA396;
   margin: 18px 0 8px;
 }
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 16px;
+  font-size: 10.5px;
+  color: #8FA396;
+  text-align: center;
+  letter-spacing: 0.03em;
+}
 .nav-btn {
   display: block;
   width: 100%;

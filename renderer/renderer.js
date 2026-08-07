@@ -153,9 +153,20 @@ async function renderItemsView(main) {
     });
     content.querySelectorAll('[data-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        if (confirm('Delete this item? This cannot be undone.')) {
-          await window.api.deleteItem(btn.dataset.delete);
+        if (!confirm('Delete this item? This cannot be undone.')) return;
+        try {
+          const result = await window.api.deleteItem(btn.dataset.delete);
+          if (!result.success) {
+            if (result.inUse) {
+              alert(`This item is used in ${result.menuCount} generated menu${result.menuCount === 1 ? '' : 's'} and can't be deleted.`);
+            } else {
+              alert('Delete failed.');
+            }
+            return;
+          }
           renderItemsView(main);
+        } catch (err) {
+          alert(`Delete failed: ${err.message}`);
         }
       });
     });
@@ -412,13 +423,14 @@ async function renderHistoryView(main) {
       <button class="secondary" id="history-delete-btn" disabled>Delete Selected</button>
     </div>
     <ul class="history-list">${menus.map(m => `
-      <li class="history-item" data-id="${m.id}" ${m.isBatch ? 'title="Bundled export across all sections — delete only, no combined detail view"' : ''}>
+      <li class="history-item" data-id="${m.id}" ${m.isBatch ? 'title="Bundled export across all sections — no combined detail view, but exportable and deletable as one"' : ''}>
         <span>
           <input type="checkbox" class="history-row-check" data-select="${m.id}" />
           &nbsp; <strong>${m.label}</strong> &nbsp; <span style="color:var(--neutral)">${m.start_date}</span>
         </span>
         <span class="chip daily">${m.tag}</span>
         <span class="chip daily">${m.status}</span>
+        <button class="icon-btn history-export-btn" data-export="${m.id}">Export</button>
       </li>
     `).join('')}</ul>
   `;
@@ -439,6 +451,32 @@ async function renderHistoryView(main) {
       if (cb.checked) selected.add(id); else selected.delete(id);
       selectAllEl.checked = selected.size === menus.length;
       updateDeleteBtn();
+    });
+  });
+
+  // Batch ("all_sections") entries have no combined detail view to export from, so this button
+  // is their only export path; single-section entries also get one here as a shortcut, on top
+  // of the "Export to Excel" button already inside their detail view (renderMenuResult).
+  listEl.querySelectorAll('.history-export-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation(); // don't also trigger the row's own click-to-view handler below
+      const entry = menus.find(m => m.id === btn.dataset.export);
+      if (!entry) return;
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Exporting…';
+      try {
+        const result = entry.isBatch
+          ? await window.api.exportAllSectionsToExcel({ menuIdsBySection: entry.menuIdsBySection })
+          : await window.api.exportMenuToExcel({ generatedMenuId: entry.menuIds[0] });
+        if (result.success) alert(`Exported to ${result.path}`);
+        else if (!result.cancelled) alert('Export failed.');
+      } catch (err) {
+        alert(`Export failed: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
     });
   });
 
@@ -902,6 +940,7 @@ async function renderRecipeListView(main) {
     </div>
     <div style="margin-bottom:14px;">
       <button class="secondary" id="export-selected-btn" disabled>Export Selected</button>
+      <button class="secondary" id="delete-selected-btn" disabled>Delete Selected</button>
     </div>
     <div id="recipes-content">Loading…</div>
   `;
@@ -911,6 +950,7 @@ async function renderRecipeListView(main) {
   const searchInput = document.getElementById('recipe-search');
   const content = document.getElementById('recipes-content');
   const exportBtn = document.getElementById('export-selected-btn');
+  const deleteSelectedBtn = document.getElementById('delete-selected-btn');
   const selected = new Set();
 
   if (recipes.length === 0) {
@@ -921,6 +961,8 @@ async function renderRecipeListView(main) {
   function updateExportBtn() {
     exportBtn.disabled = selected.size === 0;
     exportBtn.textContent = selected.size > 0 ? `Export Selected (${selected.size})` : 'Export Selected';
+    deleteSelectedBtn.disabled = selected.size === 0;
+    deleteSelectedBtn.textContent = selected.size > 0 ? `Delete Selected (${selected.size})` : 'Delete Selected';
   }
 
   function renderFiltered() {
@@ -1020,6 +1062,19 @@ async function renderRecipeListView(main) {
     else if (!result.cancelled) alert('Export failed.');
     exportBtn.textContent = originalLabel;
     updateExportBtn();
+  });
+
+  deleteSelectedBtn.addEventListener('click', async () => {
+    const count = selected.size;
+    if (!confirm(`Delete ${count} selected recipe${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    deleteSelectedBtn.disabled = true;
+    deleteSelectedBtn.textContent = 'Deleting…';
+    try {
+      for (const id of selected) await window.api.deleteRecipe(id);
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`);
+    }
+    renderRecipeListView(main);
   });
 
   searchInput.addEventListener('input', renderFiltered);
