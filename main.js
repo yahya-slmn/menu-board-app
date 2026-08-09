@@ -677,6 +677,10 @@ ipcMain.handle('list-generated-menus', async () => {
 });
 
 ipcMain.handle('get-generated-menu-detail', async (e, generatedMenuId) => {
+  const { data: menu, error: menuErr } = await supabase
+    .from('generated_menus').select('section_id').eq('id', generatedMenuId).single();
+  if (menuErr) throw supaFail('get-generated-menu-detail: load generated_menus', menuErr);
+
   const { data: days, error: daysErr } = await supabase
     .from('menu_days').select('*').eq('generated_menu_id', generatedMenuId).order('menu_date');
   if (daysErr) throw supaFail('get-generated-menu-detail: load menu_days', daysErr);
@@ -685,7 +689,7 @@ ipcMain.handle('get-generated-menu-detail', async (e, generatedMenuId) => {
   let dayItemRows = [];
   if (dayIds.length) {
     const { data, error } = await supabase
-      .from('menu_day_items').select('id, item_id, menu_day_id').in('menu_day_id', dayIds);
+      .from('menu_day_items').select('id, item_id, menu_day_id, slot_id').in('menu_day_id', dayIds);
     if (error) throw supaFail('get-generated-menu-detail: load menu_day_items', error);
     dayItemRows = data;
   }
@@ -699,11 +703,21 @@ ipcMain.handle('get-generated-menu-detail', async (e, generatedMenuId) => {
     itemById = new Map(items.map(i => [i.id, i]));
   }
 
+  // Category for display MUST come from the slot the item was actually placed into for this
+  // menu, not the item's own catalog category_id -- see the matching note in
+  // fetchGeneratedMenuExportData for why (forced cross-category picks like Staff Main Dish's
+  // shared KG-LP/MS-UP Lunch Main items would otherwise resolve to the wrong category code).
+  const { data: slotRows, error: slotErr } = await supabase
+    .from('menu_slots').select('id, category_id').eq('section_id', menu.section_id);
+  if (slotErr) throw supaFail('get-generated-menu-detail: load menu_slots', slotErr);
+  const slotCategoryById = new Map(slotRows.map(s => [s.id, s.category_id]));
+
   const itemsByDay = new Map();
   for (const row of dayItemRows) {
     const item = itemById.get(row.item_id);
     if (!item) continue;
-    const cat = getCategoryById(item.category_id);
+    const catId = slotCategoryById.get(row.slot_id) ?? item.category_id;
+    const cat = getCategoryById(catId);
     const enriched = {
       menu_day_item_id: row.id, item_id: row.item_id, name: item.name,
       category_code: cat?.code, category_name: cat?.name, _sort: cat?.sort_order ?? 0,
@@ -799,11 +813,23 @@ async function fetchGeneratedMenuExportData(generatedMenuId) {
     }
   }
 
+  // Category for display MUST come from the slot the item was actually placed into for this
+  // menu (menu_day_items.slot_id -> menu_slots.category_id), not the item's own catalog
+  // category_id -- an item forced in from a different category (e.g. Staff Main Dish
+  // including that day's KG-LP/MS-UP Lunch Main picks, which are tagged LUNCH_MAIN in the
+  // catalog) would otherwise resolve to a category code the section's sheet builder never
+  // matches, silently dropping it from the export.
+  const { data: slotRows, error: slotErr } = await supabase
+    .from('menu_slots').select('id, category_id').eq('section_id', section.id);
+  if (slotErr) throw supaFail('fetchGeneratedMenuExportData: load menu_slots', slotErr);
+  const slotCategoryById = new Map(slotRows.map(s => [s.id, s.category_id]));
+
   const dayItemsByDay = new Map();
   for (const row of dayItemRows) {
     const item = itemById.get(row.item_id);
     if (!item) continue;
-    const cat = getCategoryById(item.category_id);
+    const catId = slotCategoryById.get(row.slot_id) ?? item.category_id;
+    const cat = getCategoryById(catId);
     const enriched = {
       item_id: item.id, name: item.name, rc_code: item.rc_code, is_daily_repeating: item.is_daily_repeating,
       category_name: cat?.name, category_code: cat?.code, meal_period_name: cat?.meal_period_name,

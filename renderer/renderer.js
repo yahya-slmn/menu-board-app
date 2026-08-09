@@ -719,9 +719,18 @@ async function fillBuilderSuggestions(code) {
       byCategory[item.category].push(item);
     }
     for (const catCode in byCategory) {
+      // A suggestion can come from outside this slot's own eligible-items pool (e.g. Staff
+      // Main Dish forcing in that day's KG-LP/MS-UP Lunch Main picks, which are tagged
+      // LUNCH_MAIN, not STAFF_MAIN). Without an <option> for it, the <select> silently falls
+      // back to the blank placeholder even though the real selection is set underneath --
+      // so patch the slot's eligibleItems list with a synthetic entry for anything missing.
+      const slot = section.slots.find(s => s.categoryCode === catCode);
       byCategory[catCode].forEach((item, idx) => {
         const key = builderSelectionKey(day.date, catCode, idx);
         if (key in section.selections) section.selections[key] = String(item.id);
+        if (slot && !slot.eligibleItems.find(it => it.id === item.id)) {
+          slot.eligibleItems.push({ id: item.id, name: item.name });
+        }
       });
     }
   }
