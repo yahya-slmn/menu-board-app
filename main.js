@@ -215,6 +215,16 @@ ipcMain.handle('get-protein-types', () => {
   return getProteinTypes();
 });
 
+// Refresh button (top-right of the renderer) -- get-sections/get-categories/get-protein-types
+// above are plain synchronous reads of lib/referenceData.js's in-memory cache, populated once
+// at login and never invalidated on its own. This actually re-runs loadReferenceData() against
+// Supabase, then returns the fresh cache in one round trip so the renderer doesn't need three
+// separate follow-up calls.
+ipcMain.handle('refresh-reference-data', async () => {
+  await loadReferenceData();
+  return { sections: getSections(), categories: getCategories(), proteinTypes: getProteinTypes() };
+});
+
 // ---------------------------------------------------------------
 // IPC: item management (menu_items / item_portions -- Supabase)
 // ---------------------------------------------------------------

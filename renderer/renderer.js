@@ -11,6 +11,17 @@ const state = {
 
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
 
+// Categories where Protein Type is meaningful, confirmed against real item_portions/
+// protein_type_id usage (not just categories literally named "Main") -- LUNCH_MAIN and
+// STAFF_MAIN are the obvious ones; STAFF_BREAKFAST and STAFF_LUNCHBOX are structurally
+// required by lib/generator.js's SECTION_SLOTS composition rules (1 vegetarian among Staff's
+// 6 breakfast picks; 1 meat protein + 1 vegetarian for the lunchbox); STAFF_LUNCHBOX_SALAD
+// isn't generator-enforced but is 100% consistently tagged in the existing catalog.
+// CEO_LUNCH_MAIN was deliberately left out despite the "lunch main" name -- 0% real usage.
+const PROTEIN_ELIGIBLE_CATEGORIES = new Set([
+  'LUNCH_MAIN', 'STAFF_MAIN', 'STAFF_BREAKFAST', 'STAFF_LUNCHBOX', 'STAFF_LUNCHBOX_SALAD',
+]);
+
 async function init() {
   state.sections = await window.api.getSections();
   state.categories = await window.api.getCategories();
@@ -19,7 +30,74 @@ async function init() {
 
   renderSectionNav();
   wireNav();
+  wireRefreshButton();
   renderView();
+}
+
+// Small transient notification, used when Refresh can't safely force a re-render (see
+// isSafeToForceRerender below) -- lets the chef know the cache updated without implying
+// the current screen changed.
+function showToast(message) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = message;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('visible'));
+  setTimeout(() => {
+    el.classList.remove('visible');
+    setTimeout(() => el.remove(), 250);
+  }, 2500);
+}
+
+// Whether it's safe to blow away #main's current content and re-render the active view.
+// Every view in SAFE_VIEWS re-fetches its own primary data live on every render already (see
+// renderItemsView/renderHistoryView/renderRecipeListView/renderIngredientsView/
+// renderExportAllView/renderGenerateView), so replacing them just shows the same screen with
+// fresher data underneath. Build Menu (state.builder.sections[...].selections) and an
+// in-progress Recipe form (state.recipes.ingredientRows) hold real unsaved work that a
+// re-render would silently discard, and an open Add/Edit modal (Item/Ingredient, appended to
+// document.body) was populated from data fetched at modal-open time -- none of these should
+// ever be touched by a background refresh.
+const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'ingredients', 'exportAll', 'generate'];
+function isSafeToForceRerender() {
+  if (document.querySelector('.modal-overlay')) return false;
+  if (state.currentView === 'build') return false;
+  if (state.currentView === 'recipes' && state.recipes.view === 'form') return false;
+  return SAFE_REFRESH_VIEWS.includes(state.currentView);
+}
+
+function wireRefreshButton() {
+  const btn = document.getElementById('refresh-btn');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.classList.add('spinning');
+    const label = btn.querySelector('.refresh-label');
+    const originalText = label.textContent;
+    label.textContent = 'Refreshing…';
+    try {
+      const fresh = await window.api.refreshReferenceData();
+      state.sections = fresh.sections;
+      state.categories = fresh.categories;
+      state.proteinTypes = fresh.proteinTypes;
+
+      if (isSafeToForceRerender()) {
+        renderSectionNav();
+        renderView();
+        showToast('Refreshed.');
+      } else {
+        renderSectionNav();
+        showToast('Reference data updated.');
+      }
+    } catch (err) {
+      showToast(`Refresh failed: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('spinning');
+      label.textContent = originalText;
+    }
+  });
 }
 
 function renderSectionNav() {
@@ -212,12 +290,13 @@ async function openItemModal(existingItem) {
       </div>
       <div class="field">
         <label>Category</label>
-        <select id="m-category">
-          ${sectionCategories.map(c => `<option value="${c.code}" ${isEdit && existingItem.category_code === c.code ? 'selected' : ''}>${c.name}</option>`).join('')}
-        </select>
+        <select id="m-category"></select>
+        <div class="field-warning" id="m-category-warning" style="display:none;">
+          This item's saved category doesn't belong to the selected meal period — pick a category to continue.
+        </div>
       </div>
       <div class="field">
-        <label>Protein type (lunch mains only)</label>
+        <label>Protein type (only for main-dish categories)</label>
         <select id="m-protein">
           <option value="">— none —</option>
           ${state.proteinTypes.map(p => `<option value="${p.code}" ${isEdit && existingItem.protein_code === p.code ? 'selected' : ''}>${p.name}</option>`).join('')}
@@ -246,19 +325,73 @@ async function openItemModal(existingItem) {
   const nameInput = overlay.querySelector('#m-name');
   const periodSelect = overlay.querySelector('#m-period');
   const categorySelect = overlay.querySelector('#m-category');
+  const categoryWarning = overlay.querySelector('#m-category-warning');
   const proteinSelect = overlay.querySelector('#m-protein');
   const dailyCheckbox = overlay.querySelector('#m-daily');
+  const saveBtn = overlay.querySelector('#m-save');
 
   if (isEdit) {
     const cat = state.categories.find(c => c.code === existingItem.category_code);
     if (cat) periodSelect.value = cat.meal_period_code;
   }
 
+  // Rule 1-3: Category only ever lists categories tagged with the currently-selected Meal
+  // Period (categories already carry meal_period_code, enriched once in lib/referenceData.js).
+  // desiredValue lets a caller ask "try to keep/select this specific category" -- used both for
+  // the initial edit-open (the item's own category, always valid since Meal Period itself was
+  // just derived FROM that category above) and for a manual Meal Period change afterward (the
+  // category picked under the OLD period, which may no longer belong to the new one). When it
+  // doesn't, rather than silently falling back to whatever's first in the new list (which would
+  // silently reassign the item's category out from under the chef), show an inline warning and
+  // require an explicit re-pick before Save is allowed again.
+  function refreshCategoryOptions(desiredValue) {
+    const period = periodSelect.value;
+    const filtered = sectionCategories.filter(c => c.meal_period_code === period);
+    const target = desiredValue !== undefined ? desiredValue : categorySelect.value;
+    const stillValid = filtered.some(c => c.code === target);
+
+    if (target && !stillValid) {
+      categorySelect.innerHTML = [
+        `<option value="">— choose a category —</option>`,
+        ...filtered.map(c => `<option value="${c.code}">${c.name}</option>`),
+      ].join('');
+      categoryWarning.style.display = 'block';
+    } else {
+      categorySelect.innerHTML = filtered
+        .map(c => `<option value="${c.code}" ${c.code === target ? 'selected' : ''}>${c.name}</option>`).join('');
+      categoryWarning.style.display = 'none';
+    }
+    saveBtn.disabled = !categorySelect.value;
+    refreshProteinAvailability();
+  }
+
+  // Rule 4: Protein Type only selectable for main-dish-type categories -- confirmed against
+  // real item_portions/protein_type_id usage data, not just categories literally named "Main".
+  function refreshProteinAvailability() {
+    const eligible = PROTEIN_ELIGIBLE_CATEGORIES.has(categorySelect.value);
+    proteinSelect.disabled = !eligible;
+    if (!eligible) proteinSelect.value = '';
+  }
+
+  periodSelect.addEventListener('change', () => refreshCategoryOptions());
+  categorySelect.addEventListener('change', () => {
+    categoryWarning.style.display = 'none';
+    saveBtn.disabled = !categorySelect.value;
+    refreshProteinAvailability();
+  });
+
+  refreshCategoryOptions(isEdit ? existingItem.category_code : undefined);
+
   nameInput.addEventListener('blur', async () => {
     if (isEdit || !nameInput.value.trim()) return;
     const suggestion = await window.api.suggestClassification({ name: nameInput.value, mealPeriod: periodSelect.value });
-    if (suggestion.category) categorySelect.value = suggestion.category;
-    if (suggestion.protein) proteinSelect.value = suggestion.protein;
+    if (suggestion.category) {
+      categorySelect.value = suggestion.category;
+      categoryWarning.style.display = 'none';
+      saveBtn.disabled = !categorySelect.value;
+      refreshProteinAvailability();
+    }
+    if (suggestion.protein && !proteinSelect.disabled) proteinSelect.value = suggestion.protein;
     dailyCheckbox.checked = suggestion.isDailyRepeating;
   });
 

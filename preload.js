@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   getCategories: () => ipcRenderer.invoke('get-categories'),
   getCategoriesForSection: (sectionCode) => ipcRenderer.invoke('get-categories-for-section', sectionCode),
   getProteinTypes: () => ipcRenderer.invoke('get-protein-types'),
+  refreshReferenceData: () => ipcRenderer.invoke('refresh-reference-data'),
 
   getItems: (sectionCode) => ipcRenderer.invoke('get-items', sectionCode),
   getItemPortions: (itemId) => ipcRenderer.invoke('get-item-portions', itemId),
