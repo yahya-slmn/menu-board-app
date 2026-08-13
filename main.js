@@ -9,6 +9,7 @@ const {
   getCategories, getCategoryByCode, getCategoryById,
   getProteinTypes, getProteinByCode, getProteinById,
   getAgeGroups, getAgeGroupsForSection, getAgeGroupByCode, getAgeGroupById,
+  getCategoryPortionDefault,
 } = require('./lib/referenceData');
 const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, schoolDaysFrom } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
@@ -506,6 +507,38 @@ async function nextRecipeCode() {
   return `TTY-${String(max + 1).padStart(5, '0')}`;
 }
 
+// Recipe photos live in a private Supabase Storage bucket (not a DB table) -- photo_path on
+// recipes stores just the object path (a fresh UUID per upload, decoupled from the recipe's
+// own code/id so a brand-new recipe's photo can be uploaded before the recipe row itself
+// exists yet). Every access goes through the app's authenticated session, matching the rest
+// of the app's tables -- there's no public URL to leak.
+const RECIPE_PHOTOS_BUCKET = 'recipe-photos';
+
+async function uploadRecipePhoto(base64, ext) {
+  const path = `${crypto.randomUUID()}.${ext}`;
+  const buffer = Buffer.from(base64, 'base64');
+  const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+  const { error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).upload(path, buffer, { contentType });
+  if (error) throw supaFail('uploadRecipePhoto', error);
+  return path;
+}
+
+async function deleteRecipePhoto(path) {
+  if (!path) return;
+  const { error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).remove([path]);
+  if (error) console.error('[supabase] deleteRecipePhoto failed (non-fatal):', error.message);
+}
+
+ipcMain.handle('get-recipe-photo', async (e, photoPath) => {
+  if (!photoPath) return null;
+  const { data, error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).download(photoPath);
+  if (error) throw supaFail('get-recipe-photo', error);
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const ext = photoPath.split('.').pop().toLowerCase();
+  const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+  return `data:${mime};base64,${buffer.toString('base64')}`;
+});
+
 ipcMain.handle('save-recipe', async (e, payload) => {
   let recipeId = payload.id;
   let code;
@@ -523,13 +556,28 @@ ipcMain.handle('save-recipe', async (e, payload) => {
     checked_by: payload.checkedBy || null,
   };
 
+  // photo_path is only ever touched when the chef actually picked a new file or hit "Remove
+  // Photo" -- omitted from `fields` entirely otherwise, so an unrelated edit (e.g. fixing a
+  // typo in Comment) never disturbs an already-uploaded photo.
+  if (payload.photoBase64) {
+    fields.photo_path = await uploadRecipePhoto(payload.photoBase64, payload.photoExt);
+  } else if (payload.removePhoto) {
+    fields.photo_path = null;
+  }
+
   if (recipeId) {
-    const { data: existing, error: getErr } = await supabase.from('recipes').select('code').eq('id', recipeId).single();
+    const { data: existing, error: getErr } = await supabase.from('recipes').select('code, photo_path').eq('id', recipeId).single();
     if (getErr) throw supaFail('save-recipe: load existing code', getErr);
     code = existing.code;
 
     const { error: updErr } = await supabase.from('recipes').update(fields).eq('id', recipeId);
     if (updErr) throw supaFail('save-recipe: update recipes', updErr);
+
+    // Clean up the old Storage object once the new one is safely committed -- replacing or
+    // removing a photo shouldn't leave the previous upload orphaned in the bucket forever.
+    if ((payload.photoBase64 || payload.removePhoto) && existing.photo_path) {
+      await deleteRecipePhoto(existing.photo_path);
+    }
 
     const { error: delErr } = await supabase.from('recipe_ingredients').delete().eq('recipe_id', recipeId);
     if (delErr) throw supaFail('save-recipe: clear old recipe_ingredients', delErr);
@@ -561,9 +609,11 @@ ipcMain.handle('save-recipe', async (e, payload) => {
 });
 
 ipcMain.handle('delete-recipe', async (e, id) => {
+  const { data: existing } = await supabase.from('recipes').select('photo_path').eq('id', id).single();
   await supabase.from('recipe_ingredients').delete().eq('recipe_id', id);
   const { error } = await supabase.from('recipes').delete().eq('id', id);
   if (error) throw supaFail('delete-recipe', error);
+  if (existing?.photo_path) await deleteRecipePhoto(existing.photo_path);
   return { success: true };
 });
 
@@ -589,6 +639,15 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath }) => {
   await exportRecipes(async (recipeId) => {
     const full = await fetchRecipeWithIngredients(recipeId);
     const { ingredients, ...recipe } = full;
+    // lib/export.js stays DB/Storage-agnostic (per its own comment on exportRecipes) -- the
+    // actual image bytes are fetched here and attached onto the plain recipe object it expects.
+    // No photo_path just means buildRecipeSheet leaves today's placeholder box untouched.
+    if (recipe.photo_path) {
+      const { data, error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
+      if (error) throw supaFail('export-recipes: download photo', error);
+      recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
+      recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+    }
     return { recipe, ingredients };
   }, recipeIds, savePath);
   return { success: true, path: savePath };
@@ -778,6 +837,24 @@ ipcMain.handle('get-eligible-swap-items', async (e, { sectionCode, categoryCode 
   return items.map(it => ({ id: it.id, name: it.name })).sort((a, b) => a.name.localeCompare(b.name));
 });
 
+// PostgREST caps a single response at 1000 rows by default; this pages through .range() until
+// a page comes back short, mirroring lib/generator.js's fetchAllRows (not shared/exported from
+// there, since these two modules otherwise have no runtime dependency on each other).
+// buildQuery() must return a *fresh* query builder each call.
+async function fetchAllRowsMain(buildQuery) {
+  const pageSize = 1000;
+  let from = 0;
+  const all = [];
+  for (;;) {
+    const { data, error } = await buildQuery().range(from, from + pageSize - 1);
+    if (error) throw error;
+    all.push(...data);
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
 // ---------------------------------------------------------------
 // IPC: export to Excel
 // ---------------------------------------------------------------
@@ -835,11 +912,13 @@ async function fetchGeneratedMenuExportData(generatedMenuId) {
   const slotCategoryById = new Map(slotRows.map(s => [s.id, s.category_id]));
 
   const dayItemsByDay = new Map();
+  const displayCategoryByItem = new Map(); // item_id -> category_id actually used for this menu
   for (const row of dayItemRows) {
     const item = itemById.get(row.item_id);
     if (!item) continue;
     const catId = slotCategoryById.get(row.slot_id) ?? item.category_id;
     const cat = getCategoryById(catId);
+    displayCategoryByItem.set(item.id, catId);
     const enriched = {
       item_id: item.id, name: item.name, rc_code: item.rc_code, is_daily_repeating: item.is_daily_repeating,
       category_name: cat?.name, category_code: cat?.code, meal_period_name: cat?.meal_period_name,
@@ -850,7 +929,20 @@ async function fetchGeneratedMenuExportData(generatedMenuId) {
   }
 
   const daysWithItems = days.map(d => ({ ...d, items: dayItemsByDay.get(d.id) || [] }));
-  const getPortion = (itemId, ageGroupId) => portionsByItem.get(itemId)?.get(ageGroupId) || null;
+  // item_portions.quantity is now an optional per-item override (most rows are still 0/unset
+  // from before this category-default redesign); the category+section default from
+  // lib/referenceData.js is the primary source, keyed off the same slot-resolved category
+  // used for display above -- not the item's raw catalog category_id -- so a forced
+  // cross-category pick (e.g. Staff Main Dish's shared Lunch Main items) still gets Staff
+  // Main's portion size, not Lunch Main's.
+  const getPortion = (itemId, ageGroupId) => {
+    const override = portionsByItem.get(itemId)?.get(ageGroupId);
+    if (override && override.quantity) return override;
+    const catId = displayCategoryByItem.get(itemId);
+    const sectionId = getAgeGroupById(ageGroupId)?.section_id;
+    if (catId == null || sectionId == null) return override || null;
+    return getCategoryPortionDefault(catId, sectionId) || override || null;
+  };
 
   return { menu, section, ageGroups, days: daysWithItems, getPortion };
 }
@@ -862,6 +954,7 @@ async function fetchGeneratedMenuExportData(generatedMenuId) {
 async function fetchListsSheetData(sectionCodes) {
   const bySection = {};
   const allItemIds = new Set();
+  const categoryByItem = new Map(); // item_id -> category_id, from the pool grouping below
 
   for (const sectionCode of sectionCodes) {
     const sectionId = getSectionByCode(sectionCode).id;
@@ -891,9 +984,53 @@ async function fetchListsSheetData(sectionCodes) {
       // meta (name/sort_order/meal period) is only needed by the Blank Menu template's
       // buildSlotSpecsFromData, but it's cheap cached reference data, so it's always attached.
       const meta = getCategoryByCode(categoryCode);
-      const items = pool.filter(it => it.category_id === meta.id).sort((a, b) => a.name.localeCompare(b.name));
+      let items = pool.filter(it => it.category_id === meta.id);
+
+      // Staff's Main Dish slot force-includes that day's shared KG-LP/MS-UP/Daycare Lunch
+      // Main picks verbatim (see lib/generator.js's STAFF_MAIN_SOURCE_SECTIONS/
+      // STAFF_MAIN_DAYCARE_SOURCE_SECTION) -- those items are catalogued as LUNCH_MAIN, not
+      // STAFF_MAIN, so the plain category_id filter above never finds them. Without this,
+      // they'd never enter STAFF's STAFF_MAIN bucket, so List_STAFF_STAFF_MAIN/
+      // Lookup_STAFF_STAFF_MAIN wouldn't contain them either -- the exported sheet's live
+      // INDEX/MATCH lookup formula would return blank via IFERROR no matter what
+      // item_portions data exists, since MATCH can't find a name that was never in the list.
+      if (sectionCode === 'STAFF' && categoryCode === 'STAFF_MAIN') {
+        const lunchMainCat = getCategoryByCode('LUNCH_MAIN');
+        // Filter to the LUNCH_MAIN catalog FIRST (bounded, one category) rather than starting
+        // from item_portions filtered only by age_group_id -- that pulls in every portion row
+        // across KG-LP/MS-UP/Daycare's ENTIRE catalogs (LUNCH_MAIN alone is 700+ rows just for
+        // MS-UP), silently blowing past PostgREST's 1000-row cap with no .range() pagination,
+        // which is exactly what caused "Korean Fried Chicken" and "Chicken Emansei..." to drop
+        // out of an earlier version of this fix despite meeting every eligibility criterion.
+        const lunchMainItems = await fetchAllRowsMain(() => supabase
+          .from('menu_items').select('id, name, rc_code, is_daily_repeating, category_id')
+          .eq('is_active', 1).eq('category_id', lunchMainCat.id));
+
+        if (lunchMainItems.length) {
+          const sourceAgeGroupIds = ['KG_LP', 'MS_UP', 'DAYCARE']
+            .flatMap(code => getAgeGroupsForSection(getSectionByCode(code).id)).map(a => a.id);
+          const chunkSize = 300;
+          const eligibleIds = new Set();
+          const lunchMainItemIds = lunchMainItems.map(i => i.id);
+          for (let i = 0; i < lunchMainItemIds.length; i += chunkSize) {
+            const chunk = lunchMainItemIds.slice(i, i + chunkSize);
+            const rows = await fetchAllRowsMain(() => supabase
+              .from('item_portions').select('item_id').in('item_id', chunk).in('age_group_id', sourceAgeGroupIds));
+            rows.forEach(r => eligibleIds.add(r.item_id));
+          }
+          const existingIds = new Set(items.map(i => i.id));
+          items = items.concat(lunchMainItems.filter(i => eligibleIds.has(i.id) && !existingIds.has(i.id)));
+        }
+      }
+
+      items = items.sort((a, b) => a.name.localeCompare(b.name));
       categories[categoryCode] = { items, meta };
-      items.forEach(it => allItemIds.add(it.id));
+      // categoryByItem is keyed by section too (not just item id): the whole point of the
+      // block above is that the same item can legitimately sit under a DIFFERENT category
+      // bucket for Staff (STAFF_MAIN) than it does for its home section (LUNCH_MAIN for
+      // KG-LP/MS-UP/Daycare) -- meta.id (this bucket's category), not it.category_id (the
+      // item's own catalog category), is what the quantity default must key off here.
+      items.forEach(it => { allItemIds.add(it.id); categoryByItem.set(`${sectionId}:${it.id}`, meta.id); });
     }
     bySection[sectionCode] = { ageGroups, categories };
   }
@@ -909,7 +1046,16 @@ async function fetchListsSheetData(sectionCodes) {
     }
   }
 
-  const getPortion = (itemId, ageGroupId) => portionsByItem.get(itemId)?.get(ageGroupId) || null;
+  // Same override-then-category-default logic as fetchGeneratedMenuExportData's getPortion --
+  // see the comment there for why quantity is now primarily a category+section lookup.
+  const getPortion = (itemId, ageGroupId) => {
+    const override = portionsByItem.get(itemId)?.get(ageGroupId);
+    if (override && override.quantity) return override;
+    const sectionId = getAgeGroupById(ageGroupId)?.section_id;
+    const catId = sectionId != null ? categoryByItem.get(`${sectionId}:${itemId}`) : undefined;
+    if (catId == null || sectionId == null) return override || null;
+    return getCategoryPortionDefault(catId, sectionId) || override || null;
+  };
   return { bySection, getPortion };
 }
 

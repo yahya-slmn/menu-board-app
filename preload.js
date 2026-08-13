@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('api', {
   getRecipe: (id) => ipcRenderer.invoke('get-recipe', id),
   saveRecipe: (payload) => ipcRenderer.invoke('save-recipe', payload),
   deleteRecipe: (id) => ipcRenderer.invoke('delete-recipe', id),
+  getRecipePhoto: (photoPath) => ipcRenderer.invoke('get-recipe-photo', photoPath),
   exportRecipes: (payload) => ipcRenderer.invoke('export-recipes', payload),
   exportScaledRecipe: (payload) => ipcRenderer.invoke('export-scaled-recipe', payload),
 

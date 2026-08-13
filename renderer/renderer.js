@@ -6,7 +6,7 @@ const state = {
   proteinTypes: [],
   currentGeneratedMenuId: null,
   builder: { label: '', startDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
-  recipes: { view: 'list', formId: null, ingredientRows: [] },
+  recipes: { view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false },
 };
 
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
@@ -1033,6 +1033,8 @@ function openNewRecipeForm() {
   state.recipes.view = 'form';
   state.recipes.formId = null;
   state.recipes.ingredientRows = [];
+  state.recipes.pendingPhoto = null;
+  state.recipes.removePhoto = false;
   renderView();
 }
 
@@ -1040,6 +1042,8 @@ function openEditRecipeForm(id) {
   state.recipes.view = 'form';
   state.recipes.formId = id;
   state.recipes.ingredientRows = [];
+  state.recipes.pendingPhoto = null;
+  state.recipes.removePhoto = false;
   renderView();
 }
 
@@ -1232,8 +1236,12 @@ function makeEmptyIngredientRow() {
 async function renderRecipeFormView(main) {
   const editing = !!state.recipes.formId;
   let recipe = null;
+  let existingPhotoDataUrl = null;
   if (editing) {
     recipe = await window.api.getRecipe(state.recipes.formId);
+    if (recipe.photo_path) {
+      existingPhotoDataUrl = await window.api.getRecipePhoto(recipe.photo_path);
+    }
     if (state.recipes.ingredientRows.length === 0) {
       state.recipes.ingredientRows = recipe.ingredients.map(ri => ({
         localId: ++_recipeRowLocalIdCounter,
@@ -1247,6 +1255,10 @@ async function renderRecipeFormView(main) {
   } else if (state.recipes.ingredientRows.length === 0) {
     state.recipes.ingredientRows = [makeEmptyIngredientRow()];
   }
+
+  const currentPhotoSrc = state.recipes.pendingPhoto
+    ? state.recipes.pendingPhoto.dataUrl
+    : (existingPhotoDataUrl && !state.recipes.removePhoto ? existingPhotoDataUrl : null);
 
   main.innerHTML = `
     <div class="topbar">
@@ -1285,6 +1297,14 @@ async function renderRecipeFormView(main) {
       <label>Comment</label>
       <textarea id="rf-comment" rows="3">${recipe?.comment || ''}</textarea>
     </div>
+    <div class="field" style="margin-bottom:16px; max-width:320px;">
+      <label>Upload Photo</label>
+      <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" />
+      <div id="rf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
+        <img id="rf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <button type="button" class="secondary" id="rf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
+      </div>
+    </div>
     <div class="field" style="margin-bottom:20px; max-width:320px;">
       <label>Checked By</label>
       <input id="rf-checked-by" value="${recipe?.checked_by || ''}" />
@@ -1294,10 +1314,52 @@ async function renderRecipeFormView(main) {
     <span id="rf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
   `;
 
+  function updatePhotoPreview() {
+    const src = state.recipes.pendingPhoto
+      ? state.recipes.pendingPhoto.dataUrl
+      : (existingPhotoDataUrl && !state.recipes.removePhoto ? existingPhotoDataUrl : null);
+    document.getElementById('rf-photo-preview-wrap').style.display = src ? '' : 'none';
+    document.getElementById('rf-photo-preview').src = src || '';
+  }
+
+  document.getElementById('rf-photo-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png'].includes(file.type)) {
+      alert('Please choose a JPG or PNG image.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Photo must be 5MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(',')[1];
+      const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+      state.recipes.pendingPhoto = { dataUrl, base64, ext };
+      state.recipes.removePhoto = false;
+      updatePhotoPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById('rf-photo-remove-btn').addEventListener('click', () => {
+    state.recipes.pendingPhoto = null;
+    state.recipes.removePhoto = true;
+    document.getElementById('rf-photo-input').value = '';
+    updatePhotoPreview();
+  });
+
   document.getElementById('rf-back-btn').addEventListener('click', () => {
     state.recipes.view = 'list';
     state.recipes.formId = null;
     state.recipes.ingredientRows = [];
+    state.recipes.pendingPhoto = null;
+    state.recipes.removePhoto = false;
     renderView();
   });
   document.getElementById('rf-add-row-btn').addEventListener('click', () => {
@@ -1453,10 +1515,18 @@ async function saveRecipeForm() {
       method: r.method || null,
     })),
   };
+  if (state.recipes.pendingPhoto) {
+    payload.photoBase64 = state.recipes.pendingPhoto.base64;
+    payload.photoExt = state.recipes.pendingPhoto.ext;
+  } else if (state.recipes.removePhoto) {
+    payload.removePhoto = true;
+  }
 
   try {
     const result = await window.api.saveRecipe(payload);
     state.recipes.formId = result.id;
+    state.recipes.pendingPhoto = null;
+    state.recipes.removePhoto = false;
     renderView();
   } catch (err) {
     statusEl.textContent = '';
