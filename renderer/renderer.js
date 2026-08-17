@@ -1393,14 +1393,7 @@ async function renderRecipeFormView(main) {
     updatePhotoPreview();
   });
 
-  document.getElementById('rf-back-btn').addEventListener('click', () => {
-    state.recipes.view = 'list';
-    state.recipes.formId = null;
-    state.recipes.ingredientRows = [];
-    state.recipes.pendingPhoto = null;
-    state.recipes.removePhoto = false;
-    renderView();
-  });
+  document.getElementById('rf-back-btn').addEventListener('click', goBackToRecipeList);
   document.getElementById('rf-add-row-btn').addEventListener('click', () => {
     state.recipes.ingredientRows.push(makeEmptyIngredientRow());
     renderIngredientRows();
@@ -1550,6 +1543,16 @@ function selectIngredientForRow(ingredient, inputEl, unitInput, row, listEl) {
   listEl.innerHTML = '';
 }
 
+// Shared by "Back to Recipe Book" and a successful save -- both exit the form the same way.
+function goBackToRecipeList() {
+  state.recipes.view = 'list';
+  state.recipes.formId = null;
+  state.recipes.ingredientRows = [];
+  state.recipes.pendingPhoto = null;
+  state.recipes.removePhoto = false;
+  renderView();
+}
+
 async function saveRecipeForm() {
   const name = document.getElementById('rf-name').value.trim();
   if (!name) return alert('Please enter a recipe name.');
@@ -1592,11 +1595,8 @@ async function saveRecipeForm() {
   }
 
   try {
-    const result = await window.api.saveRecipe(payload);
-    state.recipes.formId = result.id;
-    state.recipes.pendingPhoto = null;
-    state.recipes.removePhoto = false;
-    renderView();
+    await window.api.saveRecipe(payload);
+    goBackToRecipeList();
   } catch (err) {
     statusEl.textContent = '';
     alert(`Save failed: ${err.message}`);
