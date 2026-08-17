@@ -438,7 +438,7 @@ ipcMain.handle('delete-ingredient', async (e, id) => {
 ipcMain.handle('list-recipes', async () => {
   const { data, error } = await supabase
     .from('recipes')
-    .select('id, code, name, category, prepared_by, date_created')
+    .select('id, code, name, category, prepared_by, date_created, quantity_produced')
     .order('id', { ascending: false });
   if (error) throw supaFail('list-recipes', error);
   return data;
@@ -566,12 +566,22 @@ ipcMain.handle('save-recipe', async (e, payload) => {
   }
 
   if (recipeId) {
-    const { data: existing, error: getErr } = await supabase.from('recipes').select('code, photo_path').eq('id', recipeId).single();
+    // maybeSingle(), not single() -- the chef's form can sit open for a while, and someone
+    // else (e.g. the owner cleaning up the Recipe Book) can delete this exact row out from
+    // under them in the meantime. That's a real "someone else changed this" case, not a
+    // PostgREST/JSON-coercion error, so it gets its own message instead of a raw PGRST116.
+    const RECIPE_GONE_MESSAGE = 'This recipe was deleted or changed elsewhere. Please refresh the Recipe Book and try again.';
+    const { data: existing, error: getErr } = await supabase.from('recipes').select('code, photo_path').eq('id', recipeId).maybeSingle();
     if (getErr) throw supaFail('save-recipe: load existing code', getErr);
+    if (!existing) throw new Error(RECIPE_GONE_MESSAGE);
     code = existing.code;
 
-    const { error: updErr } = await supabase.from('recipes').update(fields).eq('id', recipeId);
+    // .select('id') so a delete landing in the narrow window between the check above and
+    // this update is still caught -- Postgrest reports success with zero rows affected rather
+    // than an error, which would otherwise look like a successful save that silently did nothing.
+    const { data: updated, error: updErr } = await supabase.from('recipes').update(fields).eq('id', recipeId).select('id');
     if (updErr) throw supaFail('save-recipe: update recipes', updErr);
+    if (!updated || updated.length === 0) throw new Error(RECIPE_GONE_MESSAGE);
 
     // Clean up the old Storage object once the new one is safely committed -- replacing or
     // removing a photo shouldn't leave the previous upload orphaned in the bucket forever.

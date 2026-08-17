@@ -1605,10 +1605,13 @@ function renderCalculatorView(main) {
     </div>
 
     <div class="generate-controls">
-      <div class="field autocomplete-wrap" style="min-width:260px;">
+      <div class="field" style="min-width:260px;">
         <label>Recipe Name</label>
-        <input id="calc-recipe-name" placeholder="Start typing a recipe name…" autocomplete="off" />
-        <div class="autocomplete-list" id="calc-recipe-list" hidden></div>
+        <div class="autocomplete-wrap">
+          <input id="calc-recipe-name" placeholder="Start typing or browse recipes…" autocomplete="off" style="padding-right:28px; width:100%;" />
+          <button type="button" class="autocomplete-browse-btn" id="calc-recipe-browse-btn" aria-label="Browse recipes" title="Browse all recipes">▾</button>
+          <div class="autocomplete-list" id="calc-recipe-list" hidden></div>
+        </div>
       </div>
       <div class="field" style="max-width:200px;">
         <label>Quantity Produced (original)</label>
@@ -1626,12 +1629,18 @@ function renderCalculatorView(main) {
 
   const nameInput = document.getElementById('calc-recipe-name');
   const listEl = document.getElementById('calc-recipe-list');
+  const browseBtn = document.getElementById('calc-recipe-browse-btn');
   const qtyOriginalInput = document.getElementById('calc-qty-original');
   const multiplierInput = document.getElementById('calc-multiplier');
   const calculateBtn = document.getElementById('calc-calculate-btn');
   const resultEl = document.getElementById('calc-result');
 
   let selectedRecipe = null;
+  // Tracks whether the currently-open list is the "browse all" list specifically, so a second
+  // click on the browse button closes it instead of just re-opening the same full list -- but
+  // starting to type (which hands the list over to wireRecipeAutocomplete's own search results)
+  // clears it, so browse always shows the full list fresh rather than silently closing search results.
+  let browseListShowing = false;
 
   function clearSelection() {
     selectedRecipe = null;
@@ -1640,15 +1649,39 @@ function renderCalculatorView(main) {
     resultEl.innerHTML = '';
   }
 
-  nameInput.addEventListener('input', () => {
-    clearSelection();
-  });
-
-  wireRecipeAutocomplete(nameInput, listEl, (recipe) => {
+  function onRecipePicked(recipe) {
     selectedRecipe = recipe;
     nameInput.value = recipe.name;
     qtyOriginalInput.value = recipe.quantity_produced || '';
     calculateBtn.disabled = false;
+    browseListShowing = false;
+  }
+
+  nameInput.addEventListener('input', () => {
+    clearSelection();
+    browseListShowing = false;
+  });
+
+  wireRecipeAutocomplete(nameInput, listEl, onRecipePicked);
+
+  // Browsability: lets the chef see every recipe without already knowing part of the name to
+  // type. Reuses the exact same render function and onRecipePicked callback as typed search, so
+  // picking from either path is identical by construction. mousedown+preventDefault (not click)
+  // for the same reason list items use it -- it needs to fire before the input's blur handler
+  // hides the list.
+  browseBtn.addEventListener('mousedown', async (e) => {
+    e.preventDefault();
+    if (browseListShowing && !listEl.hidden) {
+      listEl.hidden = true;
+      listEl.innerHTML = '';
+      browseListShowing = false;
+      return;
+    }
+    const all = await window.api.listRecipes();
+    const sorted = [...all].sort((a, b) => a.name.localeCompare(b.name));
+    renderRecipeAutocompleteList(listEl, sorted, nameInput, onRecipePicked, 'No recipes yet');
+    browseListShowing = true;
+    nameInput.focus();
   });
 
   calculateBtn.addEventListener('click', async () => {
@@ -1684,9 +1717,9 @@ function wireRecipeAutocomplete(inputEl, listEl, onPick) {
   });
 }
 
-function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick) {
+function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick, emptyMessage) {
   if (matches.length === 0) {
-    listEl.innerHTML = `<div class="autocomplete-item">No matching recipes</div>`;
+    listEl.innerHTML = `<div class="autocomplete-item">${emptyMessage || 'No matching recipes'}</div>`;
     listEl.hidden = false;
     return;
   }

@@ -350,6 +350,15 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 .autocomplete-item .autocomplete-meta { color: var(--neutral); font-size: 10.5px; white-space: nowrap; }
 .autocomplete-item.autocomplete-add { color: var(--sage-dark); font-weight: 600; }
 
+/* Browse-all toggle for the Recipe Calculator's Recipe Name field -- sits inside the input's
+   right edge like a combobox caret, opens the same .autocomplete-list the typed search uses. */
+.autocomplete-browse-btn {
+  position: absolute; top: 50%; right: 3px; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; color: var(--neutral);
+  font-size: 11px; line-height: 1; padding: 5px 6px; border-radius: 4px;
+}
+.autocomplete-browse-btn:hover { color: var(--sage-dark); background: var(--paper-dim); }
+
 /* ---------------- Modal ---------------- */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(30,42,36,0.45);
