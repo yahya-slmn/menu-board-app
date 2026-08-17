@@ -151,6 +151,17 @@ function currentSectionName() {
 // ITEM CATALOG VIEW
 // ============================================================
 async function renderItemsView(main) {
+  const [items, proteinTypes] = await Promise.all([
+    window.api.getItems(state.currentSection),
+    window.api.getProteinTypes(),
+  ]);
+
+  // Category options: distinct category_name values actually present in this section's items,
+  // in the order they already appear (get-items pre-sorts by meal-period/category order) --
+  // guarantees the dropdown exactly matches what's grouped in the table below, with no category
+  // ever offered that would filter down to zero results.
+  const categoryNames = [...new Set(items.map(it => it.category_name))];
+
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Item Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
@@ -158,13 +169,22 @@ async function renderItemsView(main) {
     </div>
     <div class="search-bar">
       <input id="item-search" type="search" placeholder="Search items by name…" />
+      <select id="item-category-filter">
+        <option value="">All Categories</option>
+        ${categoryNames.map(c => `<option value="${c}">${c}</option>`).join('')}
+      </select>
+      <select id="item-protein-filter" hidden>
+        <option value="">All Proteins</option>
+        ${proteinTypes.map(p => `<option value="${p.code}">${p.name}</option>`).join('')}
+      </select>
     </div>
     <div id="items-content">Loading…</div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
 
-  const items = await window.api.getItems(state.currentSection);
   const searchInput = document.getElementById('item-search');
+  const categoryFilter = document.getElementById('item-category-filter');
+  const proteinFilter = document.getElementById('item-protein-filter');
   const content = document.getElementById('items-content');
 
   if (items.length === 0) {
@@ -172,12 +192,31 @@ async function renderItemsView(main) {
     return;
   }
 
+  // Protein filter only makes sense once a specific category is selected -- and only when that
+  // category actually has protein-typed items (checked against real data, not a hardcoded
+  // category name/list, since protein tagging shows up well beyond "Lunch Main Course": Staff
+  // Salad, CEO Lunch Main, AM Snack, etc. all have some protein-tagged items in practice).
+  categoryFilter.addEventListener('change', () => {
+    const cat = categoryFilter.value;
+    const hasProteinItems = cat && items.some(it => it.category_name === cat && it.protein_code);
+    proteinFilter.hidden = !hasProteinItems;
+    proteinFilter.value = '';
+    renderFiltered();
+  });
+  proteinFilter.addEventListener('change', renderFiltered);
+
   function renderFiltered() {
     const query = searchInput.value.trim().toLowerCase();
-    const filtered = query ? items.filter(it => it.name.toLowerCase().includes(query)) : items;
+    const cat = categoryFilter.value;
+    const protein = proteinFilter.hidden ? '' : proteinFilter.value;
+    const filtered = items.filter(it =>
+      (!query || it.name.toLowerCase().includes(query)) &&
+      (!cat || it.category_name === cat) &&
+      (!protein || it.protein_code === protein)
+    );
 
     if (filtered.length === 0) {
-      content.innerHTML = `<div class="empty-state">No items match "${searchInput.value}".</div>`;
+      content.innerHTML = `<div class="empty-state">No items match the current filters.</div>`;
       return;
     }
 

@@ -169,12 +169,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .toast.visible { opacity: 1; transform: translateY(0); }
 
-.search-bar { margin-bottom: 18px; }
+.search-bar { margin-bottom: 18px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .search-bar input {
-  width: 100%; max-width: 360px; padding: 9px 12px;
+  flex: 1 1 220px; max-width: 360px; padding: 9px 12px;
   border: 1px solid var(--line); border-radius: 8px; font-family: inherit; font-size: 13.5px;
 }
 .search-bar input:focus { outline: none; border-color: var(--sage); }
+.search-bar select {
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
+  font-family: inherit; font-size: 13.5px; background: white; color: var(--ink);
+}
+.search-bar select:focus { outline: none; border-color: var(--sage); }
 
 /* ---------------- Items table ---------------- */
 /* Single table across all categories with fixed column widths -- keeps Tags/RC aligned in
