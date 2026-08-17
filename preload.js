@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
 
   searchIngredients: (query) => ipcRenderer.invoke('search-ingredients', query),
   addIngredient: (payload) => ipcRenderer.invoke('add-ingredient', payload),
+  updateIngredient: (payload) => ipcRenderer.invoke('update-ingredient', payload),
   listIngredients: () => ipcRenderer.invoke('list-ingredients'),
   deleteIngredient: (id) => ipcRenderer.invoke('delete-ingredient', id),
   listRecipes: () => ipcRenderer.invoke('list-recipes'),

@@ -1870,7 +1870,10 @@ async function renderIngredientsView(main) {
             <td>${ing.product_code || ''}</td>
             <td>${ing.name}</td>
             <td>${ing.default_unit || ''}</td>
-            <td style="text-align:right"><button class="icon-btn danger" data-delete="${ing.id}">Delete</button></td>
+            <td style="text-align:right">
+              <button class="icon-btn" data-edit="${ing.id}">Edit</button>
+              <button class="icon-btn danger" data-delete="${ing.id}">Delete</button>
+            </td>
           </tr>
         `);
       });
@@ -1883,6 +1886,9 @@ async function renderIngredientsView(main) {
       </table>
     `;
 
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      btn.addEventListener('click', () => openIngredientModal(ingredients.find(i => i.id === parseInt(btn.dataset.edit, 10))));
+    });
     content.querySelectorAll('[data-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = parseInt(btn.dataset.delete, 10);
@@ -1903,7 +1909,8 @@ async function renderIngredientsView(main) {
   renderFiltered();
 }
 
-async function openIngredientModal() {
+async function openIngredientModal(existingIngredient) {
+  const editing = !!existingIngredient;
   const ingredients = await window.api.listIngredients();
   const categories = [...new Set(ingredients.map(i => i.category).filter(Boolean))].sort();
 
@@ -1911,29 +1918,29 @@ async function openIngredientModal() {
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal">
-      <h2>Add Ingredient</h2>
+      <h2>${editing ? 'Edit Ingredient' : 'Add Ingredient'}</h2>
       <div class="field">
         <label>Ingredient name</label>
-        <input id="im-name" placeholder="e.g. Bread Bagels" />
+        <input id="im-name" placeholder="e.g. Bread Bagels" value="${existingIngredient?.name || ''}" />
       </div>
       <div class="field">
         <label>Product code</label>
-        <input id="im-code" placeholder="e.g. FB02-00001" />
+        <input id="im-code" placeholder="e.g. FB02-00001" value="${existingIngredient?.product_code || ''}" />
       </div>
       <div class="field">
         <label>Default unit</label>
-        <input id="im-unit" placeholder="e.g. PC, GR, ML, KG" />
+        <input id="im-unit" placeholder="e.g. PC, GR, ML, KG" value="${existingIngredient?.default_unit || ''}" />
       </div>
       <div class="field">
         <label>Category</label>
-        <input id="im-category" list="im-category-list" placeholder="Pick existing or type a new one" />
+        <input id="im-category" list="im-category-list" placeholder="Pick existing or type a new one" value="${existingIngredient?.category || ''}" />
         <datalist id="im-category-list">
           ${categories.map(c => `<option value="${c}"></option>`).join('')}
         </datalist>
       </div>
       <div class="actions">
         <button class="secondary" id="im-cancel">Cancel</button>
-        <button class="primary" id="im-save">Add Ingredient</button>
+        <button class="primary" id="im-save">${editing ? 'Save Changes' : 'Add Ingredient'}</button>
       </div>
     </div>
   `;
@@ -1944,14 +1951,24 @@ async function openIngredientModal() {
     const name = overlay.querySelector('#im-name').value.trim();
     if (!name) return alert('Please enter an ingredient name.');
 
-    await window.api.addIngredient({
+    const payload = {
       name,
       productCode: overlay.querySelector('#im-code').value.trim() || null,
       defaultUnit: overlay.querySelector('#im-unit').value.trim() || null,
       category: overlay.querySelector('#im-category').value.trim() || null,
-    });
-    overlay.remove();
-    renderView();
+    };
+
+    try {
+      if (editing) {
+        await window.api.updateIngredient({ id: existingIngredient.id, ...payload });
+      } else {
+        await window.api.addIngredient(payload);
+      }
+      overlay.remove();
+      renderView();
+    } catch (err) {
+      alert(`${editing ? 'Save' : 'Add'} failed: ${err.message}`);
+    }
   });
 }
 

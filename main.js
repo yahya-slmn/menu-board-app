@@ -406,14 +406,27 @@ ipcMain.handle('search-ingredients', async (e, query) => {
   return data;
 });
 
+// created_at has no DB-side default on Supabase's ingredients table (confirmed via
+// pg_constraint -- the only constraint on this table is the primary key on id), despite the
+// old SQLite schema's DEFAULT (datetime('now')) not carrying over in the migration -- same
+// gap as recipes, see save-recipe's insert. Set explicitly here, insert-only.
 ipcMain.handle('add-ingredient', async (e, { name, defaultUnit, category, productCode }) => {
   const { data, error } = await supabase
     .from('ingredients')
-    .insert({ product_code: productCode || null, name: name.trim(), default_unit: defaultUnit || null, category: category || null })
+    .insert({ product_code: productCode || null, name: name.trim(), default_unit: defaultUnit || null, category: category || null, created_at: new Date().toISOString() })
     .select('*')
     .single();
   if (error) throw supaFail('add-ingredient', error);
   return data;
+});
+
+ipcMain.handle('update-ingredient', async (e, { id, name, defaultUnit, category, productCode }) => {
+  const { error } = await supabase
+    .from('ingredients')
+    .update({ product_code: productCode || null, name: name.trim(), default_unit: defaultUnit || null, category: category || null })
+    .eq('id', id);
+  if (error) throw supaFail('update-ingredient', error);
+  return { success: true };
 });
 
 ipcMain.handle('list-ingredients', async () => {
