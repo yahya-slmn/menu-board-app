@@ -1414,7 +1414,7 @@ function renderIngredientRows() {
   const tbody = document.getElementById('rf-ing-rows');
   if (!tbody) return;
 
-  tbody.innerHTML = state.recipes.ingredientRows.map(row => `
+  tbody.innerHTML = state.recipes.ingredientRows.map((row, idx) => `
     <tr data-row="${row.localId}">
       <td class="autocomplete-wrap">
         <input class="rf-ing-name" value="${row.name}" placeholder="Start typing an ingredient…" autocomplete="off" />
@@ -1423,7 +1423,11 @@ function renderIngredientRows() {
       <td><input class="rf-ing-qty" value="${row.quantity}" placeholder="e.g. 150" /></td>
       <td><input class="rf-ing-unit" value="${row.unit}" placeholder="e.g. gm" /></td>
       <td><input class="rf-ing-method" value="${row.method}" placeholder="e.g. marinated before 2 hours" /></td>
-      <td style="text-align:right"><button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button></td>
+      <td style="text-align:right">
+        <button class="icon-btn" data-row-up="${row.localId}" ${idx === 0 ? 'disabled' : ''}>↑</button>
+        <button class="icon-btn" data-row-down="${row.localId}" ${idx === state.recipes.ingredientRows.length - 1 ? 'disabled' : ''}>↓</button>
+        <button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
+      </td>
     </tr>
   `).join('');
 
@@ -1449,6 +1453,25 @@ function renderIngredientRows() {
       if (state.recipes.ingredientRows.length === 0) state.recipes.ingredientRows.push(makeEmptyIngredientRow());
       renderIngredientRows();
     });
+  });
+
+  // Reordering just swaps two entries in state.recipes.ingredientRows -- saveRecipeForm already
+  // builds its payload by filtering that same array (order-preserving), and save-recipe already
+  // renumbers sort_order from array position on every save, so a reordered array is all that's
+  // needed for the new order to persist and show up in the Excel export.
+  function moveRow(localId, direction) {
+    const rows = state.recipes.ingredientRows;
+    const i = rows.findIndex(r => r.localId === localId);
+    const j = i + direction;
+    if (i === -1 || j < 0 || j >= rows.length) return;
+    [rows[i], rows[j]] = [rows[j], rows[i]];
+    renderIngredientRows();
+  }
+  tbody.querySelectorAll('[data-row-up]').forEach(btn => {
+    btn.addEventListener('click', () => moveRow(parseInt(btn.dataset.rowUp, 10), -1));
+  });
+  tbody.querySelectorAll('[data-row-down]').forEach(btn => {
+    btn.addEventListener('click', () => moveRow(parseInt(btn.dataset.rowDown, 10), 1));
   });
 }
 
