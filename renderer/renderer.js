@@ -1463,8 +1463,15 @@ function renderAutocompleteList(listEl, matches, query, inputEl, unitInput, row)
   if (addEl) {
     addEl.addEventListener('mousedown', async (e) => {
       e.preventDefault();
-      const created = await window.api.addIngredient({ name: query });
-      selectIngredientForRow(created, inputEl, unitInput, row, listEl);
+      try {
+        // 'G' is the standard default unit for new ingredients -- product code is deliberately
+        // left blank here (not everyone has one on hand mid-recipe); it's editable later via
+        // the Ingredients screen's Edit action.
+        const created = await window.api.addIngredient({ name: query, defaultUnit: 'G' });
+        selectIngredientForRow(created, inputEl, unitInput, row, listEl);
+      } catch (err) {
+        alert(`Couldn't add "${query}" as a new ingredient: ${err.message}`);
+      }
     });
   }
 }

@@ -430,7 +430,10 @@ ipcMain.handle('update-ingredient', async (e, { id, name, defaultUnit, category,
 });
 
 ipcMain.handle('list-ingredients', async () => {
-  const { data, error } = await supabase.from('ingredients').select('*').order('category').order('name');
+  // Explicit limit, well above the current ~1000 rows -- PostgREST silently caps unlimited
+  // queries at its own default max-rows (1000), which was quietly truncating this list with
+  // no error at all. Bump this again if the ingredient count ever approaches it.
+  const { data, error } = await supabase.from('ingredients').select('*').order('category').order('name').limit(5000);
   if (error) throw supaFail('list-ingredients', error);
   return data;
 });
