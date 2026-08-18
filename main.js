@@ -679,8 +679,12 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath }) => {
   return { success: true, path: savePath };
 });
 
-// Exports a scaled recipe built entirely in the renderer (Recipe Calculator) -- nothing is
-// read from or written to the database here, `recipe`/`ingredients` arrive as plain data.
+// Exports a scaled recipe built entirely in the renderer (Recipe Calculator) -- the recipe
+// row itself and its scaling are never read from or written to the database here, `recipe`/
+// `ingredients` arrive as plain data (already carrying photo_path through from the original
+// recipe row via the Calculator's spread in scaleRecipeForExport). The photo bytes still have
+// to be fetched from Storage here, same as export-recipes above, since buildRecipeSheet only
+// knows how to embed an in-memory photoBuffer, not a storage path.
 ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
@@ -690,6 +694,13 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath
     });
     if (result.canceled || !result.filePath) return { success: false, cancelled: true };
     savePath = result.filePath;
+  }
+
+  if (recipe.photo_path) {
+    const { data, error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
+    if (error) throw supaFail('export-scaled-recipe: download photo', error);
+    recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
+    recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
   }
 
   await exportScaledRecipe(recipe, ingredients, savePath);

@@ -6,7 +6,12 @@ const state = {
   proteinTypes: [],
   currentGeneratedMenuId: null,
   builder: { label: '', startDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
-  recipes: { view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false },
+  recipes: {
+    view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false,
+    prepMode: null, prepText: '', prepItems: [],
+    presentationMode: null, presentationText: '', presentationItems: [],
+    yieldTouched: null,
+  },
 };
 
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
@@ -1068,21 +1073,33 @@ function renderRecipesView(main) {
   return renderRecipeListView(main);
 }
 
-function openNewRecipeForm() {
-  state.recipes.view = 'form';
-  state.recipes.formId = null;
+// Shared by both form-entry points and "Back to Recipe Book" -- clears every piece of
+// in-progress form state so the next renderRecipeFormView() call re-initializes it fresh
+// from whichever recipe (or blank slate) it's opening.
+function resetRecipeFormState() {
   state.recipes.ingredientRows = [];
   state.recipes.pendingPhoto = null;
   state.recipes.removePhoto = false;
+  state.recipes.prepMode = null;
+  state.recipes.prepText = '';
+  state.recipes.prepItems = [];
+  state.recipes.presentationMode = null;
+  state.recipes.presentationText = '';
+  state.recipes.presentationItems = [];
+  state.recipes.yieldTouched = null;
+}
+
+function openNewRecipeForm() {
+  state.recipes.view = 'form';
+  state.recipes.formId = null;
+  resetRecipeFormState();
   renderView();
 }
 
 function openEditRecipeForm(id) {
   state.recipes.view = 'form';
   state.recipes.formId = id;
-  state.recipes.ingredientRows = [];
-  state.recipes.pendingPhoto = null;
-  state.recipes.removePhoto = false;
+  resetRecipeFormState();
   renderView();
 }
 
@@ -1295,6 +1312,15 @@ async function renderRecipeFormView(main) {
     state.recipes.ingredientRows = [makeEmptyIngredientRow()];
   }
 
+  initTextListField('prep', recipe?.preparation_cooking);
+  initTextListField('presentation', recipe?.presentation_serving);
+
+  // New recipes compute Yield live from the start; existing ones keep showing their saved
+  // Yield untouched until the chef actually changes a waste % or an ingredient quantity in
+  // this session -- otherwise just opening an existing recipe for editing would immediately
+  // overwrite its saved (possibly waste-adjusted) Yield with a flat 0%-waste recompute.
+  if (state.recipes.yieldTouched === null) state.recipes.yieldTouched = !editing;
+
   const currentPhotoSrc = state.recipes.pendingPhoto
     ? state.recipes.pendingPhoto.dataUrl
     : (existingPhotoDataUrl && !state.recipes.removePhoto ? existingPhotoDataUrl : null);
@@ -1313,24 +1339,26 @@ async function renderRecipeFormView(main) {
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" /></div>
       <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" placeholder="e.g. Main Course" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" /></div>
-      <div class="field"><label>Yield</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" /></div>
+      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" placeholder="e.g. 15" /></div>
+      <div class="field"><label>Yield (computed)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
       <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
     </div>
 
     <h3 style="margin-bottom:10px;">Ingredients</h3>
     <table class="recipe-ingredients-table">
-      <thead><tr><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th><th></th></tr></thead>
+      <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th><th></th></tr></thead>
       <tbody id="rf-ing-rows"></tbody>
     </table>
+    <div id="rf-total-qty" class="total-qty-display"></div>
     <button class="secondary" id="rf-add-row-btn" style="margin:10px 0 24px;">+ Add Ingredient Row</button>
 
     <div class="field" style="margin-bottom:16px;">
       <label>Preparation and Cooking</label>
-      <textarea id="rf-prep" rows="5">${recipe?.preparation_cooking || ''}</textarea>
+      <div id="rf-prep-field"></div>
     </div>
     <div class="field" style="margin-bottom:16px;">
       <label>Presentation / Decoration / Serving</label>
-      <textarea id="rf-presentation" rows="4">${recipe?.presentation_serving || ''}</textarea>
+      <div id="rf-presentation-field"></div>
     </div>
     <div class="field" style="margin-bottom:16px;">
       <label>Comment</label>
@@ -1396,19 +1424,175 @@ async function renderRecipeFormView(main) {
   document.getElementById('rf-back-btn').addEventListener('click', goBackToRecipeList);
   document.getElementById('rf-add-row-btn').addEventListener('click', () => {
     state.recipes.ingredientRows.push(makeEmptyIngredientRow());
+    state.recipes.yieldTouched = true;
     renderIngredientRows();
   });
   document.getElementById('rf-save-btn').addEventListener('click', saveRecipeForm);
+  document.getElementById('rf-waste').addEventListener('input', () => {
+    state.recipes.yieldTouched = true;
+    updateYieldCalculation();
+  });
 
   renderIngredientRows();
+  renderTextListFieldBody('prep');
+  renderTextListFieldBody('presentation');
+}
+
+// Total Quantity is the sum of every ingredient row's numeric quantity -- same convention
+// the Excel export's "Total Quantity" row already uses (lib/export.js, showTotalQuantity),
+// just surfaced live in the form instead of only appearing after exporting. All ingredients
+// are recorded in grams today, so a plain sum is meaningful with no unit conversion needed.
+// Yield is read-only and always reflects Total Quantity reduced by Waste % (0% if blank) --
+// but only once state.recipes.yieldTouched is true (see renderRecipeFormView). Total Quantity
+// itself is always safe to refresh live since it's just a display, never persisted as-is.
+function updateYieldCalculation() {
+  const totalEl = document.getElementById('rf-total-qty');
+  const yieldEl = document.getElementById('rf-yield');
+  const wasteEl = document.getElementById('rf-waste');
+  if (!totalEl || !yieldEl || !wasteEl) return;
+
+  const totalQty = state.recipes.ingredientRows.reduce((sum, row) => {
+    const q = parseFloat(row.quantity);
+    return isNaN(q) ? sum : sum + q;
+  }, 0);
+  totalEl.textContent = `Total Quantity: ${roundNice(totalQty)} G`;
+
+  if (!state.recipes.yieldTouched) return;
+  const waste = parseFloat(wasteEl.value);
+  const wastePct = isNaN(waste) ? 0 : Math.min(Math.max(waste, 0), 100);
+  yieldEl.value = `${roundNice(totalQty * (1 - wastePct / 100))} G`;
+}
+
+// ------------------------------------------------------------------
+// Preparation/Presentation Text-vs-List toggle
+//
+// Both fields are plain TEXT columns in the DB (no schema change here) --
+// list items are just newline-joined text, same convention the Excel export
+// already used for presentation_serving. Mode isn't persisted as a flag; it's
+// inferred on load (initTextListField): more than one non-empty line after
+// split-by-newline opens in List mode, otherwise Text mode. Toggling between
+// modes is non-destructive in both directions (split on \n / join with \n),
+// so a wrong guess costs one click, never data.
+// ------------------------------------------------------------------
+const TEXT_LIST_FIELDS = {
+  prep: {
+    modeKey: 'prepMode', textKey: 'prepText', itemsKey: 'prepItems',
+    textareaId: 'rf-prep', mountId: 'rf-prep-field', rows: 5,
+    placeholder: 'Describe preparation and cooking…', itemPlaceholder: 'Step',
+  },
+  presentation: {
+    modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
+    textareaId: 'rf-presentation', mountId: 'rf-presentation-field', rows: 4,
+    placeholder: 'Describe presentation, decoration and serving…', itemPlaceholder: 'Step',
+  },
+};
+
+function initTextListField(key, rawValue) {
+  const cfg = TEXT_LIST_FIELDS[key];
+  if (state.recipes[cfg.modeKey] !== null) return; // already initialized this form session
+  const raw = rawValue || '';
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  state.recipes[cfg.modeKey] = lines.length > 1 ? 'list' : 'paragraph';
+  state.recipes[cfg.textKey] = raw;
+  state.recipes[cfg.itemsKey] = (lines.length ? lines : ['']).map(v => ({ localId: ++_recipeRowLocalIdCounter, value: v }));
+}
+
+// Renders the Text/List toggle plus whichever editor is active, and rewires its listeners --
+// a full rebuild on every change, same approach as renderIngredientRows.
+function renderTextListFieldBody(key) {
+  const cfg = TEXT_LIST_FIELDS[key];
+  const mount = document.getElementById(cfg.mountId);
+  if (!mount) return;
+  const mode = state.recipes[cfg.modeKey];
+  const items = state.recipes[cfg.itemsKey];
+
+  mount.innerHTML = `
+    <div class="mode-toggle">
+      <button type="button" class="mode-toggle-btn ${mode === 'paragraph' ? 'active' : ''}" data-mode="paragraph">Text</button>
+      <button type="button" class="mode-toggle-btn ${mode === 'list' ? 'active' : ''}" data-mode="list">List</button>
+    </div>
+    ${mode === 'paragraph' ? `
+      <textarea id="${cfg.textareaId}" rows="${cfg.rows}" placeholder="${cfg.placeholder}">${state.recipes[cfg.textKey] || ''}</textarea>
+    ` : `
+      <div class="text-list">
+        ${items.map((item, idx) => `
+          <div class="text-list-row" data-item="${item.localId}">
+            <span class="text-list-index">${idx + 1}.</span>
+            <input class="text-list-input" value="${item.value}" placeholder="${cfg.itemPlaceholder} ${idx + 1}…" />
+            <button type="button" class="icon-btn danger" data-remove="${item.localId}" ${items.length <= 1 ? 'disabled' : ''}>✕</button>
+          </div>
+        `).join('')}
+      </div>
+    `}
+  `;
+
+  mount.querySelectorAll('.mode-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const newMode = btn.dataset.mode;
+      if (newMode === mode) return;
+      if (newMode === 'list') {
+        const raw = document.getElementById(cfg.textareaId)?.value ?? state.recipes[cfg.textKey] ?? '';
+        const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+        state.recipes[cfg.itemsKey] = (lines.length ? lines : ['']).map(v => ({ localId: ++_recipeRowLocalIdCounter, value: v }));
+      } else {
+        state.recipes[cfg.textKey] = state.recipes[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
+      }
+      state.recipes[cfg.modeKey] = newMode;
+      renderTextListFieldBody(key);
+    });
+  });
+
+  if (mode === 'paragraph') {
+    const textarea = document.getElementById(cfg.textareaId);
+    textarea.addEventListener('input', () => { state.recipes[cfg.textKey] = textarea.value; });
+    return;
+  }
+
+  mount.querySelectorAll('.text-list-input').forEach((inputEl, idx) => {
+    const item = items[idx];
+    inputEl.addEventListener('input', () => { item.value = inputEl.value; });
+    // Enter inserts a new empty item right after this one and focuses it -- works whether
+    // she's appending at the end or inserting a step in the middle.
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const i = items.findIndex(it => it.localId === item.localId);
+      const newItem = { localId: ++_recipeRowLocalIdCounter, value: '' };
+      items.splice(i + 1, 0, newItem);
+      renderTextListFieldBody(key);
+      mount.querySelector(`[data-item="${newItem.localId}"] .text-list-input`)?.focus();
+    });
+  });
+
+  mount.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.remove, 10);
+      state.recipes[cfg.itemsKey] = items.filter(it => it.localId !== id);
+      if (state.recipes[cfg.itemsKey].length === 0) state.recipes[cfg.itemsKey].push({ localId: ++_recipeRowLocalIdCounter, value: '' });
+      renderTextListFieldBody(key);
+    });
+  });
+}
+
+// Final saved value for either mode: paragraph text trimmed as-is, or list items trimmed and
+// filtered of blanks (drops the trailing empty item from a last Enter press) and \n-joined --
+// the same "one idea per line" text shape the Excel export already expects.
+function collectTextListFieldValue(key) {
+  const cfg = TEXT_LIST_FIELDS[key];
+  if (state.recipes[cfg.modeKey] === 'paragraph') {
+    const el = document.getElementById(cfg.textareaId);
+    return (el ? el.value : state.recipes[cfg.textKey] || '').trim();
+  }
+  return state.recipes[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
 }
 
 function renderIngredientRows() {
   const tbody = document.getElementById('rf-ing-rows');
   if (!tbody) return;
 
-  tbody.innerHTML = state.recipes.ingredientRows.map((row, idx) => `
+  tbody.innerHTML = state.recipes.ingredientRows.map(row => `
     <tr data-row="${row.localId}">
+      <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
       <td class="autocomplete-wrap">
         <input class="rf-ing-name" value="${row.name}" placeholder="Start typing an ingredient…" autocomplete="off" />
         <div class="autocomplete-list" hidden></div>
@@ -1417,8 +1601,6 @@ function renderIngredientRows() {
       <td><input class="rf-ing-unit" value="${row.unit}" placeholder="e.g. gm" /></td>
       <td><input class="rf-ing-method" value="${row.method}" placeholder="e.g. marinated before 2 hours" /></td>
       <td style="text-align:right">
-        <button class="icon-btn" data-row-up="${row.localId}" ${idx === 0 ? 'disabled' : ''}>↑</button>
-        <button class="icon-btn" data-row-down="${row.localId}" ${idx === state.recipes.ingredientRows.length - 1 ? 'disabled' : ''}>↓</button>
         <button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
       </td>
     </tr>
@@ -1432,7 +1614,7 @@ function renderIngredientRows() {
     const methodInput = tr.querySelector('.rf-ing-method');
     const listEl = tr.querySelector('.autocomplete-list');
 
-    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; });
+    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; state.recipes.yieldTouched = true; updateYieldCalculation(); });
     unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
     methodInput.addEventListener('input', () => { row.method = methodInput.value; });
 
@@ -1444,27 +1626,73 @@ function renderIngredientRows() {
       const id = parseInt(btn.dataset.rowRemove, 10);
       state.recipes.ingredientRows = state.recipes.ingredientRows.filter(r => r.localId !== id);
       if (state.recipes.ingredientRows.length === 0) state.recipes.ingredientRows.push(makeEmptyIngredientRow());
+      state.recipes.yieldTouched = true;
       renderIngredientRows();
     });
   });
 
-  // Reordering just swaps two entries in state.recipes.ingredientRows -- saveRecipeForm already
-  // builds its payload by filtering that same array (order-preserving), and save-recipe already
-  // renumbers sort_order from array position on every save, so a reordered array is all that's
-  // needed for the new order to persist and show up in the Excel export.
-  function moveRow(localId, direction) {
-    const rows = state.recipes.ingredientRows;
-    const i = rows.findIndex(r => r.localId === localId);
-    const j = i + direction;
-    if (i === -1 || j < 0 || j >= rows.length) return;
-    [rows[i], rows[j]] = [rows[j], rows[i]];
-    renderIngredientRows();
-  }
-  tbody.querySelectorAll('[data-row-up]').forEach(btn => {
-    btn.addEventListener('click', () => moveRow(parseInt(btn.dataset.rowUp, 10), -1));
+  wireIngredientRowDrag(tbody);
+  updateYieldCalculation();
+}
+
+// Drag-and-drop reordering. draggable="true" lives ONLY on the ⠿ handle cell, never on the
+// <tr> or the inputs -- dragstart is otherwise a mousedown-drag gesture, which would hijack
+// text selection/dragging inside the ingredient-name input (and the autocomplete dropdown
+// that hangs off it) into a row-drag instead. Reordering just moves one entry within
+// state.recipes.ingredientRows -- saveRecipeForm already builds its payload from that same
+// array (order-preserving), and save-recipe already renumbers sort_order from array position
+// on every save, so a reordered array is all that's needed for the new order to persist and
+// show up in the Excel export.
+function wireIngredientRowDrag(tbody) {
+  let draggedId = null;
+
+  tbody.querySelectorAll('[data-drag-handle]').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      draggedId = parseInt(handle.dataset.dragHandle, 10);
+      const tr = handle.closest('tr');
+      tr.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(draggedId));
+      // Drag the whole row's image, not just the small handle glyph, so it reads as "picking
+      // up the row" rather than dragging a tiny icon around.
+      e.dataTransfer.setDragImage(tr, 20, tr.offsetHeight / 2);
+    });
+    handle.addEventListener('dragend', () => {
+      tbody.querySelectorAll('tr').forEach(tr => tr.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
+      draggedId = null;
+    });
   });
-  tbody.querySelectorAll('[data-row-down]').forEach(btn => {
-    btn.addEventListener('click', () => moveRow(parseInt(btn.dataset.rowDown, 10), 1));
+
+  tbody.querySelectorAll('tr').forEach(tr => {
+    tr.addEventListener('dragover', (e) => {
+      if (draggedId === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const targetId = parseInt(tr.dataset.row, 10);
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over-top', 'drag-over-bottom'));
+      if (targetId === draggedId) return;
+      const rect = tr.getBoundingClientRect();
+      const before = e.clientY - rect.top < rect.height / 2;
+      tr.classList.add(before ? 'drag-over-top' : 'drag-over-bottom');
+    });
+
+    tr.addEventListener('drop', (e) => {
+      if (draggedId === null) return;
+      e.preventDefault();
+      const targetId = parseInt(tr.dataset.row, 10);
+      const rows = state.recipes.ingredientRows;
+      const fromIdx = rows.findIndex(r => r.localId === draggedId);
+      let toIdx = rows.findIndex(r => r.localId === targetId);
+      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+      const rect = tr.getBoundingClientRect();
+      const before = e.clientY - rect.top < rect.height / 2;
+      const [moved] = rows.splice(fromIdx, 1);
+      if (!before) toIdx += 1;
+      if (fromIdx < toIdx) toIdx -= 1; // account for the shift caused by removing `moved` above
+      rows.splice(toIdx, 0, moved);
+      draggedId = null;
+      renderIngredientRows();
+    });
   });
 }
 
@@ -1547,9 +1775,7 @@ function selectIngredientForRow(ingredient, inputEl, unitInput, row, listEl) {
 function goBackToRecipeList() {
   state.recipes.view = 'list';
   state.recipes.formId = null;
-  state.recipes.ingredientRows = [];
-  state.recipes.pendingPhoto = null;
-  state.recipes.removePhoto = false;
+  resetRecipeFormState();
   renderView();
 }
 
@@ -1576,8 +1802,8 @@ async function saveRecipeForm() {
     countryOrigin: document.getElementById('rf-country').value.trim(),
     yieldNotes: document.getElementById('rf-yield').value.trim(),
     dateCreated: document.getElementById('rf-date').value,
-    preparationCooking: document.getElementById('rf-prep').value,
-    presentationServing: document.getElementById('rf-presentation').value,
+    preparationCooking: collectTextListFieldValue('prep'),
+    presentationServing: collectTextListFieldValue('presentation'),
     comment: document.getElementById('rf-comment').value,
     checkedBy: document.getElementById('rf-checked-by').value.trim(),
     ingredients: rows.map(r => ({
@@ -1890,7 +2116,18 @@ function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
 // ============================================================
 // INGREDIENTS DATABASE VIEW
 // ============================================================
+const UNCATEGORIZED_FILTER_VALUE = '__uncategorized__';
+
 async function renderIngredientsView(main) {
+  const ingredients = await window.api.listIngredients();
+
+  // Every write path (add/update-ingredient handlers, the modal's own .trim() || null, and
+  // the Recipe form's inline "+ Add as new ingredient" flow which omits category entirely)
+  // normalizes a missing category to null, never '' -- so `!i.category` is the one check
+  // that catches every uncategorized row.
+  const categoryNames = [...new Set(ingredients.map(i => i.category).filter(Boolean))].sort();
+  const uncategorizedCount = ingredients.filter(i => !i.category).length;
+
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Ingredients</h1><span class="section-pill">Canonical ingredient master</span></div>
@@ -1898,13 +2135,18 @@ async function renderIngredientsView(main) {
     </div>
     <div class="search-bar">
       <input id="ingredient-search" type="search" placeholder="Search ingredients by name…" />
+      <select id="ingredient-category-filter">
+        <option value="">All Categories</option>
+        ${uncategorizedCount > 0 ? `<option value="${UNCATEGORIZED_FILTER_VALUE}">Uncategorized (${uncategorizedCount})</option>` : ''}
+        ${categoryNames.map(c => `<option value="${c}">${c}</option>`).join('')}
+      </select>
     </div>
     <div id="ingredients-content">Loading…</div>
   `;
   document.getElementById('add-ingredient-btn').addEventListener('click', () => openIngredientModal());
 
-  const ingredients = await window.api.listIngredients();
   const searchInput = document.getElementById('ingredient-search');
+  const categoryFilter = document.getElementById('ingredient-category-filter');
   const content = document.getElementById('ingredients-content');
 
   if (ingredients.length === 0) {
@@ -1912,12 +2154,18 @@ async function renderIngredientsView(main) {
     return;
   }
 
+  categoryFilter.addEventListener('change', renderFiltered);
+
   function renderFiltered() {
     const query = searchInput.value.trim().toLowerCase();
-    const filtered = query ? ingredients.filter(i => i.name.toLowerCase().includes(query)) : ingredients;
+    const cat = categoryFilter.value;
+    const filtered = ingredients.filter(i =>
+      (!query || i.name.toLowerCase().includes(query)) &&
+      (!cat || (cat === UNCATEGORIZED_FILTER_VALUE ? !i.category : i.category === cat))
+    );
 
     if (filtered.length === 0) {
-      content.innerHTML = `<div class="empty-state">No ingredients match "${searchInput.value}".</div>`;
+      content.innerHTML = `<div class="empty-state">No ingredients match the current filters.</div>`;
       return;
     }
 
