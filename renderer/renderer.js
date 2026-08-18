@@ -10,7 +10,6 @@ const state = {
     view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false,
     prepMode: null, prepText: '', prepItems: [],
     presentationMode: null, presentationText: '', presentationItems: [],
-    yieldTouched: null,
   },
 };
 
@@ -1086,7 +1085,6 @@ function resetRecipeFormState() {
   state.recipes.presentationMode = null;
   state.recipes.presentationText = '';
   state.recipes.presentationItems = [];
-  state.recipes.yieldTouched = null;
 }
 
 function openNewRecipeForm() {
@@ -1315,12 +1313,6 @@ async function renderRecipeFormView(main) {
   initTextListField('prep', recipe?.preparation_cooking);
   initTextListField('presentation', recipe?.presentation_serving);
 
-  // New recipes compute Yield live from the start; existing ones keep showing their saved
-  // Yield untouched until the chef actually changes a waste % or an ingredient quantity in
-  // this session -- otherwise just opening an existing recipe for editing would immediately
-  // overwrite its saved (possibly waste-adjusted) Yield with a flat 0%-waste recompute.
-  if (state.recipes.yieldTouched === null) state.recipes.yieldTouched = !editing;
-
   const currentPhotoSrc = state.recipes.pendingPhoto
     ? state.recipes.pendingPhoto.dataUrl
     : (existingPhotoDataUrl && !state.recipes.removePhoto ? existingPhotoDataUrl : null);
@@ -1339,7 +1331,7 @@ async function renderRecipeFormView(main) {
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" /></div>
       <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" placeholder="e.g. Main Course" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" /></div>
-      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" placeholder="e.g. 15" /></div>
+      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" placeholder="e.g. 15" value="${recipe?.waste_percent ?? ''}" /></div>
       <div class="field"><label>Yield (computed)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
       <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
     </div>
@@ -1424,14 +1416,10 @@ async function renderRecipeFormView(main) {
   document.getElementById('rf-back-btn').addEventListener('click', goBackToRecipeList);
   document.getElementById('rf-add-row-btn').addEventListener('click', () => {
     state.recipes.ingredientRows.push(makeEmptyIngredientRow());
-    state.recipes.yieldTouched = true;
     renderIngredientRows();
   });
   document.getElementById('rf-save-btn').addEventListener('click', saveRecipeForm);
-  document.getElementById('rf-waste').addEventListener('input', () => {
-    state.recipes.yieldTouched = true;
-    updateYieldCalculation();
-  });
+  document.getElementById('rf-waste').addEventListener('input', updateYieldCalculation);
 
   renderIngredientRows();
   renderTextListFieldBody('prep');
@@ -1442,9 +1430,10 @@ async function renderRecipeFormView(main) {
 // the Excel export's "Total Quantity" row already uses (lib/export.js, showTotalQuantity),
 // just surfaced live in the form instead of only appearing after exporting. All ingredients
 // are recorded in grams today, so a plain sum is meaningful with no unit conversion needed.
-// Yield is read-only and always reflects Total Quantity reduced by Waste % (0% if blank) --
-// but only once state.recipes.yieldTouched is true (see renderRecipeFormView). Total Quantity
-// itself is always safe to refresh live since it's just a display, never persisted as-is.
+// Yield is read-only and always reflects Total Quantity reduced by Waste % (0% if blank).
+// Waste % is a persisted, fixed-per-recipe value (recipes.waste_percent) -- since it's always
+// correctly pre-filled on load, recomputing here on every render reproduces exactly what was
+// last saved, so there's no clobbering risk the way there was when waste was transient.
 function updateYieldCalculation() {
   const totalEl = document.getElementById('rf-total-qty');
   const yieldEl = document.getElementById('rf-yield');
@@ -1457,7 +1446,6 @@ function updateYieldCalculation() {
   }, 0);
   totalEl.textContent = `Total Quantity: ${roundNice(totalQty)} G`;
 
-  if (!state.recipes.yieldTouched) return;
   const waste = parseFloat(wasteEl.value);
   const wastePct = isNaN(waste) ? 0 : Math.min(Math.max(waste, 0), 100);
   yieldEl.value = `${roundNice(totalQty * (1 - wastePct / 100))} G`;
@@ -1614,7 +1602,7 @@ function renderIngredientRows() {
     const methodInput = tr.querySelector('.rf-ing-method');
     const listEl = tr.querySelector('.autocomplete-list');
 
-    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; state.recipes.yieldTouched = true; updateYieldCalculation(); });
+    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; updateYieldCalculation(); });
     unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
     methodInput.addEventListener('input', () => { row.method = methodInput.value; });
 
@@ -1626,7 +1614,6 @@ function renderIngredientRows() {
       const id = parseInt(btn.dataset.rowRemove, 10);
       state.recipes.ingredientRows = state.recipes.ingredientRows.filter(r => r.localId !== id);
       if (state.recipes.ingredientRows.length === 0) state.recipes.ingredientRows.push(makeEmptyIngredientRow());
-      state.recipes.yieldTouched = true;
       renderIngredientRows();
     });
   });
@@ -1801,6 +1788,7 @@ async function saveRecipeForm() {
     category: document.getElementById('rf-category').value.trim(),
     countryOrigin: document.getElementById('rf-country').value.trim(),
     yieldNotes: document.getElementById('rf-yield').value.trim(),
+    wastePercent: document.getElementById('rf-waste').value === '' ? null : parseFloat(document.getElementById('rf-waste').value),
     dateCreated: document.getElementById('rf-date').value,
     preparationCooking: collectTextListFieldValue('prep'),
     presentationServing: collectTextListFieldValue('presentation'),
@@ -2047,6 +2035,15 @@ function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
     return isNaN(q) ? sum : sum + q;
   }, 0));
 
+  // Yield here is always recomputed from the scaled Total Quantity and the recipe's own fixed
+  // waste_percent (read-only -- waste is set once on the recipe, not re-entered per
+  // calculation), NOT read from the original recipe's saved yield_notes, which reflects the
+  // unscaled quantity. This overwrites scaledRecipe.yield_notes so both this live display and
+  // the exported Excel show the scaled, waste-adjusted figure -- waste_percent itself never
+  // gets written into scaledRecipe fields that reach the export.
+  const wastePct = recipe.waste_percent != null ? Math.min(Math.max(parseFloat(recipe.waste_percent), 0), 100) : 0;
+  scaledRecipe.yield_notes = `${roundNice(totalQuantity * (1 - wastePct / 100))} G`;
+
   container.innerHTML = `
     <div class="day-card">
       <div class="day-head">
@@ -2060,7 +2057,8 @@ function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
           <div class="field"><label>Prepared By</label><div>${recipe.prepared_by || '—'}</div></div>
           <div class="field"><label>Category</label><div>${recipe.category || '—'}</div></div>
           <div class="field"><label>Country/Origin</label><div>${recipe.country_origin || '—'}</div></div>
-          <div class="field"><label>Yield</label><div>${recipe.yield_notes || '—'}</div></div>
+          <div class="field"><label>Waste %</label><div>${recipe.waste_percent != null ? recipe.waste_percent + '%' : '—'}</div></div>
+          <div class="field"><label>Yield (scaled)</label><div><strong>${scaledRecipe.yield_notes}</strong></div></div>
         </div>
 
         <h3 style="margin-bottom:10px;">Ingredients (scaled)</h3>

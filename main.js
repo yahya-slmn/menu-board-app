@@ -565,6 +565,7 @@ ipcMain.handle('save-recipe', async (e, payload) => {
     category: payload.category || null,
     country_origin: payload.countryOrigin || null,
     yield_notes: payload.yieldNotes || null,
+    waste_percent: payload.wastePercent ?? null,
     date_created: payload.dateCreated || null,
     preparation_cooking: payload.preparationCooking || null,
     presentation_serving: payload.presentationServing || null,
