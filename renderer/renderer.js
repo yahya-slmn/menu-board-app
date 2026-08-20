@@ -772,12 +772,18 @@ async function buildAllBuilderGrids() {
   state.builder.days = await window.api.getSchoolDays({ startDate, numWeekdays });
 
   await Promise.all(state.sections.map(async (section) => {
-    const slotDefs = await window.api.getSectionSlots(section.code);
-    const slots = await Promise.all(slotDefs.map(async ({ categoryCode, count }) => {
-      const items = await window.api.getEligibleItems({ sectionCode: section.code, categoryCode });
+    // One call per section (2 Supabase queries via getSectionItemPool, grouped by category
+    // server-side) instead of one call per section*category slot -- see get-section-item-pool
+    // in main.js for the full round-trip-count rationale.
+    const [slotDefs, itemsByCategory] = await Promise.all([
+      window.api.getSectionSlots(section.code),
+      window.api.getSectionItemPool(section.code),
+    ]);
+    const slots = slotDefs.map(({ categoryCode, count }) => {
+      const items = itemsByCategory[categoryCode] || [];
       const dailyItems = items.filter(i => i.is_daily_repeating).slice(0, count);
       return { categoryCode, count, isDaily: dailyItems.length > 0, dailyItems, eligibleItems: items };
-    }));
+    });
 
     const selections = {};
     for (const slot of slots) {

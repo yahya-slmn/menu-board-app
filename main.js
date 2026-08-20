@@ -11,7 +11,7 @@ const {
   getAgeGroups, getAgeGroupsForSection, getAgeGroupByCode, getAgeGroupById,
   getCategoryPortionDefault,
 } = require('./lib/referenceData');
-const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, schoolDaysFrom } = require('./lib/generator');
+const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
 const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, sanitizeSheetName } = require('./lib/export');
 
@@ -1167,10 +1167,25 @@ ipcMain.handle('get-school-days', (e, { startDate, numWeekdays }) => {
   return schoolDaysFrom(new Date(startDate), numWeekdays);
 });
 
-ipcMain.handle('get-eligible-items', async (e, { sectionCode, categoryCode }) => {
+// Build Menu's per-section item pool, grouped by category code -- one call per section (2
+// Supabase queries via sectionItemPoolSupabase) instead of the old get-eligible-items, which
+// fired one call (2 queries) per section*category slot -- ~94 round trips down to ~10 across
+// all 5 sections. Same columns/is_active filter/per-category sort as eligibleItemsSupabase
+// (still used as-is by get-eligible-swap-items below, a single-slot lookup where the old
+// per-category query shape is still the right one), so results are identical either way.
+ipcMain.handle('get-section-item-pool', async (e, sectionCode) => {
   const section = getSectionByCode(sectionCode);
-  const category = getCategoryByCode(categoryCode);
-  return eligibleItemsSupabase(section.id, category.id);
+  const items = await sectionItemPoolSupabase(section.id);
+  const byCategory = {};
+  for (const item of items) {
+    const code = getCategoryById(item.category_id)?.code;
+    if (!code) continue;
+    (byCategory[code] = byCategory[code] || []).push(item);
+  }
+  for (const code of Object.keys(byCategory)) {
+    byCategory[code].sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return byCategory;
 });
 
 ipcMain.handle('builder-fill-suggestions', async (e, { sectionCode, startDate, numWeekdays }) => {

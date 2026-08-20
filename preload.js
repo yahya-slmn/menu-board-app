@@ -46,7 +46,7 @@ contextBridge.exposeInMainWorld('api', {
 
   getSectionSlots: (sectionCode) => ipcRenderer.invoke('get-section-slots', sectionCode),
   getSchoolDays: (payload) => ipcRenderer.invoke('get-school-days', payload),
-  getEligibleItems: (payload) => ipcRenderer.invoke('get-eligible-items', payload),
+  getSectionItemPool: (sectionCode) => ipcRenderer.invoke('get-section-item-pool', sectionCode),
   builderFillSuggestions: (payload) => ipcRenderer.invoke('builder-fill-suggestions', payload),
   saveManualMenu: (payload) => ipcRenderer.invoke('save-manual-menu', payload),
   exportBlankTemplate: (payload) => ipcRenderer.invoke('export-blank-template', payload),
