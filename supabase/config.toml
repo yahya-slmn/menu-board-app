@@ -1,0 +1,4 @@
+# Only what's needed to link this repo to the existing Supabase project and deploy the
+# extract-recipe Edge Function -- this app has no local database/migrations of its own
+# (see CLAUDE.md), so nothing else belongs in this file.
+project_id = "qulbbwdffcttuabyscnb"

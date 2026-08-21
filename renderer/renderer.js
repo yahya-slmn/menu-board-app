@@ -10,6 +10,10 @@ const state = {
     view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false,
     prepMode: null, prepText: '', prepItems: [],
     presentationMode: null, presentationText: '', presentationItems: [],
+    // Set by "Import Recipe from File" just before opening a fresh New Recipe form; consumed
+    // (and cleared) the moment renderRecipeFormView reads it, so it never leaks into a later
+    // plain "+ New Recipe" click -- see renderRecipeFormView's non-editing branch.
+    importedRecipe: null,
   },
 };
 
@@ -1139,8 +1143,12 @@ async function renderRecipeListView(main) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Recipe Book</h1><span class="section-pill">Company recipe cards</span></div>
-      <button class="primary" id="new-recipe-btn">+ New Recipe</button>
+      <div style="display:flex; gap:10px;">
+        <button class="secondary" id="import-recipe-btn">Import Recipe from File</button>
+        <button class="primary" id="new-recipe-btn">+ New Recipe</button>
+      </div>
     </div>
+    <input type="file" id="import-recipe-input" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" hidden />
     <div class="search-bar">
       <input id="recipe-search" type="search" placeholder="Search by name or TTY code…" />
     </div>
@@ -1151,6 +1159,45 @@ async function renderRecipeListView(main) {
     <div id="recipes-content">Loading…</div>
   `;
   document.getElementById('new-recipe-btn').addEventListener('click', openNewRecipeForm);
+
+  const importBtn = document.getElementById('import-recipe-btn');
+  const importInput = document.getElementById('import-recipe-input');
+  importBtn.addEventListener('click', () => importInput.click());
+  importInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = ''; // always reset so picking the same file twice still fires 'change'
+    if (!file) return;
+
+    importBtn.disabled = true;
+    importBtn.textContent = 'Extracting recipe…';
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const base64 = dataUrl.split(',')[1];
+      const result = await window.api.extractRecipeFromFile({ base64, mimeType: file.type });
+      if (!result.success) {
+        alert(`Couldn't extract this file: ${result.error || 'unknown error'}. Opening a blank recipe instead — you can fill it in manually.`);
+        openNewRecipeForm();
+        return;
+      }
+      // openNewRecipeForm() resets and re-renders the form synchronously, so importedRecipe
+      // must be set first -- renderRecipeFormView reads it on its very first (synchronous)
+      // pass through the non-editing branch, before this function would get a chance to set it
+      // afterward.
+      state.recipes.importedRecipe = result.recipe;
+      openNewRecipeForm();
+    } catch (err) {
+      alert(`Couldn't extract this file: ${err.message}. Opening a blank recipe instead — you can fill it in manually.`);
+      openNewRecipeForm();
+    } finally {
+      importBtn.disabled = false;
+      importBtn.textContent = 'Import Recipe from File';
+    }
+  });
 
   const recipes = await window.api.listRecipes();
   const searchInput = document.getElementById('recipe-search');
@@ -1312,8 +1359,27 @@ async function renderRecipeFormView(main) {
         method: ri.method || '',
       }));
     }
-  } else if (state.recipes.ingredientRows.length === 0) {
-    state.recipes.ingredientRows = [makeEmptyIngredientRow()];
+  } else {
+    // A New Recipe form opened via "Import Recipe from File" carries extracted values here --
+    // consumed once (and cleared) so a later plain "+ New Recipe" click starts blank. Every
+    // downstream read below goes through the same recipe?.field accessors the editing branch
+    // above uses, so imported data is fully editable and goes through the exact same save path
+    // as a hand-typed new recipe -- it's never sent anywhere on its own.
+    recipe = state.recipes.importedRecipe;
+    state.recipes.importedRecipe = null;
+    if (state.recipes.ingredientRows.length === 0) {
+      const importedIngredients = recipe?.ingredients || [];
+      state.recipes.ingredientRows = importedIngredients.length > 0
+        ? importedIngredients.map(ing => ({
+            localId: ++_recipeRowLocalIdCounter,
+            ingredientId: null, // not linked to the ingredients table yet -- pick from the autocomplete, same as typing a new name by hand
+            name: ing.name || '',
+            quantity: ing.quantity != null ? String(ing.quantity) : '',
+            unit: ing.unit || '',
+            method: ing.method || '',
+          }))
+        : [makeEmptyIngredientRow()];
+    }
   }
 
   initTextListField('prep', recipe?.preparation_cooking);
@@ -1326,7 +1392,7 @@ async function renderRecipeFormView(main) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${editing ? 'Edit Recipe' : 'New Recipe'}</h1>
-        <span class="section-pill">${recipe ? recipe.code : 'TTY code assigned after saving'}</span>
+        <span class="section-pill">${editing ? recipe.code : 'TTY code assigned after saving'}</span>
       </div>
       <button class="secondary" id="rf-back-btn">← Back to Recipe Book</button>
     </div>

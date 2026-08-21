@@ -14,6 +14,7 @@ const {
 const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
 const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, sanitizeSheetName } = require('./lib/export');
+const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 
 let mainWindow;
 let loginWindow;
@@ -706,6 +707,43 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath
 
   await exportScaledRecipe(recipe, ingredients, savePath);
   return { success: true, path: savePath };
+});
+
+// "Import Recipe from File" -- never throws across IPC (a failed/declined/partial extraction
+// must never block the chef from just filling the form in manually), so every outcome comes
+// back as a plain { success, ... } result instead. On success, maps the model's raw extracted
+// fields onto the exact shape renderRecipeFormView already knows how to seed a form from (see
+// state.recipes.importedRecipe in renderer.js) -- so the New Recipe form, once opened, treats
+// this exactly like editing any other recipe object: same fields, same save-recipe path,
+// nothing new to validate. Ingredient rows come back with ingredientId: null (same as typing a
+// brand-new ingredient name by hand) since the extracted name hasn't been matched against the
+// canonical ingredients table yet -- she picks each from the autocomplete same as always.
+ipcMain.handle('extract-recipe-from-file', async (e, { base64, mimeType }) => {
+  try {
+    const extracted = await extractRecipeFromFile({ base64, mimeType });
+    const recipe = {
+      name: extracted.name || '',
+      quantity_produced: extracted.quantity_produced || '',
+      prepared_by: extracted.prepared_by || '',
+      category: extracted.category || '',
+      country_origin: extracted.country_origin || '',
+      date_created: extracted.date_created || '',
+      waste_percent: extracted.waste_percent ?? null,
+      comment: extracted.comment || '',
+      preparation_cooking: (extracted.preparation_cooking_steps || []).join('\n'),
+      presentation_serving: (extracted.presentation_serving_steps || []).join('\n'),
+      ingredients: (extracted.ingredients || []).map(ing => ({
+        name: ing.name || '',
+        quantity: ing.quantity,
+        unit: ing.unit || '',
+        method: ing.method || '',
+      })),
+    };
+    return { success: true, recipe };
+  } catch (err) {
+    console.error('[extract-recipe-from-file] failed:', err);
+    return { success: false, error: err.message };
+  }
 });
 
 // ---------------------------------------------------------------

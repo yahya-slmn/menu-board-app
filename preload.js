@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   getRecipePhoto: (photoPath) => ipcRenderer.invoke('get-recipe-photo', photoPath),
   exportRecipes: (payload) => ipcRenderer.invoke('export-recipes', payload),
   exportScaledRecipe: (payload) => ipcRenderer.invoke('export-scaled-recipe', payload),
+  extractRecipeFromFile: (payload) => ipcRenderer.invoke('extract-recipe-from-file', payload),
 
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),
   listGeneratedMenus: () => ipcRenderer.invoke('list-generated-menus'),
