@@ -2,6 +2,9 @@ const state = {
   sections: [],
   currentSection: null,
   currentView: 'items',
+  // Whether Item Catalog's own section sub-list is expanded -- toggled by clicking "Item
+  // Catalog" while it's already the active view. Only ever shown while currentView === 'items'.
+  itemCatalogExpanded: true,
   categories: [],
   proteinTypes: [],
   currentGeneratedMenuId: null,
@@ -125,6 +128,16 @@ function renderSectionNav() {
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
+      // Clicking Item Catalog while it's already open toggles its own section sub-list
+      // open/closed, like a normal collapsible nav section; clicking it from anywhere else
+      // always opens it expanded. Picking a different nav item just switches views -- the
+      // sub-list belongs only to Item Catalog and is hidden for every other view regardless
+      // of this flag (see updateItemCatalogExpansion).
+      if (btn.dataset.view === 'items' && state.currentView === 'items') {
+        state.itemCatalogExpanded = !state.itemCatalogExpanded;
+      } else if (btn.dataset.view === 'items') {
+        state.itemCatalogExpanded = true;
+      }
       state.currentView = btn.dataset.view;
       renderView();
     });
@@ -137,8 +150,16 @@ function updateActiveViewButtons() {
   });
 }
 
+function updateItemCatalogExpansion() {
+  const expanded = state.currentView === 'items' && state.itemCatalogExpanded;
+  document.getElementById('section-nav').style.display = expanded ? 'block' : 'none';
+  const caret = document.getElementById('items-caret');
+  if (caret) caret.textContent = expanded ? '▾' : '▸';
+}
+
 function renderView() {
   updateActiveViewButtons();
+  updateItemCatalogExpansion();
   const main = document.getElementById('main');
   main.classList.toggle('build-mode', state.currentView === 'build');
   if (state.currentView === 'items') return renderItemsView(main);
@@ -499,12 +520,23 @@ async function openItemModal(existingItem) {
 // ============================================================
 // GENERATE VIEW
 // ============================================================
+// Section selection here is entirely self-contained (the "g-section" <select> below) --
+// deliberately NOT wired to state.currentSection or the Item Catalog sidebar list. The two
+// features used to share that one piece of state, which made whichever nav button was
+// clicked last silently change what the other view meant by "section"; owning it locally
+// removes that coupling entirely.
 function renderGenerateView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Generate Menu</h1><span class="section-pill">${currentSectionName()}</span></div>
+      <div><h1>Generate Menu</h1><span class="section-pill" id="g-section-pill">${state.sections[0].name}</span></div>
     </div>
     <div class="generate-controls">
+      <div class="field">
+        <label>Section</label>
+        <select id="g-section">
+          ${state.sections.map(s => `<option value="${s.code}">${s.name}</option>`).join('')}
+        </select>
+      </div>
       <div class="field">
         <label>Label</label>
         <input id="g-label" placeholder="e.g. September 2026" />
@@ -522,6 +554,12 @@ function renderGenerateView(main) {
     <div id="g-result"></div>
   `;
 
+  const sectionSelect = document.getElementById('g-section');
+  const sectionPill = document.getElementById('g-section-pill');
+  sectionSelect.addEventListener('change', () => {
+    sectionPill.textContent = state.sections.find(s => s.code === sectionSelect.value)?.name || '';
+  });
+
   document.getElementById('g-generate').addEventListener('click', async () => {
     const label = document.getElementById('g-label').value.trim() || 'Untitled Menu';
     const startDate = document.getElementById('g-start').value;
@@ -531,7 +569,7 @@ function renderGenerateView(main) {
     const resultEl = document.getElementById('g-result');
     resultEl.innerHTML = 'Generating…';
     const { menuId, resultDays, warnings } = await window.api.generateMenu({
-      sectionCode: state.currentSection, label, startDate, numWeekdays,
+      sectionCode: sectionSelect.value, label, startDate, numWeekdays,
     });
     state.currentGeneratedMenuId = menuId;
     renderMenuResult(resultEl, menuId, resultDays, warnings);
@@ -1953,6 +1991,33 @@ function scaleRecipeForExport(recipe, ingredients, multiplier) {
   return { scaledRecipe, scaledIngredients };
 }
 
+// Sums every ingredient's raw quantity number regardless of unit (120 GR + 5 PC = 125) --
+// ingredients are recorded in grams today (see lib/export.js), so a plain sum is meaningful
+// without any unit conversion. Shared by the "scale to target quantity" multiplier calc below
+// and the "Total Quantity" row in renderScaledRecipeResult, so the two stay in sync.
+function sumIngredientQuantities(ingredients) {
+  return roundNice(ingredients.reduce((sum, ing) => {
+    const q = typeof ing.quantity === 'number' ? ing.quantity : parseFloat(ing.quantity);
+    return isNaN(q) ? sum : sum + q;
+  }, 0));
+}
+
+// Computes the effective multiplier for "scale to target quantity" mode: target-total ÷ the
+// recipe's current total ingredient quantity (NOT quantity_produced, which is a free-text
+// container/serving count like "5pax" or "1 Tray" and isn't a weight). Returns { error } when
+// there's nothing to divide by or the target doesn't parse; { multiplier } otherwise.
+function computeMultiplierFromTarget(ingredients, targetQtyText) {
+  const originalTotal = sumIngredientQuantities(ingredients);
+  if (!originalTotal || originalTotal <= 0) {
+    return { error: 'This recipe has no ingredient quantities to scale against.' };
+  }
+  const target = parseFloat(targetQtyText);
+  if (!target || target <= 0) {
+    return { error: 'Please enter a target quantity greater than 0, e.g. 2000.' };
+  }
+  return { multiplier: target / originalTotal };
+}
+
 function renderCalculatorView(main) {
   main.innerHTML = `
     <div class="topbar">
@@ -1969,15 +2034,27 @@ function renderCalculatorView(main) {
         </div>
       </div>
       <div class="field" style="max-width:200px;">
-        <label>Quantity Produced (original)</label>
+        <label id="calc-qty-original-label">Quantity Produced (original)</label>
         <input id="calc-qty-original" value="" disabled />
       </div>
-      <div class="field" style="max-width:120px;">
+      <div class="field" style="max-width:260px;">
+        <label>Scaling Mode</label>
+        <div class="mode-toggle">
+          <button type="button" class="mode-toggle-btn active" data-mode="factor">Multiply by factor</button>
+          <button type="button" class="mode-toggle-btn" data-mode="target">Scale to target quantity</button>
+        </div>
+      </div>
+      <div class="field" style="max-width:120px;" id="calc-multiplier-field">
         <label>Multiplier</label>
         <input id="calc-multiplier" type="number" step="0.1" min="0" value="1" />
       </div>
+      <div class="field" style="max-width:160px; display:none;" id="calc-target-field">
+        <label>Target Total Quantity (g)</label>
+        <input id="calc-target-qty" type="number" step="1" min="0" placeholder="e.g. 2000" />
+      </div>
       <button class="primary" id="calc-calculate-btn" disabled>Calculate</button>
     </div>
+    <div id="calc-mode-error" style="display:none; color:var(--danger, #c0392b); font-size:12.5px; margin:-10px 0 14px;"></div>
 
     <div id="calc-result"></div>
   `;
@@ -1985,12 +2062,23 @@ function renderCalculatorView(main) {
   const nameInput = document.getElementById('calc-recipe-name');
   const listEl = document.getElementById('calc-recipe-list');
   const browseBtn = document.getElementById('calc-recipe-browse-btn');
+  const qtyOriginalLabel = document.getElementById('calc-qty-original-label');
   const qtyOriginalInput = document.getElementById('calc-qty-original');
+  const multiplierField = document.getElementById('calc-multiplier-field');
   const multiplierInput = document.getElementById('calc-multiplier');
+  const targetField = document.getElementById('calc-target-field');
+  const targetInput = document.getElementById('calc-target-qty');
+  const modeErrorEl = document.getElementById('calc-mode-error');
   const calculateBtn = document.getElementById('calc-calculate-btn');
   const resultEl = document.getElementById('calc-result');
 
+  let scalingMode = 'factor';
   let selectedRecipe = null;
+  // Full recipe + ingredients are fetched once per selection (below) and cached here, both to
+  // drive the "original" display for whichever mode is active and so Calculate doesn't have to
+  // re-fetch the same data.
+  let selectedFullRecipe = null;
+  let selectedIngredients = null;
   // Tracks whether the currently-open list is the "browse all" list specifically, so a second
   // click on the browse button closes it instead of just re-opening the same full list -- but
   // starting to type (which hands the list over to wireRecipeAutocomplete's own search results)
@@ -1999,17 +2087,56 @@ function renderCalculatorView(main) {
 
   function clearSelection() {
     selectedRecipe = null;
+    selectedFullRecipe = null;
+    selectedIngredients = null;
     qtyOriginalInput.value = '';
     calculateBtn.disabled = true;
     resultEl.innerHTML = '';
+    modeErrorEl.style.display = 'none';
   }
 
-  function onRecipePicked(recipe) {
+  // "Quantity Produced (original)" shows the recipe's free-text serving/container count in
+  // Multiply-by-factor mode (what it's always meant), but in Scale-to-target mode that field
+  // isn't what the target is measured against -- so it switches to showing the actual basis,
+  // the recipe's current total ingredient quantity, with the label swapped to match.
+  function updateQtyOriginalDisplay() {
+    if (!selectedFullRecipe) return;
+    if (scalingMode === 'factor') {
+      qtyOriginalLabel.textContent = 'Quantity Produced (original)';
+      qtyOriginalInput.value = selectedFullRecipe.quantity_produced || '';
+    } else {
+      qtyOriginalLabel.textContent = 'Total Ingredient Quantity (original)';
+      qtyOriginalInput.value = `${sumIngredientQuantities(selectedIngredients || [])}g`;
+    }
+  }
+
+  document.querySelectorAll('.generate-controls .mode-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.mode === scalingMode) return;
+      scalingMode = btn.dataset.mode;
+      document.querySelectorAll('.generate-controls .mode-toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === scalingMode));
+      multiplierField.style.display = scalingMode === 'factor' ? 'flex' : 'none';
+      targetField.style.display = scalingMode === 'target' ? 'flex' : 'none';
+      modeErrorEl.style.display = 'none';
+      updateQtyOriginalDisplay();
+    });
+  });
+
+  async function onRecipePicked(recipe) {
     selectedRecipe = recipe;
+    selectedFullRecipe = null;
+    selectedIngredients = null;
     nameInput.value = recipe.name;
-    qtyOriginalInput.value = recipe.quantity_produced || '';
-    calculateBtn.disabled = false;
+    qtyOriginalInput.value = '…';
+    calculateBtn.disabled = true;
     browseListShowing = false;
+
+    const { ingredients, ...fullRecipe } = await window.api.getRecipe(recipe.id);
+    if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
+    selectedFullRecipe = fullRecipe;
+    selectedIngredients = ingredients;
+    calculateBtn.disabled = false;
+    updateQtyOriginalDisplay();
   }
 
   nameInput.addEventListener('input', () => {
@@ -2039,13 +2166,24 @@ function renderCalculatorView(main) {
     nameInput.focus();
   });
 
-  calculateBtn.addEventListener('click', async () => {
-    if (!selectedRecipe) return;
-    const multiplier = parseFloat(multiplierInput.value);
-    if (!multiplier || multiplier <= 0) return alert('Please enter a multiplier greater than 0.');
+  calculateBtn.addEventListener('click', () => {
+    if (!selectedFullRecipe || !selectedIngredients) return;
+    modeErrorEl.style.display = 'none';
 
-    const { ingredients, ...fullRecipe } = await window.api.getRecipe(selectedRecipe.id);
-    renderScaledRecipeResult(resultEl, fullRecipe, ingredients, multiplier);
+    let multiplier;
+    if (scalingMode === 'factor') {
+      multiplier = parseFloat(multiplierInput.value);
+      if (!multiplier || multiplier <= 0) return alert('Please enter a multiplier greater than 0.');
+    } else {
+      const result = computeMultiplierFromTarget(selectedIngredients, targetInput.value);
+      if (result.error) {
+        modeErrorEl.textContent = result.error;
+        modeErrorEl.style.display = 'block';
+        return;
+      }
+      multiplier = result.multiplier;
+    }
+    renderScaledRecipeResult(resultEl, selectedFullRecipe, selectedIngredients, multiplier);
   });
 }
 
@@ -2100,12 +2238,8 @@ function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick, emptyMes
 function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
   const { scaledRecipe, scaledIngredients } = scaleRecipeForExport(recipe, ingredients, multiplier);
 
-  // Sums every ingredient's raw quantity number regardless of unit (120 GR + 5 PC = 125) --
-  // same logic as the "Total Quantity" row in the Excel export, kept in sync with it.
-  const totalQuantity = roundNice(scaledIngredients.reduce((sum, ing) => {
-    const q = typeof ing.quantity === 'number' ? ing.quantity : parseFloat(ing.quantity);
-    return isNaN(q) ? sum : sum + q;
-  }, 0));
+  // Same logic as the "Total Quantity" row in the Excel export, kept in sync with it.
+  const totalQuantity = sumIngredientQuantities(scaledIngredients);
 
   // Yield here is always recomputed from the scaled Total Quantity and the recipe's own fixed
   // waste_percent (read-only -- waste is set once on the recipe, not re-entered per

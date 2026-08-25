@@ -97,7 +97,9 @@ h1, h2, h3, .display {
   letter-spacing: 0.03em;
 }
 .nav-btn {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
   text-align: left;
   background: none;
@@ -112,6 +114,14 @@ h1, h2, h3, .display {
 }
 .nav-btn:hover { background: rgba(255,255,255,0.06); }
 .nav-btn.active { background: var(--sage-dark); color: white; font-weight: 500; }
+.nav-caret { font-size: 10px; opacity: 0.65; }
+
+/* Item Catalog's own section sub-list -- a collapsible child of the "Item Catalog" nav button
+   (toggled open/closed by clicking it), shown only while Item Catalog is the active view.
+   Generate Menu owns a completely separate, in-page section selector (see renderGenerateView)
+   and never touches this list or state.currentSection. */
+.section-sublist { margin: 2px 0 6px 10px; padding-left: 8px; border-left: 2px solid rgba(255,255,255,0.08); }
+.section-sublist .nav-btn { font-size: 12.5px; padding: 6px 10px; }
 
 /* ---------------- Main content ---------------- */
 .main { padding: 28px 36px; overflow-y: auto; }
