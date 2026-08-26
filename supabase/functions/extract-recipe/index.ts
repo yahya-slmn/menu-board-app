@@ -14,9 +14,12 @@ import Anthropic from "npm:@anthropic-ai/sdk";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 
-// Mapped 1:1 to the Recipe form's fields -- deliberately excludes "yield"/"net weight": that
-// field is computed live in the app from ingredient quantities + waste_percent (see
-// updateYieldCalculation in renderer.js), so asking the model for it would just be discarded.
+// Mapped 1:1 to the Recipe Extractor form's fields -- deliberately excludes "yield"/"net
+// weight": that field is computed live in the app from ingredient quantities + waste_percent
+// (see updateYieldCalculation in renderer.js), so asking the model for it would just be
+// discarded. Ingredients and method are nested under `processes` rather than flat, since one
+// card can describe multiple named sub-recipes (e.g. a base, a filling, a topping) that each
+// need their own ingredient list and method -- see extracted_recipe_processes.
 const RECIPE_SCHEMA = {
   type: "object",
   properties: {
@@ -28,32 +31,56 @@ const RECIPE_SCHEMA = {
     date_created: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] },
     waste_percent: { anyOf: [{ type: "number" }, { type: "null" }] },
     comment: { anyOf: [{ type: "string" }, { type: "null" }] },
-    ingredients: {
+    processes: {
       type: "array",
       items: {
         type: "object",
         properties: {
           name: { type: "string" },
-          quantity: { anyOf: [{ type: "number" }, { type: "null" }] },
-          unit: { anyOf: [{ type: "string" }, { type: "null" }] },
-          method: { anyOf: [{ type: "string" }, { type: "null" }] },
+          ingredients: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                quantity: { anyOf: [{ type: "number" }, { type: "null" }] },
+                unit: { anyOf: [{ type: "string" }, { type: "null" }] },
+                method: { anyOf: [{ type: "string" }, { type: "null" }] },
+              },
+              required: ["name", "quantity", "unit", "method"],
+              additionalProperties: false,
+            },
+          },
+          method_steps: { type: "array", items: { type: "string" } },
         },
-        required: ["name", "quantity", "unit", "method"],
+        required: ["name", "ingredients", "method_steps"],
         additionalProperties: false,
       },
     },
-    preparation_cooking_steps: { type: "array", items: { type: "string" } },
     presentation_serving_steps: { type: "array", items: { type: "string" } },
   },
   required: [
     "name", "quantity_produced", "prepared_by", "category", "country_origin",
-    "date_created", "waste_percent", "comment", "ingredients",
-    "preparation_cooking_steps", "presentation_serving_steps",
+    "date_created", "waste_percent", "comment", "processes",
+    "presentation_serving_steps",
   ],
   additionalProperties: false,
 };
 
-const PROMPT = `You are extracting structured data from a photo or scan of an old kitchen recipe card, for a school-nutrition recipe management app. Read it carefully and extract every field you can find. If a field isn't present on the card or you can't read it confidently, use null (or an empty array for lists) -- never guess or invent a value. Extract ingredient quantities as plain numbers only, with the unit in a separate field. Split preparation and presentation instructions into one array entry per distinct step or line, in the order they appear; if the card has them as one unbroken paragraph with no clear steps, return that whole paragraph as a single array entry. Do not extract or estimate a "yield" or "net weight" value -- this app calculates that automatically.`;
+const PROMPT = `You are extracting structured data from a photo or scan of an old kitchen recipe card, for a school-nutrition recipe management app. Read it carefully and extract every field you can find. If a field isn't present on the card or you can't read it confidently, use null (or an empty array for lists) -- never guess or invent a value. Extract ingredient quantities as plain numbers only, with the unit in a separate field.
+
+The images/pages above may all be part of the SAME single recipe card -- for example, the front and back of one card, or consecutive pages of a longer recipe. Treat them as one combined source and extract exactly ONE recipe from all of them together, never one recipe per image/page.
+
+The card describes one or more named processes (sub-recipes/components), each with its own ingredients and method -- extract each into its own entry in "processes". If the card describes multiple distinct components (e.g. a base, a filling, a topping, a sauce) -- whether they appear on the same page or split across different pages/photos -- use the card's own name for each one (e.g. "Vanilla Base", "Caramelized Sugar Top"). If the card is a single undivided recipe with no named components, return exactly one process, named after the dish itself. A process may have an empty "ingredients" array if it's method-only (e.g. a finishing/garnish step with no listed ingredients of its own).
+
+Split each process's method into one array entry per distinct step or line, in the order they appear; if that process's instructions are one unbroken paragraph with no clear steps, return that whole paragraph as a single array entry. presentation_serving_steps is for the finished, plated dish as a whole (not any one process) -- split the same way.
+
+Do not extract or estimate a "yield" or "net weight" value -- this app calculates that automatically.`;
+
+// Mirrors the caps enforced client-side (renderer.js's import-recipe-input handler) --
+// enforced independently here too, since this endpoint is the one that actually pays for and
+// rate-limits against the Anthropic API and shouldn't rely solely on the client behaving.
+const MAX_FILES = 10;
 
 // Every response is HTTP 200 with a {success, ...} JSON body, including failure cases -- the
 // caller (lib/recipeExtraction.js) only ever talks to this one shape, so it never has to
@@ -74,22 +101,42 @@ Deno.serve(async (req) => {
     return ok({ success: false, error: "Server misconfigured: ANTHROPIC_API_KEY not set" });
   }
 
-  let body: { base64?: string; mimeType?: string };
+  let body: { files?: { base64?: string; mimeType?: string; name?: string }[] };
   try {
     body = await req.json();
   } catch {
     return ok({ success: false, error: "Invalid request body" });
   }
 
-  const { base64, mimeType } = body;
-  if (!base64 || !mimeType) {
-    return ok({ success: false, error: "Missing base64 or mimeType" });
+  const files = body.files;
+  if (!files || files.length === 0) {
+    return ok({ success: false, error: "No files provided" });
+  }
+  if (files.length > MAX_FILES) {
+    return ok({ success: false, error: `Too many files (max ${MAX_FILES})` });
+  }
+  for (const f of files) {
+    if (!f.base64 || !f.mimeType) {
+      return ok({ success: false, error: "Missing base64 or mimeType on one or more files" });
+    }
   }
 
-  const isPdf = mimeType === "application/pdf";
-  const fileBlock: Record<string, unknown> = isPdf
-    ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
-    : { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } };
+  // One text label + one file block per upload -- Anthropic's own multi-image guidance
+  // recommends labeling each ("Image 1:", "Image 2:", ...) so the model can address them
+  // individually; here it also anchors the "these may be the same card" instruction in PROMPT.
+  // The original filename rides along in the label (not used by the model for anything) purely
+  // so a misordered/miscombined extraction can be traced back to which uploaded file produced
+  // which content, without needing to re-run the upload to find out.
+  const fileBlocks: Record<string, unknown>[] = [];
+  files.forEach((f, i) => {
+    fileBlocks.push({ type: "text", text: `Photo ${i + 1} of ${files.length} (${f.name || "file"}):` });
+    const isPdf = f.mimeType === "application/pdf";
+    fileBlocks.push(
+      isPdf
+        ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: f.base64 } }
+        : { type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } },
+    );
+  });
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -100,7 +147,7 @@ Deno.serve(async (req) => {
       max_tokens: 4096,
       // deno-lint-ignore no-explicit-any
       messages: [
-        { role: "user", content: [fileBlock, { type: "text", text: PROMPT }] },
+        { role: "user", content: [...fileBlocks, { type: "text", text: PROMPT }] },
       ] as any,
       output_config: { format: { type: "json_schema", schema: RECIPE_SCHEMA } },
     });

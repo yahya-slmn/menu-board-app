@@ -13,7 +13,7 @@ const {
 } = require('./lib/referenceData');
 const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
-const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, sanitizeSheetName } = require('./lib/export');
+const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, exportExtractedRecipes, sanitizeSheetName } = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 
 let mainWindow;
@@ -709,18 +709,364 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath
   return { success: true, path: savePath };
 });
 
-// "Import Recipe from File" -- never throws across IPC (a failed/declined/partial extraction
-// must never block the chef from just filling the form in manually), so every outcome comes
-// back as a plain { success, ... } result instead. On success, maps the model's raw extracted
-// fields onto the exact shape renderRecipeFormView already knows how to seed a form from (see
-// state.recipes.importedRecipe in renderer.js) -- so the New Recipe form, once opened, treats
-// this exactly like editing any other recipe object: same fields, same save-recipe path,
-// nothing new to validate. Ingredient rows come back with ingredientId: null (same as typing a
-// brand-new ingredient name by hand) since the extracted name hasn't been matched against the
-// canonical ingredients table yet -- she picks each from the autocomplete same as always.
-ipcMain.handle('extract-recipe-from-file', async (e, { base64, mimeType }) => {
+// ---------------------------------------------------------------
+// IPC: extracted ingredients & recipes (Recipe Extractor, Supabase)
+//
+// Fully separate from ingredients/recipes/recipe_ingredients above -- extracted_ingredients/
+// extracted_recipes/extracted_recipe_ingredients are their own tables with no FK relationship
+// to the originals (IN-/EX- codes instead of FB-/TTY-), so reviewing an extracted card never
+// touches or pollutes the canonical Recipe Book data. This section replaces the old
+// "Import Recipe from File" flow that used to write straight into Recipe Book's own tables.
+// ---------------------------------------------------------------
+ipcMain.handle('search-extracted-ingredients', async (e, query) => {
+  const q = (query || '').trim();
+  if (!q) return [];
+  const { data, error } = await supabase
+    .from('extracted_ingredients').select('*').ilike('name', `%${q}%`).order('name').limit(25);
+  if (error) throw supaFail('search-extracted-ingredients', error);
+  return data;
+});
+
+ipcMain.handle('add-extracted-ingredient', async (e, { name, defaultUnit, category, productCode }) => {
+  const { data, error } = await supabase
+    .from('extracted_ingredients')
+    .insert({ product_code: productCode || null, name: name.trim(), default_unit: defaultUnit || null, category: category || null })
+    .select('*')
+    .single();
+  if (error) throw supaFail('add-extracted-ingredient', error);
+  return data;
+});
+
+ipcMain.handle('list-extracted-recipes', async () => {
+  const { data, error } = await supabase
+    .from('extracted_recipes')
+    .select('id, code, name, category, prepared_by, date_created, quantity_produced')
+    .order('id', { ascending: false });
+  if (error) throw supaFail('list-extracted-recipes', error);
+  return data;
+});
+
+// Mirrors fetchRecipeWithIngredients above, against the extracted_* tables.
+async function fetchExtractedRecipeWithIngredients(id) {
+  const { data: recipe, error: recipeErr } = await supabase.from('extracted_recipes').select('*').eq('id', id).single();
+  if (recipeErr) {
+    if (recipeErr.code === 'PGRST116') return null; // no matching row
+    throw supaFail('fetchExtractedRecipeWithIngredients: load recipe', recipeErr);
+  }
+
+  const { data: processRows, error: procErr } = await supabase
+    .from('extracted_recipe_processes')
+    .select('id, name, method, sort_order')
+    .eq('extracted_recipe_id', id)
+    .order('sort_order');
+  if (procErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_processes', procErr);
+
+  const processIds = processRows.map(p => p.id);
+  let ingredientRows = [];
+  if (processIds.length) {
+    const { data, error: riErr } = await supabase
+      .from('extracted_recipe_ingredients')
+      .select('id, extracted_ingredient_id, extracted_recipe_process_id, quantity, unit, method, sort_order')
+      .in('extracted_recipe_process_id', processIds)
+      .order('sort_order');
+    if (riErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_ingredients', riErr);
+    ingredientRows = data;
+  }
+
+  const ingredientIds = [...new Set(ingredientRows.map(r => r.extracted_ingredient_id))];
+  let ingredientById = new Map();
+  if (ingredientIds.length) {
+    const { data: ingredientsData, error: ingErr } = await supabase
+      .from('extracted_ingredients').select('id, name, default_unit').in('id', ingredientIds);
+    if (ingErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_ingredients', ingErr);
+    ingredientById = new Map(ingredientsData.map(i => [i.id, i]));
+  }
+
+  const ingredientsByProcess = new Map();
+  for (const ri of ingredientRows) {
+    const ingredient = {
+      id: ri.id,
+      ingredient_id: ri.extracted_ingredient_id,
+      quantity: ri.quantity,
+      unit: ri.unit,
+      method: ri.method,
+      sort_order: ri.sort_order,
+      ingredient_name: ingredientById.get(ri.extracted_ingredient_id)?.name,
+      default_unit: ingredientById.get(ri.extracted_ingredient_id)?.default_unit,
+    };
+    if (!ingredientsByProcess.has(ri.extracted_recipe_process_id)) ingredientsByProcess.set(ri.extracted_recipe_process_id, []);
+    ingredientsByProcess.get(ri.extracted_recipe_process_id).push(ingredient);
+  }
+
+  const processes = processRows.map(p => ({
+    id: p.id,
+    name: p.name,
+    method: p.method,
+    sort_order: p.sort_order,
+    ingredients: ingredientsByProcess.get(p.id) || [],
+  }));
+
+  return { ...recipe, processes };
+}
+
+ipcMain.handle('get-extracted-recipe', async (e, id) => fetchExtractedRecipeWithIngredients(id));
+
+// Mirrors nextRecipeCode above, 'EX-' prefix, own table -- independent counter from TTY-.
+async function nextExtractedRecipeCode() {
+  const { data, error } = await supabase.from('extracted_recipes').select('code').like('code', 'EX-%');
+  if (error) throw supaFail('nextExtractedRecipeCode', error);
+  let max = 0;
+  for (const row of data) {
+    const n = parseInt(row.code.slice(3), 10);
+    if (!isNaN(n) && n > max) max = n;
+  }
+  return `EX-${String(max + 1).padStart(5, '0')}`;
+}
+
+// Own private Storage bucket, decoupled from recipe-photos -- same access pattern (private,
+// authenticated-only, fresh UUID path per upload).
+const EXTRACTED_RECIPE_PHOTOS_BUCKET = 'extracted-recipe-photos';
+
+async function uploadExtractedRecipePhoto(base64, ext) {
+  const path = `${crypto.randomUUID()}.${ext}`;
+  const buffer = Buffer.from(base64, 'base64');
+  const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+  const { error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).upload(path, buffer, { contentType });
+  if (error) throw supaFail('uploadExtractedRecipePhoto', error);
+  return path;
+}
+
+async function deleteExtractedRecipePhoto(path) {
+  if (!path) return;
+  const { error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).remove([path]);
+  if (error) console.error('[supabase] deleteExtractedRecipePhoto failed (non-fatal):', error.message);
+}
+
+ipcMain.handle('get-extracted-recipe-photo', async (e, photoPath) => {
+  if (!photoPath) return null;
+  const { data, error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).download(photoPath);
+  if (error) throw supaFail('get-extracted-recipe-photo', error);
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const ext = photoPath.split('.').pop().toLowerCase();
+  const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+  return `data:${mime};base64,${buffer.toString('base64')}`;
+});
+
+ipcMain.handle('save-extracted-recipe', async (e, payload) => {
+  let recipeId = payload.id;
+  let code;
+  const fields = {
+    name: payload.name,
+    quantity_produced: payload.quantityProduced || null,
+    prepared_by: payload.preparedBy || null,
+    category: payload.category || null,
+    country_origin: payload.countryOrigin || null,
+    yield_notes: payload.yieldNotes || null,
+    waste_percent: payload.wastePercent ?? null,
+    date_created: payload.dateCreated || null,
+    presentation_serving: payload.presentationServing || null,
+    comment: payload.comment || null,
+    checked_by: payload.checkedBy || null,
+  };
+
+  if (payload.photoBase64) {
+    fields.photo_path = await uploadExtractedRecipePhoto(payload.photoBase64, payload.photoExt);
+  } else if (payload.removePhoto) {
+    fields.photo_path = null;
+  }
+
+  if (recipeId) {
+    const RECIPE_GONE_MESSAGE = 'This recipe was deleted or changed elsewhere. Please refresh the Recipe Extractor and try again.';
+    const { data: existing, error: getErr } = await supabase.from('extracted_recipes').select('code, photo_path').eq('id', recipeId).maybeSingle();
+    if (getErr) throw supaFail('save-extracted-recipe: load existing code', getErr);
+    if (!existing) throw new Error(RECIPE_GONE_MESSAGE);
+    code = existing.code;
+
+    const { data: updated, error: updErr } = await supabase.from('extracted_recipes').update(fields).eq('id', recipeId).select('id');
+    if (updErr) throw supaFail('save-extracted-recipe: update extracted_recipes', updErr);
+    if (!updated || updated.length === 0) throw new Error(RECIPE_GONE_MESSAGE);
+
+    if ((payload.photoBase64 || payload.removePhoto) && existing.photo_path) {
+      await deleteExtractedRecipePhoto(existing.photo_path);
+    }
+
+    // Deleting the processes cascades to their ingredients (extracted_recipe_process_id ON
+    // DELETE CASCADE) -- no separate extracted_recipe_ingredients delete needed.
+    const { error: delErr } = await supabase.from('extracted_recipe_processes').delete().eq('extracted_recipe_id', recipeId);
+    if (delErr) throw supaFail('save-extracted-recipe: clear old extracted_recipe_processes', delErr);
+  } else {
+    code = await nextExtractedRecipeCode();
+    const { data: inserted, error: insErr } = await supabase
+      .from('extracted_recipes').insert({ code, ...fields }).select('id').single();
+    if (insErr) throw supaFail('save-extracted-recipe: insert extracted_recipes', insErr);
+    recipeId = inserted.id;
+  }
+
+  // Recipe Extractor doesn't force the chef to manually confirm every ingredient the way
+  // Recipe Book does -- any row that isn't already linked (typed by hand, or an extraction
+  // result that didn't get an exact match) is resolved here instead: same case-insensitive
+  // EXACT-match lookup extract-recipe-for-extractor uses, reusing an existing IN- row if one
+  // matches or creating a new one otherwise. Resolved once per unique name across every
+  // process (not just within one) so the same new name repeated in two processes -- e.g.
+  // "Sugar" in both a base and a topping -- doesn't create two duplicate rows.
+  const resolvedIdByName = new Map();
+  async function resolveIngredientId(name) {
+    const key = name.toLowerCase();
+    if (resolvedIdByName.has(key)) return resolvedIdByName.get(key);
+    const { data: existing, error: findErr } = await supabase
+      .from('extracted_ingredients').select('id').ilike('name', name).limit(1);
+    if (findErr) throw supaFail('save-extracted-recipe: match extracted_ingredients', findErr);
+    let id;
+    if (existing && existing.length > 0) {
+      id = existing[0].id;
+    } else {
+      // 'G' matches the default used when adding a new ingredient inline from the autocomplete.
+      const { data: created, error: createErr } = await supabase
+        .from('extracted_ingredients').insert({ name, default_unit: 'G' }).select('id').single();
+      if (createErr) throw supaFail('save-extracted-recipe: create extracted_ingredients', createErr);
+      id = created.id;
+    }
+    resolvedIdByName.set(key, id);
+    return id;
+  }
+
+  // Processes are inserted one at a time (not batched) so each row's returned id is
+  // unambiguously matched back to its own payload entry before that process's ingredients are
+  // built -- a batch insert's row order isn't worth relying on here, where a mismatch would
+  // silently misfile ingredients under the wrong process.
+  const rawProcesses = payload.processes || [];
+  const insertedProcessIds = [];
+  for (let idx = 0; idx < rawProcesses.length; idx++) {
+    const proc = rawProcesses[idx];
+    const { data: insertedProc, error: procInsErr } = await supabase
+      .from('extracted_recipe_processes')
+      .insert({
+        extracted_recipe_id: recipeId,
+        name: (proc.name || '').trim() || `Process ${idx + 1}`,
+        method: proc.method || null,
+        sort_order: idx,
+      })
+      .select('id')
+      .single();
+    if (procInsErr) throw supaFail('save-extracted-recipe: insert extracted_recipe_processes', procInsErr);
+    insertedProcessIds.push(insertedProc.id);
+  }
+
+  const ingredientRows = [];
+  for (let pIdx = 0; pIdx < rawProcesses.length; pIdx++) {
+    const procIngredients = rawProcesses[pIdx].ingredients || [];
+    for (let idx = 0; idx < procIngredients.length; idx++) {
+      const ing = procIngredients[idx];
+      const name = (ing.name || '').trim();
+      if (!ing.ingredientId && !name) continue;
+      const ingredientId = ing.ingredientId || await resolveIngredientId(name);
+      ingredientRows.push({
+        extracted_recipe_process_id: insertedProcessIds[pIdx],
+        extracted_ingredient_id: ingredientId,
+        quantity: ing.quantity ?? null,
+        unit: ing.unit || null,
+        method: ing.method || null,
+        sort_order: idx,
+      });
+    }
+  }
+  if (ingredientRows.length) {
+    const { error: insIngErr } = await supabase.from('extracted_recipe_ingredients').insert(ingredientRows);
+    if (insIngErr) throw supaFail('save-extracted-recipe: insert extracted_recipe_ingredients', insIngErr);
+  }
+
+  return { id: recipeId, code };
+});
+
+ipcMain.handle('delete-extracted-recipe', async (e, id) => {
+  const { data: existing } = await supabase.from('extracted_recipes').select('photo_path').eq('id', id).single();
+  // Cascades to extracted_recipe_ingredients via extracted_recipe_process_id ON DELETE CASCADE.
+  await supabase.from('extracted_recipe_processes').delete().eq('extracted_recipe_id', id);
+  const { error } = await supabase.from('extracted_recipes').delete().eq('id', id);
+  if (error) throw supaFail('delete-extracted-recipe', error);
+  if (existing?.photo_path) await deleteExtractedRecipePhoto(existing.photo_path);
+  return { success: true };
+});
+
+ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath }) => {
+  if (!recipeIds || recipeIds.length === 0) return { success: false };
+
+  if (!savePath) {
+    let defaultPath = 'Extracted_Recipes_Export.xlsx';
+    if (recipeIds.length === 1) {
+      const { data, error } = await supabase.from('extracted_recipes').select('name').eq('id', recipeIds[0]).single();
+      if (error) throw supaFail('export-extracted-recipes: load recipe name', error);
+      defaultPath = `${sanitizeSheetName(data.name)}.xlsx`;
+    }
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Extracted Recipes',
+      defaultPath,
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    savePath = result.filePath;
+  }
+
+  // lib/export.js's buildExtractedRecipeSheet renders each process as its own labeled section
+  // (name heading + its own ingredient table + its own Method block), not a merged flat list --
+  // see conversation notes for why this needed its own builder rather than reusing
+  // buildRecipeSheet, which stays pinned to Recipe Book's exact physical template.
+  await exportExtractedRecipes(async (recipeId) => {
+    const full = await fetchExtractedRecipeWithIngredients(recipeId);
+    const { processes, ...recipe } = full;
+    if (recipe.photo_path) {
+      const { data, error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
+      if (error) throw supaFail('export-extracted-recipes: download photo', error);
+      recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
+      recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+    }
+    return { recipe, processes };
+  }, recipeIds, savePath);
+  return { success: true, path: savePath };
+});
+
+// "Upload Recipe" on the Recipe Extractor screen -- never throws across IPC (a failed/declined
+// extraction must never block filling the form in manually), so every outcome comes back as a
+// plain { success, ... } result. On success, maps the model's raw extracted fields onto the
+// shape renderExtractorFormView seeds a form from (see state.extractor.importedRecipe in
+// renderer.js): one or more named processes, each carrying its own ingredients + method. Each
+// extracted ingredient name (across every process) is checked against extracted_ingredients for
+// a case-insensitive EXACT match (not fuzzy -- a wrong silent merge is worse than an extra
+// click) and pre-linked via ingredientId when found; anything short of exact is left null and
+// gets auto-resolved/created on save instead (see save-extracted-recipe).
+// Mirrors the caps enforced client-side (renderer.js) and independently in the Edge Function --
+// checked again here too, since this handler is a boundary a bug in either of those two places
+// shouldn't be able to bypass.
+const MAX_EXTRACT_FILES = 10;
+const MAX_EXTRACT_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_EXTRACT_TOTAL_BYTES = 20 * 1024 * 1024;
+
+ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
+  if (!files || files.length === 0) return { success: false, error: 'No files provided' };
+  if (files.length > MAX_EXTRACT_FILES) return { success: false, error: `Too many files (max ${MAX_EXTRACT_FILES})` };
+  let totalBytes = 0;
+  for (const f of files) {
+    const bytes = Buffer.from(f.base64 || '', 'base64').length;
+    if (bytes > MAX_EXTRACT_FILE_BYTES) return { success: false, error: `A file is larger than ${MAX_EXTRACT_FILE_BYTES / 1024 / 1024}MB` };
+    totalBytes += bytes;
+  }
+  if (totalBytes > MAX_EXTRACT_TOTAL_BYTES) return { success: false, error: `Combined file size exceeds ${MAX_EXTRACT_TOTAL_BYTES / 1024 / 1024}MB` };
+
   try {
-    const extracted = await extractRecipeFromFile({ base64, mimeType });
+    const extracted = await extractRecipeFromFile({ files });
+    const extractedProcesses = extracted.processes || [];
+
+    const ingredientIdByName = new Map();
+    const namesToMatch = [...new Set(
+      extractedProcesses.flatMap(p => (p.ingredients || []).map(ing => (ing.name || '').trim())).filter(Boolean)
+    )];
+    for (const name of namesToMatch) {
+      const { data, error } = await supabase
+        .from('extracted_ingredients').select('id, name').ilike('name', name).limit(1);
+      if (error) throw supaFail('extract-recipe-for-extractor: match extracted_ingredients', error);
+      if (data && data.length > 0) ingredientIdByName.set(name.toLowerCase(), data[0].id);
+    }
+
     const recipe = {
       name: extracted.name || '',
       quantity_produced: extracted.quantity_produced || '',
@@ -730,18 +1076,25 @@ ipcMain.handle('extract-recipe-from-file', async (e, { base64, mimeType }) => {
       date_created: extracted.date_created || '',
       waste_percent: extracted.waste_percent ?? null,
       comment: extracted.comment || '',
-      preparation_cooking: (extracted.preparation_cooking_steps || []).join('\n'),
       presentation_serving: (extracted.presentation_serving_steps || []).join('\n'),
-      ingredients: (extracted.ingredients || []).map(ing => ({
-        name: ing.name || '',
-        quantity: ing.quantity,
-        unit: ing.unit || '',
-        method: ing.method || '',
+      processes: extractedProcesses.map(proc => ({
+        name: proc.name || '',
+        method: (proc.method_steps || []).join('\n'),
+        ingredients: (proc.ingredients || []).map(ing => {
+          const name = (ing.name || '').trim();
+          return {
+            ingredientId: ingredientIdByName.get(name.toLowerCase()) || null,
+            name,
+            quantity: ing.quantity,
+            unit: ing.unit || '',
+            method: ing.method || '',
+          };
+        }),
       })),
     };
     return { success: true, recipe };
   } catch (err) {
-    console.error('[extract-recipe-from-file] failed:', err);
+    console.error('[extract-recipe-for-extractor] failed:', err);
     return { success: false, error: err.message };
   }
 });

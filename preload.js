@@ -31,7 +31,16 @@ contextBridge.exposeInMainWorld('api', {
   getRecipePhoto: (photoPath) => ipcRenderer.invoke('get-recipe-photo', photoPath),
   exportRecipes: (payload) => ipcRenderer.invoke('export-recipes', payload),
   exportScaledRecipe: (payload) => ipcRenderer.invoke('export-scaled-recipe', payload),
-  extractRecipeFromFile: (payload) => ipcRenderer.invoke('extract-recipe-from-file', payload),
+
+  searchExtractedIngredients: (query) => ipcRenderer.invoke('search-extracted-ingredients', query),
+  addExtractedIngredient: (payload) => ipcRenderer.invoke('add-extracted-ingredient', payload),
+  listExtractedRecipes: () => ipcRenderer.invoke('list-extracted-recipes'),
+  getExtractedRecipe: (id) => ipcRenderer.invoke('get-extracted-recipe', id),
+  saveExtractedRecipe: (payload) => ipcRenderer.invoke('save-extracted-recipe', payload),
+  deleteExtractedRecipe: (id) => ipcRenderer.invoke('delete-extracted-recipe', id),
+  getExtractedRecipePhoto: (photoPath) => ipcRenderer.invoke('get-extracted-recipe-photo', photoPath),
+  exportExtractedRecipes: (payload) => ipcRenderer.invoke('export-extracted-recipes', payload),
+  extractRecipeForExtractor: (payload) => ipcRenderer.invoke('extract-recipe-for-extractor', payload),
 
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),
   listGeneratedMenus: () => ipcRenderer.invoke('list-generated-menus'),

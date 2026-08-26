@@ -13,12 +13,87 @@ const state = {
     view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false,
     prepMode: null, prepText: '', prepItems: [],
     presentationMode: null, presentationText: '', presentationItems: [],
-    // Set by "Import Recipe from File" just before opening a fresh New Recipe form; consumed
-    // (and cleared) the moment renderRecipeFormView reads it, so it never leaks into a later
-    // plain "+ New Recipe" click -- see renderRecipeFormView's non-editing branch.
+    importedRecipe: null,
+  },
+  // Recipe Extractor's own state -- structurally different from `recipes` above (processes
+  // instead of a flat ingredientRows/prep pair), since one extracted card can describe several
+  // named sub-recipes (e.g. "Vanilla Base", "Caramelized Sugar Top"), each with its own
+  // ingredients + method. Recipe-level fields (photo, presentation/serving) still mirror
+  // `recipes` -- only ingredients+method moved under `processes`.
+  extractor: {
+    view: 'list', formId: null, pendingPhoto: null, removePhoto: false,
+    processes: [],
+    presentationMode: null, presentationText: '', presentationItems: [],
+    // Set by "Upload Recipe" just before opening a fresh New Recipe form; consumed (and
+    // cleared) the moment renderExtractorFormView reads it -- see its non-editing branch.
     importedRecipe: null,
   },
 };
+
+// Recipe Book and Recipe Extractor are two fully separate screens/tables (see CLAUDE.md-
+// equivalent conversation notes: extracted_recipes/extracted_ingredients have no FK
+// relationship to recipes/ingredients) with two fully separate forms (renderRecipeFormView vs.
+// renderExtractorFormView) -- their shapes diverged once Extractor gained multiple named
+// processes. RECIPE_NS still exists as the shared config both screens' list view reads
+// (title/labels/api), and the ingredient-row-level pieces (autocomplete/dedupe, the Text/List
+// toggle) are still reused by both at a lower level -- just not one shared top-level form.
+const RECIPE_NS = {
+  book: {
+    stateKey: 'recipes',
+    title: 'Recipe Book',
+    subtitle: 'Company recipe cards',
+    codeLabel: 'TTY',
+    searchPlaceholder: 'Search by name or TTY code…',
+    backLabel: '← Back to Recipe Book',
+    newRecipeHint: 'Click "+ New Recipe" to create the first one.',
+    allowManualNew: true,
+    requireIngredientLink: true,
+    openNew: () => openNewRecipeForm(RECIPE_NS.book),
+    openEdit: (id) => openEditRecipeForm(RECIPE_NS.book, id),
+    api: {
+      list: () => window.api.listRecipes(),
+      get: (id) => window.api.getRecipe(id),
+      save: (payload) => window.api.saveRecipe(payload),
+      del: (id) => window.api.deleteRecipe(id),
+      getPhoto: (path) => window.api.getRecipePhoto(path),
+      exportSelected: (recipeIds) => window.api.exportRecipes({ recipeIds }),
+      searchIngredients: (q) => window.api.searchIngredients(q),
+      addIngredient: (payload) => window.api.addIngredient(payload),
+    },
+  },
+  extractor: {
+    stateKey: 'extractor',
+    title: 'Recipe Extractor',
+    subtitle: 'Extracted recipe cards',
+    codeLabel: 'EX',
+    searchPlaceholder: 'Search by name or EX code…',
+    backLabel: '← Back to Recipe Extractor',
+    newRecipeHint: 'Click "Upload Recipe" to create the first one.',
+    // Extraction-only: no blank/manual "+ New Recipe" entry point here -- Recipe Book already
+    // covers hand-typed recipes, and mixing the two would blur why an EX- recipe exists.
+    allowManualNew: false,
+    extract: (payload) => window.api.extractRecipeForExtractor(payload),
+    openNew: () => openNewExtractorForm(),
+    openEdit: (id) => openEditExtractorForm(id),
+    api: {
+      list: () => window.api.listExtractedRecipes(),
+      get: (id) => window.api.getExtractedRecipe(id),
+      save: (payload) => window.api.saveExtractedRecipe(payload),
+      del: (id) => window.api.deleteExtractedRecipe(id),
+      getPhoto: (path) => window.api.getExtractedRecipePhoto(path),
+      exportSelected: (recipeIds) => window.api.exportExtractedRecipes({ recipeIds }),
+      searchIngredients: (q) => window.api.searchExtractedIngredients(q),
+      addIngredient: (payload) => window.api.addExtractedIngredient(payload),
+    },
+  },
+};
+
+// Recipe Extractor's "Upload Recipe" multi-file caps -- mirrored independently in main.js's
+// extract-recipe-for-extractor handler and the extract-recipe Edge Function, since this is
+// only the first (fastest, most specific) of three checks, not the only one.
+const MAX_EXTRACT_FILES = 10;
+const MAX_EXTRACT_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_EXTRACT_TOTAL_BYTES = 20 * 1024 * 1024;
 
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
 
@@ -67,15 +142,16 @@ function showToast(message) {
 // renderItemsView/renderHistoryView/renderRecipeListView/renderIngredientsView/
 // renderExportAllView/renderGenerateView), so replacing them just shows the same screen with
 // fresher data underneath. Build Menu (state.builder.sections[...].selections) and an
-// in-progress Recipe form (state.recipes.ingredientRows) hold real unsaved work that a
+// in-progress Recipe/Extractor form (state.recipes/extractor.ingredientRows) hold real unsaved work that a
 // re-render would silently discard, and an open Add/Edit modal (Item/Ingredient, appended to
 // document.body) was populated from data fetched at modal-open time -- none of these should
 // ever be touched by a background refresh.
-const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'ingredients', 'exportAll', 'generate'];
+const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'ingredients', 'exportAll', 'generate'];
 function isSafeToForceRerender() {
   if (document.querySelector('.modal-overlay')) return false;
   if (state.currentView === 'build') return false;
   if (state.currentView === 'recipes' && state.recipes.view === 'form') return false;
+  if (state.currentView === 'extractor' && state.extractor.view === 'form') return false;
   return SAFE_REFRESH_VIEWS.includes(state.currentView);
 }
 
@@ -168,6 +244,7 @@ function renderView() {
   if (state.currentView === 'history') return renderHistoryView(main);
   if (state.currentView === 'exportAll') return renderExportAllView(main);
   if (state.currentView === 'recipes') return renderRecipesView(main);
+  if (state.currentView === 'extractor') return renderExtractorView(main);
   if (state.currentView === 'calculator') return renderCalculatorView(main);
   if (state.currentView === 'ingredients') return renderIngredientsView(main);
 }
@@ -1116,36 +1193,44 @@ async function renderExportAllView(main) {
 // RECIPE BOOK
 // ============================================================
 function renderRecipesView(main) {
-  if (state.recipes.view === 'form') return renderRecipeFormView(main);
-  return renderRecipeListView(main);
+  const ns = RECIPE_NS.book;
+  if (state[ns.stateKey].view === 'form') return renderRecipeFormView(main, ns);
+  return renderRecipeListView(main, ns);
 }
 
-// Shared by both form-entry points and "Back to Recipe Book" -- clears every piece of
-// in-progress form state so the next renderRecipeFormView() call re-initializes it fresh
-// from whichever recipe (or blank slate) it's opening.
-function resetRecipeFormState() {
-  state.recipes.ingredientRows = [];
-  state.recipes.pendingPhoto = null;
-  state.recipes.removePhoto = false;
-  state.recipes.prepMode = null;
-  state.recipes.prepText = '';
-  state.recipes.prepItems = [];
-  state.recipes.presentationMode = null;
-  state.recipes.presentationText = '';
-  state.recipes.presentationItems = [];
+function renderExtractorView(main) {
+  const ns = RECIPE_NS.extractor;
+  if (state[ns.stateKey].view === 'form') return renderExtractorFormView(main);
+  return renderRecipeListView(main, ns);
 }
 
-function openNewRecipeForm() {
-  state.recipes.view = 'form';
-  state.recipes.formId = null;
-  resetRecipeFormState();
+// Recipe Book-only now (Recipe Extractor has its own resetExtractorFormState, below) -- clears
+// every piece of in-progress form state so the next renderRecipeFormView() call re-initializes
+// it fresh from whichever recipe (or blank slate) it's opening.
+function resetRecipeFormState(ns) {
+  const s = state[ns.stateKey];
+  s.ingredientRows = [];
+  s.pendingPhoto = null;
+  s.removePhoto = false;
+  s.prepMode = null;
+  s.prepText = '';
+  s.prepItems = [];
+  s.presentationMode = null;
+  s.presentationText = '';
+  s.presentationItems = [];
+}
+
+function openNewRecipeForm(ns) {
+  state[ns.stateKey].view = 'form';
+  state[ns.stateKey].formId = null;
+  resetRecipeFormState(ns);
   renderView();
 }
 
-function openEditRecipeForm(id) {
-  state.recipes.view = 'form';
-  state.recipes.formId = id;
-  resetRecipeFormState();
+function openEditRecipeForm(ns, id) {
+  state[ns.stateKey].view = 'form';
+  state[ns.stateKey].formId = id;
+  resetRecipeFormState(ns);
   renderView();
 }
 
@@ -1177,18 +1262,19 @@ function groupRecipesByMonth(list) {
   return sorted;
 }
 
-async function renderRecipeListView(main) {
+async function renderRecipeListView(main, ns) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Recipe Book</h1><span class="section-pill">Company recipe cards</span></div>
+      <div><h1>${ns.title}</h1><span class="section-pill">${ns.subtitle}</span></div>
       <div style="display:flex; gap:10px;">
-        <button class="secondary" id="import-recipe-btn">Import Recipe from File</button>
-        <button class="primary" id="new-recipe-btn">+ New Recipe</button>
+        ${ns.extract ? '<button class="secondary" id="import-recipe-btn">Upload Recipe</button>' : ''}
+        ${ns.allowManualNew ? '<button class="primary" id="new-recipe-btn">+ New Recipe</button>' : ''}
       </div>
     </div>
-    <input type="file" id="import-recipe-input" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" hidden />
+    ${ns.extract ? '<input type="file" id="import-recipe-input" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden />' : ''}
+    ${ns.extract ? '<div id="extract-progress-wrap"></div>' : ''}
     <div class="search-bar">
-      <input id="recipe-search" type="search" placeholder="Search by name or TTY code…" />
+      <input id="recipe-search" type="search" placeholder="${ns.searchPlaceholder}" />
     </div>
     <div style="margin-bottom:14px;">
       <button class="secondary" id="export-selected-btn" disabled>Export Selected</button>
@@ -1196,48 +1282,87 @@ async function renderRecipeListView(main) {
     </div>
     <div id="recipes-content">Loading…</div>
   `;
-  document.getElementById('new-recipe-btn').addEventListener('click', openNewRecipeForm);
+  if (ns.allowManualNew) {
+    document.getElementById('new-recipe-btn').addEventListener('click', () => ns.openNew());
+  }
 
-  const importBtn = document.getElementById('import-recipe-btn');
-  const importInput = document.getElementById('import-recipe-input');
-  importBtn.addEventListener('click', () => importInput.click());
-  importInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    e.target.value = ''; // always reset so picking the same file twice still fires 'change'
-    if (!file) return;
+  if (ns.extract) {
+    const importBtn = document.getElementById('import-recipe-btn');
+    const importInput = document.getElementById('import-recipe-input');
+    const progressWrap = document.getElementById('extract-progress-wrap');
+    importBtn.addEventListener('click', () => importInput.click());
+    importInput.addEventListener('change', async (e) => {
+      const files = [...e.target.files];
+      e.target.value = ''; // always reset so picking the same file(s) twice still fires 'change'
+      if (files.length === 0) return;
 
-    importBtn.disabled = true;
-    importBtn.textContent = 'Extracting recipe…';
-    try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(file);
-      });
-      const base64 = dataUrl.split(',')[1];
-      const result = await window.api.extractRecipeFromFile({ base64, mimeType: file.type });
-      if (!result.success) {
-        alert(`Couldn't extract this file: ${result.error || 'unknown error'}. Opening a blank recipe instead — you can fill it in manually.`);
-        openNewRecipeForm();
+      // Caps mirrored independently in main.js's extract-recipe-for-extractor handler and the
+      // extract-recipe Edge Function -- checked here first purely so a chef picking way too
+      // many/too-large files gets an immediate, specific message instead of a round trip.
+      if (files.length > MAX_EXTRACT_FILES) {
+        alert(`Please select at most ${MAX_EXTRACT_FILES} files at once.`);
         return;
       }
-      // openNewRecipeForm() resets and re-renders the form synchronously, so importedRecipe
-      // must be set first -- renderRecipeFormView reads it on its very first (synchronous)
-      // pass through the non-editing branch, before this function would get a chance to set it
-      // afterward.
-      state.recipes.importedRecipe = result.recipe;
-      openNewRecipeForm();
-    } catch (err) {
-      alert(`Couldn't extract this file: ${err.message}. Opening a blank recipe instead — you can fill it in manually.`);
-      openNewRecipeForm();
-    } finally {
-      importBtn.disabled = false;
-      importBtn.textContent = 'Import Recipe from File';
-    }
-  });
+      const oversized = files.find(f => f.size > MAX_EXTRACT_FILE_BYTES);
+      if (oversized) {
+        alert(`"${oversized.name}" is larger than ${MAX_EXTRACT_FILE_BYTES / 1024 / 1024}MB. Please choose smaller files.`);
+        return;
+      }
+      const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+      if (totalBytes > MAX_EXTRACT_TOTAL_BYTES) {
+        alert(`Combined file size exceeds ${MAX_EXTRACT_TOTAL_BYTES / 1024 / 1024}MB. Please select fewer or smaller files.`);
+        return;
+      }
 
-  const recipes = await window.api.listRecipes();
+      importBtn.disabled = true;
+      importBtn.textContent = 'Extracting recipe…';
+      // Visible spinner + indeterminate progress bar -- the extraction call is a single-shot
+      // Anthropic API round trip through the Edge Function, with no real progress fraction to
+      // report, so this is deliberately indeterminate rather than a fake percentage.
+      const fileWord = files.length === 1 ? 'photo' : 'photos';
+      progressWrap.innerHTML = `
+        <div class="extract-progress">
+          <div class="extract-progress-row">
+            <span class="extract-progress-spinner"></span>
+            <span>Extracting recipe from ${files.length} ${fileWord}… this can take a few seconds.</span>
+          </div>
+          <div class="extract-progress-track"><div class="extract-progress-bar"></div></div>
+        </div>
+      `;
+      try {
+        // All files are sent together in one extraction call (not one call per file merged
+        // after) so the model has full cross-page context -- required for e.g. correctly
+        // combining a "Vanilla Base" on one photo and a "Caramelized Sugar Top" on another into
+        // one recipe's processes, instead of risking duplicate/conflicting detection.
+        const filePayloads = await Promise.all(files.map(file => new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve({ base64: reader.result.split(',')[1], mimeType: file.type, name: file.name });
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        })));
+        const result = await ns.extract({ files: filePayloads });
+        if (!result.success) {
+          alert(`Couldn't extract this upload: ${result.error || 'unknown error'}. Opening a blank recipe instead — you can fill it in manually.`);
+          ns.openNew();
+          return;
+        }
+        // ns.openNew() resets and re-renders the form synchronously, so importedRecipe must be
+        // set first -- the form reads it on its very first (synchronous) pass through the
+        // non-editing branch, before this function would get a chance to set it afterward.
+        state[ns.stateKey].importedRecipe = result.recipe;
+        ns.openNew();
+      } catch (err) {
+        alert(`Couldn't extract this file: ${err.message}. Opening a blank recipe instead — you can fill it in manually.`);
+        ns.openNew();
+      } finally {
+        importBtn.disabled = false;
+        importBtn.textContent = 'Upload Recipe';
+        progressWrap.innerHTML = '';
+      }
+    });
+  }
+
+  const recipes = await ns.api.list();
   const searchInput = document.getElementById('recipe-search');
   const content = document.getElementById('recipes-content');
   const exportBtn = document.getElementById('export-selected-btn');
@@ -1245,7 +1370,7 @@ async function renderRecipeListView(main) {
   const selected = new Set();
 
   if (recipes.length === 0) {
-    content.innerHTML = `<div class="empty-state"><div class="display">No recipes yet</div>Click "+ New Recipe" to create the first one.</div>`;
+    content.innerHTML = `<div class="empty-state"><div class="display">No recipes yet</div>${ns.newRecipeHint}</div>`;
     return;
   }
 
@@ -1331,15 +1456,15 @@ async function renderRecipeListView(main) {
     updateMonthCheckboxStates();
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
-      btn.addEventListener('click', () => openEditRecipeForm(parseInt(btn.dataset.edit, 10)));
+      btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.edit, 10)));
     });
     content.querySelectorAll('[data-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = parseInt(btn.dataset.delete, 10);
         const recipe = recipes.find(r => r.id === id);
         if (!confirm(`Delete "${recipe.name}" (${recipe.code})? This cannot be undone.`)) return;
-        await window.api.deleteRecipe(id);
-        renderRecipeListView(main);
+        await ns.api.del(id);
+        renderRecipeListView(main, ns);
       });
     });
   }
@@ -1348,7 +1473,7 @@ async function renderRecipeListView(main) {
     const originalLabel = exportBtn.textContent;
     exportBtn.disabled = true;
     exportBtn.textContent = 'Exporting…';
-    const result = await window.api.exportRecipes({ recipeIds: [...selected] });
+    const result = await ns.api.exportSelected([...selected]);
     if (result.success) alert(`Exported to ${result.path}`);
     else if (!result.cancelled) alert('Export failed.');
     exportBtn.textContent = originalLabel;
@@ -1361,11 +1486,11 @@ async function renderRecipeListView(main) {
     deleteSelectedBtn.disabled = true;
     deleteSelectedBtn.textContent = 'Deleting…';
     try {
-      for (const id of selected) await window.api.deleteRecipe(id);
+      for (const id of selected) await ns.api.del(id);
     } catch (err) {
       alert(`Delete failed: ${err.message}`);
     }
-    renderRecipeListView(main);
+    renderRecipeListView(main, ns);
   });
 
   searchInput.addEventListener('input', renderFiltered);
@@ -1378,17 +1503,18 @@ function makeEmptyIngredientRow() {
   return { localId: ++_recipeRowLocalIdCounter, ingredientId: null, name: '', quantity: '', unit: '', method: '' };
 }
 
-async function renderRecipeFormView(main) {
-  const editing = !!state.recipes.formId;
+async function renderRecipeFormView(main, ns) {
+  const s = state[ns.stateKey];
+  const editing = !!s.formId;
   let recipe = null;
   let existingPhotoDataUrl = null;
   if (editing) {
-    recipe = await window.api.getRecipe(state.recipes.formId);
+    recipe = await ns.api.get(s.formId);
     if (recipe.photo_path) {
-      existingPhotoDataUrl = await window.api.getRecipePhoto(recipe.photo_path);
+      existingPhotoDataUrl = await ns.api.getPhoto(recipe.photo_path);
     }
-    if (state.recipes.ingredientRows.length === 0) {
-      state.recipes.ingredientRows = recipe.ingredients.map(ri => ({
+    if (s.ingredientRows.length === 0) {
+      s.ingredientRows = recipe.ingredients.map(ri => ({
         localId: ++_recipeRowLocalIdCounter,
         ingredientId: ri.ingredient_id,
         name: ri.ingredient_name,
@@ -1398,19 +1524,21 @@ async function renderRecipeFormView(main) {
       }));
     }
   } else {
-    // A New Recipe form opened via "Import Recipe from File" carries extracted values here --
-    // consumed once (and cleared) so a later plain "+ New Recipe" click starts blank. Every
-    // downstream read below goes through the same recipe?.field accessors the editing branch
-    // above uses, so imported data is fully editable and goes through the exact same save path
-    // as a hand-typed new recipe -- it's never sent anywhere on its own.
-    recipe = state.recipes.importedRecipe;
-    state.recipes.importedRecipe = null;
-    if (state.recipes.ingredientRows.length === 0) {
+    // A New Recipe form opened via "Upload Recipe" carries extracted values here -- consumed
+    // once (and cleared) so a later plain "+ New Recipe" click starts blank. Every downstream
+    // read below goes through the same recipe?.field accessors the editing branch above uses,
+    // so imported data is fully editable and goes through the exact same save path as a
+    // hand-typed new recipe -- it's never sent anywhere on its own. ingredientId comes through
+    // already resolved when the extraction handler found an exact-name match against this
+    // namespace's ingredient table; otherwise it's null, same as typing a new name by hand.
+    recipe = s.importedRecipe;
+    s.importedRecipe = null;
+    if (s.ingredientRows.length === 0) {
       const importedIngredients = recipe?.ingredients || [];
-      state.recipes.ingredientRows = importedIngredients.length > 0
+      s.ingredientRows = importedIngredients.length > 0
         ? importedIngredients.map(ing => ({
             localId: ++_recipeRowLocalIdCounter,
-            ingredientId: null, // not linked to the ingredients table yet -- pick from the autocomplete, same as typing a new name by hand
+            ingredientId: ing.ingredientId || null,
             name: ing.name || '',
             quantity: ing.quantity != null ? String(ing.quantity) : '',
             unit: ing.unit || '',
@@ -1420,19 +1548,19 @@ async function renderRecipeFormView(main) {
     }
   }
 
-  initTextListField('prep', recipe?.preparation_cooking);
-  initTextListField('presentation', recipe?.presentation_serving);
+  initTextListField(s, TEXT_LIST_FIELDS.prep, recipe?.preparation_cooking);
+  initTextListField(s, TEXT_LIST_FIELDS.presentation, recipe?.presentation_serving);
 
-  const currentPhotoSrc = state.recipes.pendingPhoto
-    ? state.recipes.pendingPhoto.dataUrl
-    : (existingPhotoDataUrl && !state.recipes.removePhoto ? existingPhotoDataUrl : null);
+  const currentPhotoSrc = s.pendingPhoto
+    ? s.pendingPhoto.dataUrl
+    : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
 
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${editing ? 'Edit Recipe' : 'New Recipe'}</h1>
-        <span class="section-pill">${editing ? recipe.code : 'TTY code assigned after saving'}</span>
+        <span class="section-pill">${editing ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
       </div>
-      <button class="secondary" id="rf-back-btn">← Back to Recipe Book</button>
+      <button class="secondary" id="rf-back-btn">${ns.backLabel}</button>
     </div>
 
     <div class="generate-controls">
@@ -1484,9 +1612,9 @@ async function renderRecipeFormView(main) {
   `;
 
   function updatePhotoPreview() {
-    const src = state.recipes.pendingPhoto
-      ? state.recipes.pendingPhoto.dataUrl
-      : (existingPhotoDataUrl && !state.recipes.removePhoto ? existingPhotoDataUrl : null);
+    const src = s.pendingPhoto
+      ? s.pendingPhoto.dataUrl
+      : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
     document.getElementById('rf-photo-preview-wrap').style.display = src ? '' : 'none';
     document.getElementById('rf-photo-preview').src = src || '';
   }
@@ -1509,31 +1637,31 @@ async function renderRecipeFormView(main) {
       const dataUrl = reader.result;
       const base64 = dataUrl.split(',')[1];
       const ext = file.type === 'image/png' ? 'png' : 'jpeg';
-      state.recipes.pendingPhoto = { dataUrl, base64, ext };
-      state.recipes.removePhoto = false;
+      s.pendingPhoto = { dataUrl, base64, ext };
+      s.removePhoto = false;
       updatePhotoPreview();
     };
     reader.readAsDataURL(file);
   });
 
   document.getElementById('rf-photo-remove-btn').addEventListener('click', () => {
-    state.recipes.pendingPhoto = null;
-    state.recipes.removePhoto = true;
+    s.pendingPhoto = null;
+    s.removePhoto = true;
     document.getElementById('rf-photo-input').value = '';
     updatePhotoPreview();
   });
 
-  document.getElementById('rf-back-btn').addEventListener('click', goBackToRecipeList);
+  document.getElementById('rf-back-btn').addEventListener('click', () => goBackToRecipeList(ns));
   document.getElementById('rf-add-row-btn').addEventListener('click', () => {
-    state.recipes.ingredientRows.push(makeEmptyIngredientRow());
-    renderIngredientRows();
+    s.ingredientRows.push(makeEmptyIngredientRow());
+    renderIngredientRows(ns);
   });
-  document.getElementById('rf-save-btn').addEventListener('click', saveRecipeForm);
-  document.getElementById('rf-waste').addEventListener('input', updateYieldCalculation);
+  document.getElementById('rf-save-btn').addEventListener('click', () => saveRecipeForm(ns));
+  document.getElementById('rf-waste').addEventListener('input', () => updateYieldCalculation(s.ingredientRows));
 
-  renderIngredientRows();
-  renderTextListFieldBody('prep');
-  renderTextListFieldBody('presentation');
+  renderIngredientRows(ns);
+  renderTextListFieldBody(s, TEXT_LIST_FIELDS.prep);
+  renderTextListFieldBody(s, TEXT_LIST_FIELDS.presentation);
 }
 
 // Total Quantity is the sum of every ingredient row's numeric quantity -- same convention
@@ -1544,16 +1672,17 @@ async function renderRecipeFormView(main) {
 // Waste % is a persisted, fixed-per-recipe value (recipes.waste_percent) -- since it's always
 // correctly pre-filled on load, recomputing here on every render reproduces exactly what was
 // last saved, so there's no clobbering risk the way there was when waste was transient.
-function updateYieldCalculation() {
+// Takes the flat array of ingredient rows to total directly, rather than a namespace -- Recipe
+// Book passes its one ingredientRows array; Recipe Extractor passes every process's rows
+// flattened together, since Total Quantity/Yield stay recipe-level even with multiple
+// processes (see sumIngredientQuantities, reused here for the same arithmetic export uses).
+function updateYieldCalculation(allIngredientRows) {
   const totalEl = document.getElementById('rf-total-qty');
   const yieldEl = document.getElementById('rf-yield');
   const wasteEl = document.getElementById('rf-waste');
   if (!totalEl || !yieldEl || !wasteEl) return;
 
-  const totalQty = state.recipes.ingredientRows.reduce((sum, row) => {
-    const q = parseFloat(row.quantity);
-    return isNaN(q) ? sum : sum + q;
-  }, 0);
+  const totalQty = sumIngredientQuantities(allIngredientRows);
   totalEl.textContent = `Total Quantity: ${roundNice(totalQty)} G`;
 
   const waste = parseFloat(wasteEl.value);
@@ -1585,24 +1714,28 @@ const TEXT_LIST_FIELDS = {
   },
 };
 
-function initTextListField(key, rawValue) {
-  const cfg = TEXT_LIST_FIELDS[key];
-  if (state.recipes[cfg.modeKey] !== null) return; // already initialized this form session
+// Takes the object to read/write directly (`target`) and a field config (`cfg`) rather than a
+// namespace+key lookup -- Recipe Book calls these against state.recipes with TEXT_LIST_FIELDS.
+// prep/.presentation; Recipe Extractor reuses the same mechanism against state.extractor
+// (TEXT_LIST_FIELDS.presentation, recipe-level) AND against each process object individually
+// (a per-process cfg from makeProcessMethodCfg, below) -- same toggle/Enter-to-insert/remove
+// behavior either way, just pointed at a different object.
+function initTextListField(target, cfg, rawValue) {
+  if (target[cfg.modeKey] != null) return; // already initialized this form session
   const raw = rawValue || '';
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  state.recipes[cfg.modeKey] = lines.length > 1 ? 'list' : 'paragraph';
-  state.recipes[cfg.textKey] = raw;
-  state.recipes[cfg.itemsKey] = (lines.length ? lines : ['']).map(v => ({ localId: ++_recipeRowLocalIdCounter, value: v }));
+  target[cfg.modeKey] = lines.length > 1 ? 'list' : 'paragraph';
+  target[cfg.textKey] = raw;
+  target[cfg.itemsKey] = (lines.length ? lines : ['']).map(v => ({ localId: ++_recipeRowLocalIdCounter, value: v }));
 }
 
 // Renders the Text/List toggle plus whichever editor is active, and rewires its listeners --
 // a full rebuild on every change, same approach as renderIngredientRows.
-function renderTextListFieldBody(key) {
-  const cfg = TEXT_LIST_FIELDS[key];
+function renderTextListFieldBody(target, cfg) {
   const mount = document.getElementById(cfg.mountId);
   if (!mount) return;
-  const mode = state.recipes[cfg.modeKey];
-  const items = state.recipes[cfg.itemsKey];
+  const mode = target[cfg.modeKey];
+  const items = target[cfg.itemsKey];
 
   mount.innerHTML = `
     <div class="mode-toggle">
@@ -1610,7 +1743,7 @@ function renderTextListFieldBody(key) {
       <button type="button" class="mode-toggle-btn ${mode === 'list' ? 'active' : ''}" data-mode="list">List</button>
     </div>
     ${mode === 'paragraph' ? `
-      <textarea id="${cfg.textareaId}" rows="${cfg.rows}" placeholder="${cfg.placeholder}">${state.recipes[cfg.textKey] || ''}</textarea>
+      <textarea id="${cfg.textareaId}" rows="${cfg.rows}" placeholder="${cfg.placeholder}">${target[cfg.textKey] || ''}</textarea>
     ` : `
       <div class="text-list">
         ${items.map((item, idx) => `
@@ -1629,20 +1762,20 @@ function renderTextListFieldBody(key) {
       const newMode = btn.dataset.mode;
       if (newMode === mode) return;
       if (newMode === 'list') {
-        const raw = document.getElementById(cfg.textareaId)?.value ?? state.recipes[cfg.textKey] ?? '';
+        const raw = document.getElementById(cfg.textareaId)?.value ?? target[cfg.textKey] ?? '';
         const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-        state.recipes[cfg.itemsKey] = (lines.length ? lines : ['']).map(v => ({ localId: ++_recipeRowLocalIdCounter, value: v }));
+        target[cfg.itemsKey] = (lines.length ? lines : ['']).map(v => ({ localId: ++_recipeRowLocalIdCounter, value: v }));
       } else {
-        state.recipes[cfg.textKey] = state.recipes[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
+        target[cfg.textKey] = target[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
       }
-      state.recipes[cfg.modeKey] = newMode;
-      renderTextListFieldBody(key);
+      target[cfg.modeKey] = newMode;
+      renderTextListFieldBody(target, cfg);
     });
   });
 
   if (mode === 'paragraph') {
     const textarea = document.getElementById(cfg.textareaId);
-    textarea.addEventListener('input', () => { state.recipes[cfg.textKey] = textarea.value; });
+    textarea.addEventListener('input', () => { target[cfg.textKey] = textarea.value; });
     return;
   }
 
@@ -1657,7 +1790,7 @@ function renderTextListFieldBody(key) {
       const i = items.findIndex(it => it.localId === item.localId);
       const newItem = { localId: ++_recipeRowLocalIdCounter, value: '' };
       items.splice(i + 1, 0, newItem);
-      renderTextListFieldBody(key);
+      renderTextListFieldBody(target, cfg);
       mount.querySelector(`[data-item="${newItem.localId}"] .text-list-input`)?.focus();
     });
   });
@@ -1665,9 +1798,9 @@ function renderTextListFieldBody(key) {
   mount.querySelectorAll('[data-remove]').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = parseInt(btn.dataset.remove, 10);
-      state.recipes[cfg.itemsKey] = items.filter(it => it.localId !== id);
-      if (state.recipes[cfg.itemsKey].length === 0) state.recipes[cfg.itemsKey].push({ localId: ++_recipeRowLocalIdCounter, value: '' });
-      renderTextListFieldBody(key);
+      target[cfg.itemsKey] = items.filter(it => it.localId !== id);
+      if (target[cfg.itemsKey].length === 0) target[cfg.itemsKey].push({ localId: ++_recipeRowLocalIdCounter, value: '' });
+      renderTextListFieldBody(target, cfg);
     });
   });
 }
@@ -1675,20 +1808,20 @@ function renderTextListFieldBody(key) {
 // Final saved value for either mode: paragraph text trimmed as-is, or list items trimmed and
 // filtered of blanks (drops the trailing empty item from a last Enter press) and \n-joined --
 // the same "one idea per line" text shape the Excel export already expects.
-function collectTextListFieldValue(key) {
-  const cfg = TEXT_LIST_FIELDS[key];
-  if (state.recipes[cfg.modeKey] === 'paragraph') {
+function collectTextListFieldValue(target, cfg) {
+  if (target[cfg.modeKey] === 'paragraph') {
     const el = document.getElementById(cfg.textareaId);
-    return (el ? el.value : state.recipes[cfg.textKey] || '').trim();
+    return (el ? el.value : target[cfg.textKey] || '').trim();
   }
-  return state.recipes[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
+  return target[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
 }
 
-function renderIngredientRows() {
+function renderIngredientRows(ns) {
+  const s = state[ns.stateKey];
   const tbody = document.getElementById('rf-ing-rows');
   if (!tbody) return;
 
-  tbody.innerHTML = state.recipes.ingredientRows.map(row => `
+  tbody.innerHTML = s.ingredientRows.map(row => `
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
       <td class="autocomplete-wrap">
@@ -1704,7 +1837,7 @@ function renderIngredientRows() {
     </tr>
   `).join('');
 
-  state.recipes.ingredientRows.forEach(row => {
+  s.ingredientRows.forEach(row => {
     const tr = tbody.querySelector(`tr[data-row="${row.localId}"]`);
     const nameInput = tr.querySelector('.rf-ing-name');
     const qtyInput = tr.querySelector('.rf-ing-qty');
@@ -1712,35 +1845,35 @@ function renderIngredientRows() {
     const methodInput = tr.querySelector('.rf-ing-method');
     const listEl = tr.querySelector('.autocomplete-list');
 
-    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; updateYieldCalculation(); });
+    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; updateYieldCalculation(s.ingredientRows); });
     unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
     methodInput.addEventListener('input', () => { row.method = methodInput.value; });
 
-    wireIngredientAutocomplete(nameInput, listEl, unitInput, row);
+    wireIngredientAutocomplete(ns, nameInput, listEl, unitInput, row);
   });
 
   tbody.querySelectorAll('[data-row-remove]').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = parseInt(btn.dataset.rowRemove, 10);
-      state.recipes.ingredientRows = state.recipes.ingredientRows.filter(r => r.localId !== id);
-      if (state.recipes.ingredientRows.length === 0) state.recipes.ingredientRows.push(makeEmptyIngredientRow());
-      renderIngredientRows();
+      s.ingredientRows = s.ingredientRows.filter(r => r.localId !== id);
+      if (s.ingredientRows.length === 0) s.ingredientRows.push(makeEmptyIngredientRow());
+      renderIngredientRows(ns);
     });
   });
 
-  wireIngredientRowDrag(tbody);
-  updateYieldCalculation();
+  wireIngredientRowDrag(ns, tbody);
+  updateYieldCalculation(s.ingredientRows);
 }
 
 // Drag-and-drop reordering. draggable="true" lives ONLY on the ⠿ handle cell, never on the
 // <tr> or the inputs -- dragstart is otherwise a mousedown-drag gesture, which would hijack
 // text selection/dragging inside the ingredient-name input (and the autocomplete dropdown
 // that hangs off it) into a row-drag instead. Reordering just moves one entry within
-// state.recipes.ingredientRows -- saveRecipeForm already builds its payload from that same
-// array (order-preserving), and save-recipe already renumbers sort_order from array position
-// on every save, so a reordered array is all that's needed for the new order to persist and
-// show up in the Excel export.
-function wireIngredientRowDrag(tbody) {
+// ingredientRows -- saveRecipeForm already builds its payload from that same array
+// (order-preserving), and save-recipe/save-extracted-recipe already renumber sort_order from
+// array position on every save, so a reordered array is all that's needed for the new order to
+// persist and show up in the Excel export.
+function wireIngredientRowDrag(ns, tbody) {
   let draggedId = null;
 
   tbody.querySelectorAll('[data-drag-handle]').forEach(handle => {
@@ -1777,7 +1910,7 @@ function wireIngredientRowDrag(tbody) {
       if (draggedId === null) return;
       e.preventDefault();
       const targetId = parseInt(tr.dataset.row, 10);
-      const rows = state.recipes.ingredientRows;
+      const rows = state[ns.stateKey].ingredientRows;
       const fromIdx = rows.findIndex(r => r.localId === draggedId);
       let toIdx = rows.findIndex(r => r.localId === targetId);
       if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
@@ -1788,16 +1921,20 @@ function wireIngredientRowDrag(tbody) {
       if (fromIdx < toIdx) toIdx -= 1; // account for the shift caused by removing `moved` above
       rows.splice(toIdx, 0, moved);
       draggedId = null;
-      renderIngredientRows();
+      renderIngredientRows(ns);
     });
   });
 }
 
-// Anti-typo autocomplete: matches what's typed against the canonical `ingredients` table so
-// the same ingredient is always linked (and spelled) identically across every recipe.
+// Anti-typo autocomplete: matches what's typed against this namespace's own ingredient table
+// (ingredients for Recipe Book, extracted_ingredients for Recipe Extractor -- never cross-
+// matched) so the same ingredient is always linked (and spelled) identically across every
+// recipe in that table. This same mechanism is the ingredient-dedupe logic for Recipe
+// Extractor: an exact (case-insensitive) name match suppresses "+ Add as new", steering the
+// chef to reuse the existing IN- row instead of creating a near-duplicate.
 let _ingredientAcDebounce = null;
 
-function wireIngredientAutocomplete(inputEl, listEl, unitInput, row) {
+function wireIngredientAutocomplete(ns, inputEl, listEl, unitInput, row) {
   inputEl.addEventListener('input', () => {
     row.name = inputEl.value;
     row.ingredientId = null; // typing invalidates the previous link until something is picked again
@@ -1805,8 +1942,8 @@ function wireIngredientAutocomplete(inputEl, listEl, unitInput, row) {
     clearTimeout(_ingredientAcDebounce);
     if (!query) { listEl.hidden = true; listEl.innerHTML = ''; return; }
     _ingredientAcDebounce = setTimeout(async () => {
-      const matches = await window.api.searchIngredients(query);
-      renderAutocompleteList(listEl, matches, query, inputEl, unitInput, row);
+      const matches = await ns.api.searchIngredients(query);
+      renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, row);
     }, 150);
   });
 
@@ -1819,7 +1956,7 @@ function wireIngredientAutocomplete(inputEl, listEl, unitInput, row) {
   });
 }
 
-function renderAutocompleteList(listEl, matches, query, inputEl, unitInput, row) {
+function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, row) {
   const exact = matches.find(m => m.name.toLowerCase() === query.toLowerCase());
   listEl.innerHTML = `
     ${matches.map(m => `
@@ -1845,9 +1982,8 @@ function renderAutocompleteList(listEl, matches, query, inputEl, unitInput, row)
       e.preventDefault();
       try {
         // 'G' is the standard default unit for new ingredients -- product code is deliberately
-        // left blank here (not everyone has one on hand mid-recipe); it's editable later via
-        // the Ingredients screen's Edit action.
-        const created = await window.api.addIngredient({ name: query, defaultUnit: 'G' });
+        // left blank here (not everyone has one on hand mid-recipe); it's editable later.
+        const created = await ns.api.addIngredient({ name: query, defaultUnit: 'G' });
         selectIngredientForRow(created, inputEl, unitInput, row, listEl);
       } catch (err) {
         alert(`Couldn't add "${query}" as a new ingredient: ${err.message}`);
@@ -1868,22 +2004,29 @@ function selectIngredientForRow(ingredient, inputEl, unitInput, row, listEl) {
   listEl.innerHTML = '';
 }
 
-// Shared by "Back to Recipe Book" and a successful save -- both exit the form the same way.
-function goBackToRecipeList() {
-  state.recipes.view = 'list';
-  state.recipes.formId = null;
-  resetRecipeFormState();
+// Shared by "Back to Recipe Book"/"Back to Recipe Extractor" and a successful save -- both
+// exit the form the same way.
+function goBackToRecipeList(ns) {
+  state[ns.stateKey].view = 'list';
+  state[ns.stateKey].formId = null;
+  resetRecipeFormState(ns);
   renderView();
 }
 
-async function saveRecipeForm() {
+async function saveRecipeForm(ns) {
+  const s = state[ns.stateKey];
   const name = document.getElementById('rf-name').value.trim();
   if (!name) return alert('Please enter a recipe name.');
 
-  const rows = state.recipes.ingredientRows.filter(r => r.name.trim() !== '');
-  for (let i = 0; i < rows.length; i++) {
-    if (!rows[i].ingredientId) {
-      return alert(`Row ${i + 1}: please pick "${rows[i].name}" from the dropdown (or add it as a new ingredient) before saving.`);
+  const rows = s.ingredientRows.filter(r => r.name.trim() !== '');
+  // Recipe Book requires every row to already be linked to a real ingredientId (picked from the
+  // dropdown or added inline). Recipe Extractor skips this block entirely -- ns.api.save
+  // auto-resolves/creates unlinked rows by name server-side, so she's never stopped by it.
+  if (ns.requireIngredientLink) {
+    for (let i = 0; i < rows.length; i++) {
+      if (!rows[i].ingredientId) {
+        return alert(`Row ${i + 1}: please pick "${rows[i].name}" from the dropdown (or add it as a new ingredient) before saving.`);
+      }
     }
   }
 
@@ -1891,7 +2034,7 @@ async function saveRecipeForm() {
   statusEl.textContent = 'Saving…';
 
   const payload = {
-    id: state.recipes.formId || undefined,
+    id: s.formId || undefined,
     name,
     quantityProduced: document.getElementById('rf-qty').value.trim(),
     preparedBy: document.getElementById('rf-prepared-by').value.trim(),
@@ -1900,27 +2043,482 @@ async function saveRecipeForm() {
     yieldNotes: document.getElementById('rf-yield').value.trim(),
     wastePercent: document.getElementById('rf-waste').value === '' ? null : parseFloat(document.getElementById('rf-waste').value),
     dateCreated: document.getElementById('rf-date').value,
-    preparationCooking: collectTextListFieldValue('prep'),
-    presentationServing: collectTextListFieldValue('presentation'),
+    preparationCooking: collectTextListFieldValue(s, TEXT_LIST_FIELDS.prep),
+    presentationServing: collectTextListFieldValue(s, TEXT_LIST_FIELDS.presentation),
     comment: document.getElementById('rf-comment').value,
     checkedBy: document.getElementById('rf-checked-by').value.trim(),
     ingredients: rows.map(r => ({
       ingredientId: r.ingredientId,
+      name: r.name.trim(),
       quantity: r.quantity ? parseFloat(r.quantity) : null,
       unit: r.unit || null,
       method: r.method || null,
     })),
   };
-  if (state.recipes.pendingPhoto) {
-    payload.photoBase64 = state.recipes.pendingPhoto.base64;
-    payload.photoExt = state.recipes.pendingPhoto.ext;
-  } else if (state.recipes.removePhoto) {
+  if (s.pendingPhoto) {
+    payload.photoBase64 = s.pendingPhoto.base64;
+    payload.photoExt = s.pendingPhoto.ext;
+  } else if (s.removePhoto) {
     payload.removePhoto = true;
   }
 
   try {
-    await window.api.saveRecipe(payload);
-    goBackToRecipeList();
+    await ns.api.save(payload);
+    goBackToRecipeList(ns);
+  } catch (err) {
+    statusEl.textContent = '';
+    alert(`Save failed: ${err.message}`);
+  }
+}
+
+// ============================================================
+// RECIPE EXTRACTOR FORM -- one or more named processes (e.g. "Vanilla Base", "Caramelized
+// Sugar Top"), each with its own ingredient table and method, under shared recipe-level fields.
+// Recipe Book's form above stays flat (one ingredient list, one method field) since its data
+// genuinely has that shape; Extractor's diverged once a card could describe multiple
+// components, so it gets its own form here rather than forcing both into one shape. The
+// ingredient-row-level pieces (wireIngredientAutocomplete/renderAutocompleteList/
+// selectIngredientForRow, the Text/List toggle) are still reused as-is -- only the "one process
+// vs. many" structure around them is new.
+// ============================================================
+
+// Per-process Text/List config for the Method field -- same TEXT_LIST_FIELDS mechanism as
+// Book's prep/presentation, just pointed at one process object with DOM ids unique to it (since
+// several process cards' Method fields are mounted on the page at once).
+function makeProcessMethodCfg(process) {
+  return {
+    modeKey: 'methodMode', textKey: 'methodText', itemsKey: 'methodItems',
+    textareaId: `ep-method-${process.localId}`, mountId: `ep-method-field-${process.localId}`,
+    rows: 5, placeholder: 'Describe preparation and cooking for this process…', itemPlaceholder: 'Step',
+  };
+}
+
+function makeEmptyProcess() {
+  const proc = {
+    localId: ++_recipeRowLocalIdCounter,
+    id: null,
+    name: '',
+    ingredientRows: [makeEmptyIngredientRow()],
+    methodMode: null, methodText: '', methodItems: [],
+  };
+  initTextListField(proc, makeProcessMethodCfg(proc), '');
+  return proc;
+}
+
+// From a saved extracted_recipe_processes row (fetchExtractedRecipeWithIngredients's shape).
+function buildProcessFromSaved(proc) {
+  const built = {
+    localId: ++_recipeRowLocalIdCounter,
+    id: proc.id,
+    name: proc.name || '',
+    ingredientRows: (proc.ingredients || []).length > 0
+      ? proc.ingredients.map(ri => ({
+          localId: ++_recipeRowLocalIdCounter,
+          ingredientId: ri.ingredient_id,
+          name: ri.ingredient_name,
+          quantity: ri.quantity ?? '',
+          unit: ri.unit || '',
+          method: ri.method || '',
+        }))
+      : [makeEmptyIngredientRow()],
+    methodMode: null, methodText: '', methodItems: [],
+  };
+  initTextListField(built, makeProcessMethodCfg(built), proc.method);
+  return built;
+}
+
+// From a freshly-extracted process (extract-recipe-for-extractor's shape) -- ingredientId
+// already resolved where an exact match was found server-side, null otherwise (picked from the
+// autocomplete same as typing a new name by hand).
+function buildProcessFromImported(proc) {
+  const built = {
+    localId: ++_recipeRowLocalIdCounter,
+    id: null,
+    name: proc.name || '',
+    ingredientRows: (proc.ingredients || []).length > 0
+      ? proc.ingredients.map(ing => ({
+          localId: ++_recipeRowLocalIdCounter,
+          ingredientId: ing.ingredientId || null,
+          name: ing.name || '',
+          quantity: ing.quantity != null ? String(ing.quantity) : '',
+          unit: ing.unit || '',
+          method: ing.method || '',
+        }))
+      : [makeEmptyIngredientRow()],
+    methodMode: null, methodText: '', methodItems: [],
+  };
+  initTextListField(built, makeProcessMethodCfg(built), proc.method);
+  return built;
+}
+
+function resetExtractorFormState() {
+  const s = state.extractor;
+  s.processes = [];
+  s.pendingPhoto = null;
+  s.removePhoto = false;
+  s.presentationMode = null;
+  s.presentationText = '';
+  s.presentationItems = [];
+}
+
+function openNewExtractorForm() {
+  state.extractor.view = 'form';
+  state.extractor.formId = null;
+  resetExtractorFormState();
+  renderView();
+}
+
+function openEditExtractorForm(id) {
+  state.extractor.view = 'form';
+  state.extractor.formId = id;
+  resetExtractorFormState();
+  renderView();
+}
+
+function goBackToExtractorList() {
+  state.extractor.view = 'list';
+  state.extractor.formId = null;
+  resetExtractorFormState();
+  renderView();
+}
+
+// Renders one process's ingredient table into an explicit <tbody> element (not a fixed
+// document-wide id, since several processes' tables are mounted simultaneously) -- otherwise
+// mirrors renderIngredientRows exactly, including reusing wireIngredientAutocomplete/
+// selectIngredientForRow unchanged.
+function renderProcessIngredientRows(process, tbodyEl, onChange) {
+  tbodyEl.innerHTML = process.ingredientRows.map(row => `
+    <tr data-row="${row.localId}">
+      <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
+      <td class="autocomplete-wrap">
+        <input class="rf-ing-name" value="${row.name}" placeholder="Start typing an ingredient…" autocomplete="off" />
+        <div class="autocomplete-list" hidden></div>
+      </td>
+      <td><input class="rf-ing-qty" value="${row.quantity}" placeholder="e.g. 150" /></td>
+      <td><input class="rf-ing-unit" value="${row.unit}" placeholder="e.g. gm" /></td>
+      <td><input class="rf-ing-method" value="${row.method}" placeholder="e.g. marinated before 2 hours" /></td>
+      <td style="text-align:right">
+        <button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
+      </td>
+    </tr>
+  `).join('');
+
+  process.ingredientRows.forEach(row => {
+    const tr = tbodyEl.querySelector(`tr[data-row="${row.localId}"]`);
+    const nameInput = tr.querySelector('.rf-ing-name');
+    const qtyInput = tr.querySelector('.rf-ing-qty');
+    const unitInput = tr.querySelector('.rf-ing-unit');
+    const methodInput = tr.querySelector('.rf-ing-method');
+    const listEl = tr.querySelector('.autocomplete-list');
+
+    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; onChange(); });
+    unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
+    methodInput.addEventListener('input', () => { row.method = methodInput.value; });
+
+    wireIngredientAutocomplete(RECIPE_NS.extractor, nameInput, listEl, unitInput, row);
+  });
+
+  tbodyEl.querySelectorAll('[data-row-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.rowRemove, 10);
+      process.ingredientRows = process.ingredientRows.filter(r => r.localId !== id);
+      if (process.ingredientRows.length === 0) process.ingredientRows.push(makeEmptyIngredientRow());
+      renderProcessIngredientRows(process, tbodyEl, onChange);
+    });
+  });
+
+  wireProcessIngredientRowDrag(process, tbodyEl, () => renderProcessIngredientRows(process, tbodyEl, onChange));
+  onChange();
+}
+
+// Same drag-reorder mechanics as wireIngredientRowDrag, scoped to one process's rows/tbody
+// instead of a namespace-wide fixed id.
+function wireProcessIngredientRowDrag(process, tbodyEl, rerender) {
+  let draggedId = null;
+
+  tbodyEl.querySelectorAll('[data-drag-handle]').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      draggedId = parseInt(handle.dataset.dragHandle, 10);
+      const tr = handle.closest('tr');
+      tr.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(draggedId));
+      e.dataTransfer.setDragImage(tr, 20, tr.offsetHeight / 2);
+    });
+    handle.addEventListener('dragend', () => {
+      tbodyEl.querySelectorAll('tr').forEach(tr => tr.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
+      draggedId = null;
+    });
+  });
+
+  tbodyEl.querySelectorAll('tr').forEach(tr => {
+    tr.addEventListener('dragover', (e) => {
+      if (draggedId === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const targetId = parseInt(tr.dataset.row, 10);
+      tbodyEl.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over-top', 'drag-over-bottom'));
+      if (targetId === draggedId) return;
+      const rect = tr.getBoundingClientRect();
+      const before = e.clientY - rect.top < rect.height / 2;
+      tr.classList.add(before ? 'drag-over-top' : 'drag-over-bottom');
+    });
+
+    tr.addEventListener('drop', (e) => {
+      if (draggedId === null) return;
+      e.preventDefault();
+      const targetId = parseInt(tr.dataset.row, 10);
+      const rows = process.ingredientRows;
+      const fromIdx = rows.findIndex(r => r.localId === draggedId);
+      let toIdx = rows.findIndex(r => r.localId === targetId);
+      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+      const rect = tr.getBoundingClientRect();
+      const before = e.clientY - rect.top < rect.height / 2;
+      const [moved] = rows.splice(fromIdx, 1);
+      if (!before) toIdx += 1;
+      if (fromIdx < toIdx) toIdx -= 1;
+      rows.splice(toIdx, 0, moved);
+      draggedId = null;
+      rerender();
+    });
+  });
+}
+
+async function renderExtractorFormView(main) {
+  const ns = RECIPE_NS.extractor;
+  const s = state.extractor;
+  const editing = !!s.formId;
+  let recipe = null;
+  let existingPhotoDataUrl = null;
+
+  if (editing) {
+    recipe = await ns.api.get(s.formId);
+    if (recipe.photo_path) existingPhotoDataUrl = await ns.api.getPhoto(recipe.photo_path);
+    if (s.processes.length === 0) {
+      s.processes = (recipe.processes && recipe.processes.length > 0)
+        ? recipe.processes.map(buildProcessFromSaved)
+        : [makeEmptyProcess()];
+    }
+  } else {
+    // A New Recipe form opened via "Upload Recipe" carries extracted values here -- consumed
+    // once (and cleared) so a later edit/new open starts blank. Fully editable before saving,
+    // same review-before-save discipline as Recipe Book.
+    recipe = s.importedRecipe;
+    s.importedRecipe = null;
+    if (s.processes.length === 0) {
+      const importedProcesses = recipe?.processes || [];
+      s.processes = importedProcesses.length > 0
+        ? importedProcesses.map(buildProcessFromImported)
+        : [makeEmptyProcess()];
+    }
+  }
+
+  initTextListField(s, TEXT_LIST_FIELDS.presentation, recipe?.presentation_serving);
+
+  const currentPhotoSrc = s.pendingPhoto
+    ? s.pendingPhoto.dataUrl
+    : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>${editing ? 'Edit Recipe' : 'New Recipe'}</h1>
+        <span class="section-pill">${editing ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
+      </div>
+      <button class="secondary" id="rf-back-btn">${ns.backLabel}</button>
+    </div>
+
+    <div class="generate-controls">
+      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" placeholder="e.g. Crème Brûlée" /></div>
+      <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" placeholder="e.g. 1 PAX" /></div>
+      <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" /></div>
+      <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" placeholder="e.g. Dessert" /></div>
+      <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" /></div>
+      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" placeholder="e.g. 15" value="${recipe?.waste_percent ?? ''}" /></div>
+      <div class="field"><label>Yield (computed)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
+      <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
+    </div>
+
+    <h3 style="margin-bottom:10px;">Processes</h3>
+    <div id="rf-total-qty" class="total-qty-display" style="margin-bottom:10px;"></div>
+    <div id="ep-process-list"></div>
+    <button class="secondary" id="ep-add-process-btn" style="margin:10px 0 24px;">+ Add Process</button>
+
+    <div class="field" style="margin-bottom:16px;">
+      <label>Presentation / Decoration / Serving</label>
+      <div id="rf-presentation-field"></div>
+    </div>
+    <div class="field" style="margin-bottom:16px;">
+      <label>Comment</label>
+      <textarea id="rf-comment" rows="3">${recipe?.comment || ''}</textarea>
+    </div>
+    <div class="field" style="margin-bottom:16px; max-width:320px;">
+      <label>Upload Photo</label>
+      <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" />
+      <div id="rf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
+        <img id="rf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <button type="button" class="secondary" id="rf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:20px; max-width:320px;">
+      <label>Checked By</label>
+      <input id="rf-checked-by" value="${recipe?.checked_by || ''}" />
+    </div>
+
+    <button class="primary" id="rf-save-btn">${editing ? 'Save Changes' : 'Save Recipe'}</button>
+    <span id="rf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
+  `;
+
+  function updatePhotoPreview() {
+    const src = s.pendingPhoto
+      ? s.pendingPhoto.dataUrl
+      : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+    document.getElementById('rf-photo-preview-wrap').style.display = src ? '' : 'none';
+    document.getElementById('rf-photo-preview').src = src || '';
+  }
+
+  document.getElementById('rf-photo-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png'].includes(file.type)) {
+      alert('Please choose a JPG or PNG image.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Photo must be 5MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(',')[1];
+      const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+      s.pendingPhoto = { dataUrl, base64, ext };
+      s.removePhoto = false;
+      updatePhotoPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById('rf-photo-remove-btn').addEventListener('click', () => {
+    s.pendingPhoto = null;
+    s.removePhoto = true;
+    document.getElementById('rf-photo-input').value = '';
+    updatePhotoPreview();
+  });
+
+  function allProcessIngredientRows() {
+    return s.processes.flatMap(p => p.ingredientRows);
+  }
+
+  function renderProcessCards() {
+    const container = document.getElementById('ep-process-list');
+    container.innerHTML = s.processes.map(proc => `
+      <div class="process-card" data-process="${proc.localId}">
+        <div class="process-card-head">
+          <input class="process-name-input" value="${proc.name}" placeholder="Process name (e.g. Vanilla Base)" />
+          <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${s.processes.length <= 1 ? 'disabled' : ''}>Remove Process</button>
+        </div>
+        <table class="recipe-ingredients-table">
+          <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Note</th><th></th></tr></thead>
+          <tbody class="process-ing-rows"></tbody>
+        </table>
+        <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
+        <div class="field" style="margin-bottom:8px;">
+          <label>Method</label>
+          <div id="${makeProcessMethodCfg(proc).mountId}"></div>
+        </div>
+      </div>
+    `).join('');
+
+    s.processes.forEach(proc => {
+      const card = container.querySelector(`[data-process="${proc.localId}"]`);
+
+      const nameInput = card.querySelector('.process-name-input');
+      nameInput.addEventListener('input', () => { proc.name = nameInput.value; });
+
+      card.querySelector('[data-remove-process]').addEventListener('click', () => {
+        s.processes = s.processes.filter(p => p.localId !== proc.localId);
+        if (s.processes.length === 0) s.processes.push(makeEmptyProcess());
+        renderProcessCards();
+      });
+
+      const tbody = card.querySelector('.process-ing-rows');
+      const onIngredientChange = () => updateYieldCalculation(allProcessIngredientRows());
+      renderProcessIngredientRows(proc, tbody, onIngredientChange);
+
+      card.querySelector('.process-add-row-btn').addEventListener('click', () => {
+        proc.ingredientRows.push(makeEmptyIngredientRow());
+        renderProcessIngredientRows(proc, tbody, onIngredientChange);
+      });
+
+      renderTextListFieldBody(proc, makeProcessMethodCfg(proc));
+    });
+
+    updateYieldCalculation(allProcessIngredientRows());
+  }
+
+  document.getElementById('rf-back-btn').addEventListener('click', goBackToExtractorList);
+  document.getElementById('ep-add-process-btn').addEventListener('click', () => {
+    s.processes.push(makeEmptyProcess());
+    renderProcessCards();
+  });
+  document.getElementById('rf-save-btn').addEventListener('click', saveExtractorForm);
+  document.getElementById('rf-waste').addEventListener('input', () => updateYieldCalculation(allProcessIngredientRows()));
+
+  renderProcessCards();
+  renderTextListFieldBody(s, TEXT_LIST_FIELDS.presentation);
+}
+
+async function saveExtractorForm() {
+  const s = state.extractor;
+  const name = document.getElementById('rf-name').value.trim();
+  if (!name) return alert('Please enter a recipe name.');
+
+  const statusEl = document.getElementById('rf-status');
+  statusEl.textContent = 'Saving…';
+
+  const payload = {
+    id: s.formId || undefined,
+    name,
+    quantityProduced: document.getElementById('rf-qty').value.trim(),
+    preparedBy: document.getElementById('rf-prepared-by').value.trim(),
+    category: document.getElementById('rf-category').value.trim(),
+    countryOrigin: document.getElementById('rf-country').value.trim(),
+    yieldNotes: document.getElementById('rf-yield').value.trim(),
+    wastePercent: document.getElementById('rf-waste').value === '' ? null : parseFloat(document.getElementById('rf-waste').value),
+    dateCreated: document.getElementById('rf-date').value,
+    presentationServing: collectTextListFieldValue(s, TEXT_LIST_FIELDS.presentation),
+    comment: document.getElementById('rf-comment').value,
+    checkedBy: document.getElementById('rf-checked-by').value.trim(),
+    // No dropdown-block validation here (unlike Recipe Book's saveRecipeForm) -- any row
+    // without a linked ingredientId is auto-resolved/created by name server-side instead, see
+    // save-extracted-recipe.
+    processes: s.processes.map(proc => ({
+      name: proc.name.trim(),
+      method: collectTextListFieldValue(proc, makeProcessMethodCfg(proc)),
+      ingredients: proc.ingredientRows
+        .filter(r => r.name.trim() !== '')
+        .map(r => ({
+          ingredientId: r.ingredientId,
+          name: r.name.trim(),
+          quantity: r.quantity ? parseFloat(r.quantity) : null,
+          unit: r.unit || null,
+          method: r.method || null,
+        })),
+    })),
+  };
+  if (s.pendingPhoto) {
+    payload.photoBase64 = s.pendingPhoto.base64;
+    payload.photoExt = s.pendingPhoto.ext;
+  } else if (s.removePhoto) {
+    payload.removePhoto = true;
+  }
+
+  try {
+    await RECIPE_NS.extractor.api.save(payload);
+    goBackToExtractorList();
   } catch (err) {
     statusEl.textContent = '';
     alert(`Save failed: ${err.message}`);
