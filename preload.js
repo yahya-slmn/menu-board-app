@@ -34,12 +34,17 @@ contextBridge.exposeInMainWorld('api', {
 
   searchExtractedIngredients: (query) => ipcRenderer.invoke('search-extracted-ingredients', query),
   addExtractedIngredient: (payload) => ipcRenderer.invoke('add-extracted-ingredient', payload),
+  listExtractedIngredients: () => ipcRenderer.invoke('list-extracted-ingredients'),
+  updateExtractedIngredient: (payload) => ipcRenderer.invoke('update-extracted-ingredient', payload),
+  deleteExtractedIngredient: (id) => ipcRenderer.invoke('delete-extracted-ingredient', id),
   listExtractedRecipes: () => ipcRenderer.invoke('list-extracted-recipes'),
+  searchExtractedRecipes: (query) => ipcRenderer.invoke('search-extracted-recipes', query),
   getExtractedRecipe: (id) => ipcRenderer.invoke('get-extracted-recipe', id),
   saveExtractedRecipe: (payload) => ipcRenderer.invoke('save-extracted-recipe', payload),
   deleteExtractedRecipe: (id) => ipcRenderer.invoke('delete-extracted-recipe', id),
-  getExtractedRecipePhoto: (photoPath) => ipcRenderer.invoke('get-extracted-recipe-photo', photoPath),
+  getExtractedRecipePhotos: (photoPaths) => ipcRenderer.invoke('get-extracted-recipe-photos', photoPaths),
   exportExtractedRecipes: (payload) => ipcRenderer.invoke('export-extracted-recipes', payload),
+  exportScaledExtractedRecipe: (payload) => ipcRenderer.invoke('export-scaled-extracted-recipe', payload),
   extractRecipeForExtractor: (payload) => ipcRenderer.invoke('extract-recipe-for-extractor', payload),
 
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),

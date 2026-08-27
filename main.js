@@ -13,7 +13,7 @@ const {
 } = require('./lib/referenceData');
 const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
-const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, exportExtractedRecipes, sanitizeSheetName } = require('./lib/export');
+const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, exportExtractedRecipes, exportScaledExtractedRecipe, sanitizeSheetName } = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 
 let mainWindow;
@@ -714,10 +714,25 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath
 //
 // Fully separate from ingredients/recipes/recipe_ingredients above -- extracted_ingredients/
 // extracted_recipes/extracted_recipe_ingredients are their own tables with no FK relationship
-// to the originals (IN-/EX- codes instead of FB-/TTY-), so reviewing an extracted card never
+// to the originals (EX-IN-/EX- codes instead of FB-/TTY-), so reviewing an extracted card never
 // touches or pollutes the canonical Recipe Book data. This section replaces the old
 // "Import Recipe from File" flow that used to write straight into Recipe Book's own tables.
 // ---------------------------------------------------------------
+
+// Mirrors nextExtractedRecipeCode below, 'EX-IN-' prefix (own counter, distinct from EX- recipe
+// codes), 6-digit padding -- product_code used to be free-typed (almost never actually filled
+// in) and is now fully system-managed instead, same as recipe codes always have been.
+async function nextExtractedIngredientCode() {
+  const { data, error } = await supabase.from('extracted_ingredients').select('product_code').like('product_code', 'EX-IN-%');
+  if (error) throw supaFail('nextExtractedIngredientCode', error);
+  let max = 0;
+  for (const row of data) {
+    const n = parseInt(row.product_code.slice(6), 10);
+    if (!isNaN(n) && n > max) max = n;
+  }
+  return `EX-IN-${String(max + 1).padStart(6, '0')}`;
+}
+
 ipcMain.handle('search-extracted-ingredients', async (e, query) => {
   const q = (query || '').trim();
   if (!q) return [];
@@ -727,14 +742,42 @@ ipcMain.handle('search-extracted-ingredients', async (e, query) => {
   return data;
 });
 
-ipcMain.handle('add-extracted-ingredient', async (e, { name, defaultUnit, category, productCode }) => {
+ipcMain.handle('add-extracted-ingredient', async (e, { name, defaultUnit }) => {
+  const productCode = await nextExtractedIngredientCode();
   const { data, error } = await supabase
     .from('extracted_ingredients')
-    .insert({ product_code: productCode || null, name: name.trim(), default_unit: defaultUnit || null, category: category || null })
+    .insert({ product_code: productCode, name: name.trim(), default_unit: defaultUnit || null })
     .select('*')
     .single();
   if (error) throw supaFail('add-extracted-ingredient', error);
   return data;
+});
+
+ipcMain.handle('list-extracted-ingredients', async () => {
+  // Mirrors list-ingredients -- same PostgREST default-limit gotcha applies.
+  const { data, error } = await supabase.from('extracted_ingredients').select('*').order('name').limit(5000);
+  if (error) throw supaFail('list-extracted-ingredients', error);
+  return data;
+});
+
+ipcMain.handle('update-extracted-ingredient', async (e, { id, name, defaultUnit }) => {
+  const { error } = await supabase
+    .from('extracted_ingredients')
+    .update({ name: name.trim(), default_unit: defaultUnit || null })
+    .eq('id', id);
+  if (error) throw supaFail('update-extracted-ingredient', error);
+  return { success: true };
+});
+
+// extracted_recipe_ingredients.extracted_ingredient_id has no ON DELETE CASCADE, mirroring
+// delete-ingredient's FK-violation handling above.
+ipcMain.handle('delete-extracted-ingredient', async (e, id) => {
+  const { error } = await supabase.from('extracted_ingredients').delete().eq('id', id);
+  if (error) {
+    if (error.code === '23503') return { success: false, inUse: true };
+    throw supaFail('delete-extracted-ingredient', error);
+  }
+  return { success: true };
 });
 
 ipcMain.handle('list-extracted-recipes', async () => {
@@ -743,6 +786,21 @@ ipcMain.handle('list-extracted-recipes', async () => {
     .select('id, code, name, category, prepared_by, date_created, quantity_produced')
     .order('id', { ascending: false });
   if (error) throw supaFail('list-extracted-recipes', error);
+  return data;
+});
+
+// Mirrors search-recipes -- powers Recipe Calculator's autocomplete when "Recipe Extractor" is
+// the selected source.
+ipcMain.handle('search-extracted-recipes', async (e, query) => {
+  const q = (query || '').trim();
+  if (!q) return [];
+  const { data, error } = await supabase
+    .from('extracted_recipes')
+    .select('id, code, name, category, quantity_produced')
+    .ilike('name', `%${q}%`)
+    .order('name')
+    .limit(25);
+  if (error) throw supaFail('search-extracted-recipes', error);
   return data;
 });
 
@@ -756,7 +814,7 @@ async function fetchExtractedRecipeWithIngredients(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('extracted_recipe_processes')
-    .select('id, name, method, sort_order')
+    .select('id, name, method, waste_percent, quantity_produced, sort_order')
     .eq('extracted_recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_processes', procErr);
@@ -766,7 +824,7 @@ async function fetchExtractedRecipeWithIngredients(id) {
   if (processIds.length) {
     const { data, error: riErr } = await supabase
       .from('extracted_recipe_ingredients')
-      .select('id, extracted_ingredient_id, extracted_recipe_process_id, quantity, unit, method, sort_order')
+      .select('id, extracted_ingredient_id, extracted_recipe_process_id, quantity, unit, method, display_name, sort_order')
       .in('extracted_recipe_process_id', processIds)
       .order('sort_order');
     if (riErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_ingredients', riErr);
@@ -792,6 +850,7 @@ async function fetchExtractedRecipeWithIngredients(id) {
       method: ri.method,
       sort_order: ri.sort_order,
       ingredient_name: ingredientById.get(ri.extracted_ingredient_id)?.name,
+      display_name: ri.display_name,
       default_unit: ingredientById.get(ri.extracted_ingredient_id)?.default_unit,
     };
     if (!ingredientsByProcess.has(ri.extracted_recipe_process_id)) ingredientsByProcess.set(ri.extracted_recipe_process_id, []);
@@ -802,11 +861,20 @@ async function fetchExtractedRecipeWithIngredients(id) {
     id: p.id,
     name: p.name,
     method: p.method,
+    waste_percent: p.waste_percent,
+    quantity_produced: p.quantity_produced,
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
   }));
 
-  return { ...recipe, processes };
+  const { data: photoRows, error: photoErr } = await supabase
+    .from('extracted_recipe_photos')
+    .select('id, photo_path, sort_order')
+    .eq('extracted_recipe_id', id)
+    .order('sort_order');
+  if (photoErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_photos', photoErr);
+
+  return { ...recipe, processes, photos: photoRows };
 }
 
 ipcMain.handle('get-extracted-recipe', async (e, id) => fetchExtractedRecipeWithIngredients(id));
@@ -842,17 +910,45 @@ async function deleteExtractedRecipePhoto(path) {
   if (error) console.error('[supabase] deleteExtractedRecipePhoto failed (non-fatal):', error.message);
 }
 
-ipcMain.handle('get-extracted-recipe-photo', async (e, photoPath) => {
-  if (!photoPath) return null;
+async function extractedRecipePhotoDataUrl(photoPath) {
   const { data, error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).download(photoPath);
-  if (error) throw supaFail('get-extracted-recipe-photo', error);
+  if (error) throw supaFail('extractedRecipePhotoDataUrl', error);
   const buffer = Buffer.from(await data.arrayBuffer());
   const ext = photoPath.split('.').pop().toLowerCase();
   const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
   return `data:${mime};base64,${buffer.toString('base64')}`;
+}
+
+// Downloads every photo's bytes (in gallery order) for embedding into an export workbook --
+// shared by export-extracted-recipes (batch export) and export-scaled-extracted-recipe (Recipe
+// Calculator), both of which need the full set, not just the first, so
+// buildExtractedRecipePhotosSheet can be built when there are 2+.
+async function downloadExtractedRecipePhotos(photoRows) {
+  const photos = [];
+  for (const p of photoRows || []) {
+    const { data, error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).download(p.photo_path);
+    if (error) throw supaFail('downloadExtractedRecipePhotos', error);
+    photos.push({
+      buffer: Buffer.from(await data.arrayBuffer()),
+      ext: p.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg',
+    });
+  }
+  return photos;
+}
+
+// Batched (plural) rather than one call per photo -- the gallery can hold up to 10 existing
+// photos to preview on a single form open, and 10 sequential IPC/Storage round trips would be
+// the same N+1 pattern already flagged elsewhere in this app (see conversation notes on Build
+// Menu). Order of the returned array matches the order of photoPaths.
+ipcMain.handle('get-extracted-recipe-photos', async (e, photoPaths) => {
+  if (!photoPaths || photoPaths.length === 0) return [];
+  return Promise.all(photoPaths.map(extractedRecipePhotoDataUrl));
 });
 
 ipcMain.handle('save-extracted-recipe', async (e, payload) => {
+  const rawPhotos = payload.photos || [];
+  if (rawPhotos.length > 10) throw new Error('A recipe can have at most 10 photos.');
+
   let recipeId = payload.id;
   let code;
   const fields = {
@@ -862,22 +958,15 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
     category: payload.category || null,
     country_origin: payload.countryOrigin || null,
     yield_notes: payload.yieldNotes || null,
-    waste_percent: payload.wastePercent ?? null,
     date_created: payload.dateCreated || null,
     presentation_serving: payload.presentationServing || null,
     comment: payload.comment || null,
     checked_by: payload.checkedBy || null,
   };
 
-  if (payload.photoBase64) {
-    fields.photo_path = await uploadExtractedRecipePhoto(payload.photoBase64, payload.photoExt);
-  } else if (payload.removePhoto) {
-    fields.photo_path = null;
-  }
-
   if (recipeId) {
     const RECIPE_GONE_MESSAGE = 'This recipe was deleted or changed elsewhere. Please refresh the Recipe Extractor and try again.';
-    const { data: existing, error: getErr } = await supabase.from('extracted_recipes').select('code, photo_path').eq('id', recipeId).maybeSingle();
+    const { data: existing, error: getErr } = await supabase.from('extracted_recipes').select('code').eq('id', recipeId).maybeSingle();
     if (getErr) throw supaFail('save-extracted-recipe: load existing code', getErr);
     if (!existing) throw new Error(RECIPE_GONE_MESSAGE);
     code = existing.code;
@@ -885,10 +974,6 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
     const { data: updated, error: updErr } = await supabase.from('extracted_recipes').update(fields).eq('id', recipeId).select('id');
     if (updErr) throw supaFail('save-extracted-recipe: update extracted_recipes', updErr);
     if (!updated || updated.length === 0) throw new Error(RECIPE_GONE_MESSAGE);
-
-    if ((payload.photoBase64 || payload.removePhoto) && existing.photo_path) {
-      await deleteExtractedRecipePhoto(existing.photo_path);
-    }
 
     // Deleting the processes cascades to their ingredients (extracted_recipe_process_id ON
     // DELETE CASCADE) -- no separate extracted_recipe_ingredients delete needed.
@@ -905,7 +990,7 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
   // Recipe Extractor doesn't force the chef to manually confirm every ingredient the way
   // Recipe Book does -- any row that isn't already linked (typed by hand, or an extraction
   // result that didn't get an exact match) is resolved here instead: same case-insensitive
-  // EXACT-match lookup extract-recipe-for-extractor uses, reusing an existing IN- row if one
+  // EXACT-match lookup extract-recipe-for-extractor uses, reusing an existing EX-IN- row if one
   // matches or creating a new one otherwise. Resolved once per unique name across every
   // process (not just within one) so the same new name repeated in two processes -- e.g.
   // "Sugar" in both a base and a topping -- doesn't create two duplicate rows.
@@ -921,8 +1006,9 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
       id = existing[0].id;
     } else {
       // 'G' matches the default used when adding a new ingredient inline from the autocomplete.
+      const productCode = await nextExtractedIngredientCode();
       const { data: created, error: createErr } = await supabase
-        .from('extracted_ingredients').insert({ name, default_unit: 'G' }).select('id').single();
+        .from('extracted_ingredients').insert({ product_code: productCode, name, default_unit: 'G' }).select('id').single();
       if (createErr) throw supaFail('save-extracted-recipe: create extracted_ingredients', createErr);
       id = created.id;
     }
@@ -944,6 +1030,8 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
         extracted_recipe_id: recipeId,
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
+        waste_percent: proc.wastePercent ?? null,
+        quantity_produced: proc.quantityProduced || null,
         sort_order: idx,
       })
       .select('id')
@@ -958,14 +1046,19 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
     for (let idx = 0; idx < procIngredients.length; idx++) {
       const ing = procIngredients[idx];
       const name = (ing.name || '').trim();
-      if (!ing.ingredientId && !name) continue;
-      const ingredientId = ing.ingredientId || await resolveIngredientId(name);
+      const displayName = (ing.displayName || '').trim();
+      // A row with only a display name typed (English Match column left blank) must still be
+      // saved, not silently dropped -- falls back to matching/creating by displayName in that
+      // case, same best-effort risk already inherent to any row that skips the autocomplete.
+      if (!ing.ingredientId && !name && !displayName) continue;
+      const ingredientId = ing.ingredientId || await resolveIngredientId(name || displayName);
       ingredientRows.push({
         extracted_recipe_process_id: insertedProcessIds[pIdx],
         extracted_ingredient_id: ingredientId,
         quantity: ing.quantity ?? null,
         unit: ing.unit || null,
         method: ing.method || null,
+        display_name: displayName || null,
         sort_order: idx,
       });
     }
@@ -975,16 +1068,47 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
     if (insIngErr) throw supaFail('save-extracted-recipe: insert extracted_recipe_ingredients', insIngErr);
   }
 
+  // Photos: same clear-and-reinsert convention as processes above, except each row also has a
+  // Storage object behind it -- an existing path missing from the new payload (the chef removed
+  // that thumbnail) gets purged from Storage too, not just dropped from the DB. Each payload
+  // entry is either { existingPhotoPath } (kept, no re-upload) or { photoBase64, photoExt } (a
+  // freshly added photo, uploaded here).
+  const { data: oldPhotoRows, error: oldPhotoErr } = await supabase
+    .from('extracted_recipe_photos').select('photo_path').eq('extracted_recipe_id', recipeId);
+  if (oldPhotoErr) throw supaFail('save-extracted-recipe: load existing extracted_recipe_photos', oldPhotoErr);
+
+  const keptPaths = new Set(rawPhotos.filter(p => p.existingPhotoPath).map(p => p.existingPhotoPath));
+  for (const old of oldPhotoRows || []) {
+    if (!keptPaths.has(old.photo_path)) await deleteExtractedRecipePhoto(old.photo_path);
+  }
+
+  const { error: delPhotoErr } = await supabase.from('extracted_recipe_photos').delete().eq('extracted_recipe_id', recipeId);
+  if (delPhotoErr) throw supaFail('save-extracted-recipe: clear old extracted_recipe_photos', delPhotoErr);
+
+  const newPhotoRows = [];
+  for (let idx = 0; idx < rawPhotos.length; idx++) {
+    const p = rawPhotos[idx];
+    const photoPath = p.existingPhotoPath || await uploadExtractedRecipePhoto(p.photoBase64, p.photoExt);
+    newPhotoRows.push({ extracted_recipe_id: recipeId, photo_path: photoPath, sort_order: idx });
+  }
+  if (newPhotoRows.length) {
+    const { error: insPhotoErr } = await supabase.from('extracted_recipe_photos').insert(newPhotoRows);
+    if (insPhotoErr) throw supaFail('save-extracted-recipe: insert extracted_recipe_photos', insPhotoErr);
+  }
+
   return { id: recipeId, code };
 });
 
 ipcMain.handle('delete-extracted-recipe', async (e, id) => {
-  const { data: existing } = await supabase.from('extracted_recipes').select('photo_path').eq('id', id).single();
+  // Fetched before the recipe row is deleted -- extracted_recipe_photos rows cascade away with
+  // it (ON DELETE CASCADE), but the Storage objects behind them don't, so their paths need to
+  // be known up front to clean those up afterward.
+  const { data: photoRows } = await supabase.from('extracted_recipe_photos').select('photo_path').eq('extracted_recipe_id', id);
   // Cascades to extracted_recipe_ingredients via extracted_recipe_process_id ON DELETE CASCADE.
   await supabase.from('extracted_recipe_processes').delete().eq('extracted_recipe_id', id);
   const { error } = await supabase.from('extracted_recipes').delete().eq('id', id);
   if (error) throw supaFail('delete-extracted-recipe', error);
-  if (existing?.photo_path) await deleteExtractedRecipePhoto(existing.photo_path);
+  for (const p of photoRows || []) await deleteExtractedRecipePhoto(p.photo_path);
   return { success: true };
 });
 
@@ -1013,15 +1137,35 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath }) =>
   // buildRecipeSheet, which stays pinned to Recipe Book's exact physical template.
   await exportExtractedRecipes(async (recipeId) => {
     const full = await fetchExtractedRecipeWithIngredients(recipeId);
-    const { processes, ...recipe } = full;
-    if (recipe.photo_path) {
-      const { data, error } = await supabase.storage.from(EXTRACTED_RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
-      if (error) throw supaFail('export-extracted-recipes: download photo', error);
-      recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
-      recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
-    }
+    const { processes, photos, ...recipe } = full;
+    recipe.photos = await downloadExtractedRecipePhotos(photos);
     return { recipe, processes };
   }, recipeIds, savePath);
+  return { success: true, path: savePath };
+});
+
+// Recipe Calculator's EX- counterpart to export-scaled-recipe above -- `recipe`/`processes`
+// arrive already scaled (Recipe Calculator's own multiplier math, reused unchanged from Book's
+// path), nothing here recomputes quantities. `recipeId` is only used to look up this recipe's
+// *original, unscaled* photos fresh from extracted_recipe_photos -- photos aren't a quantity, so
+// there's nothing to scale, same as export-scaled-recipe never scaling recipe.photo_path either.
+ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, processes, savePath }) => {
+  if (!savePath) {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Scaled Recipe',
+      defaultPath: `${sanitizeSheetName(recipe.name)}.xlsx`,
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    savePath = result.filePath;
+  }
+
+  const { data: photoRows, error: photoErr } = await supabase
+    .from('extracted_recipe_photos').select('photo_path').eq('extracted_recipe_id', recipeId).order('sort_order');
+  if (photoErr) throw supaFail('export-scaled-extracted-recipe: load extracted_recipe_photos', photoErr);
+  recipe.photos = await downloadExtractedRecipePhotos(photoRows);
+
+  await exportScaledExtractedRecipe(recipe, processes, savePath);
   return { success: true, path: savePath };
 });
 
@@ -1041,7 +1185,7 @@ const MAX_EXTRACT_FILES = 10;
 const MAX_EXTRACT_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_EXTRACT_TOTAL_BYTES = 20 * 1024 * 1024;
 
-ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
+ipcMain.handle('extract-recipe-for-extractor', async (e, { files, targetLanguage }) => {
   if (!files || files.length === 0) return { success: false, error: 'No files provided' };
   if (files.length > MAX_EXTRACT_FILES) return { success: false, error: `Too many files (max ${MAX_EXTRACT_FILES})` };
   let totalBytes = 0;
@@ -1053,7 +1197,7 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
   if (totalBytes > MAX_EXTRACT_TOTAL_BYTES) return { success: false, error: `Combined file size exceeds ${MAX_EXTRACT_TOTAL_BYTES / 1024 / 1024}MB` };
 
   try {
-    const extracted = await extractRecipeFromFile({ files });
+    const extracted = await extractRecipeFromFile({ files, targetLanguage });
     const extractedProcesses = extracted.processes || [];
 
     const ingredientIdByName = new Map();
@@ -1074,7 +1218,6 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
       category: extracted.category || '',
       country_origin: extracted.country_origin || '',
       date_created: extracted.date_created || '',
-      waste_percent: extracted.waste_percent ?? null,
       comment: extracted.comment || '',
       presentation_serving: (extracted.presentation_serving_steps || []).join('\n'),
       processes: extractedProcesses.map(proc => ({
@@ -1085,6 +1228,7 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
           return {
             ingredientId: ingredientIdByName.get(name.toLowerCase()) || null,
             name,
+            displayName: (ing.display_name || '').trim() || name,
             quantity: ing.quantity,
             unit: ing.unit || '',
             method: ing.method || '',
