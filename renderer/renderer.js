@@ -2,13 +2,16 @@ const state = {
   sections: [],
   currentSection: null,
   currentView: 'items',
-  // Whether Item Catalog's own section sub-list is expanded -- toggled by clicking "Item
+  // Whether Dish Catalog's own section sub-list is expanded -- toggled by clicking "Dish
   // Catalog" while it's already the active view. Only ever shown while currentView === 'items'.
   itemCatalogExpanded: true,
+  // Whether the "Menu" nav group (Generate/Build/Export All) is expanded -- same toggle
+  // pattern as itemCatalogExpanded, just gated on any of MENU_GROUP_VIEWS instead of 'items'.
+  menuGroupExpanded: true,
   categories: [],
   proteinTypes: [],
   currentGeneratedMenuId: null,
-  builder: { label: '', startDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
+  builder: { label: '', createdBy: '', startDate: '', endDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
   recipes: {
     view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false,
     prepMode: null, prepText: '', prepItems: [],
@@ -48,7 +51,7 @@ const RECIPE_NS = {
     title: 'Recipe Book',
     subtitle: 'Company recipe cards',
     codeLabel: 'TTY',
-    searchPlaceholder: 'Search by name or TTY code…',
+    searchLabel: 'Search by name or TTY code',
     backLabel: '← Back to Recipe Book',
     newRecipeHint: 'Click "+ New Recipe" to create the first one.',
     allowManualNew: true,
@@ -62,7 +65,7 @@ const RECIPE_NS = {
       save: (payload) => window.api.saveRecipe(payload),
       del: (id) => window.api.deleteRecipe(id),
       getPhoto: (path) => window.api.getRecipePhoto(path),
-      exportSelected: (recipeIds) => window.api.exportRecipes({ recipeIds }),
+      exportSelected: (recipeIds, targetLanguage) => window.api.exportRecipes({ recipeIds, targetLanguage }),
       searchIngredients: (q) => window.api.searchIngredients(q),
       addIngredient: (payload) => window.api.addIngredient(payload),
     },
@@ -72,7 +75,7 @@ const RECIPE_NS = {
     title: 'Recipe Extractor',
     subtitle: 'Extracted recipe cards',
     codeLabel: 'EX',
-    searchPlaceholder: 'Search by name or EX code…',
+    searchLabel: 'Search by name or EX code',
     backLabel: '← Back to Recipe Extractor',
     newRecipeHint: 'Click "Upload Recipe" to create the first one.',
     // Extraction-only: no blank/manual "+ New Recipe" entry point here -- Recipe Book already
@@ -88,7 +91,7 @@ const RECIPE_NS = {
       save: (payload) => window.api.saveExtractedRecipe(payload),
       del: (id) => window.api.deleteExtractedRecipe(id),
       getPhotos: (paths) => window.api.getExtractedRecipePhotos(paths),
-      exportSelected: (recipeIds) => window.api.exportExtractedRecipes({ recipeIds }),
+      exportSelected: (recipeIds, targetLanguage) => window.api.exportExtractedRecipes({ recipeIds, targetLanguage }),
       searchIngredients: (q) => window.api.searchExtractedIngredients(q),
       addIngredient: (payload) => window.api.addExtractedIngredient(payload),
     },
@@ -102,15 +105,55 @@ const MAX_EXTRACT_FILES = 10;
 const MAX_EXTRACT_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_EXTRACT_TOTAL_BYTES = 20 * 1024 * 1024;
 
-// Curated common-language list for the Upload Recipe language picker -- balances reliability
-// (typed exactly as the model expects) against flexibility (an "Other" free-text fallback
-// covers anything not listed, per the chef's own framing of the tradeoff). English stays first/
-// default so choosing nothing reproduces today's extraction exactly.
-const EXTRACT_LANGUAGES = [
+// Curated common-language list for the export-time language pickers (Recipe Book/Extractor
+// "Export Selected", and both Calculators' "Export") -- balances reliability (typed exactly as
+// the translate-recipe Edge Function expects) against flexibility (an "Other" free-text
+// fallback covers anything not listed). English stays first/default -- choosing nothing exports
+// exactly as before this existed (the fast path in main.js's translateForBookExport/
+// translateForExtractorExport skips translate-recipe entirely for 'English'). Not the same list
+// as extraction ever had -- that per-extraction language picker was tried and reverted;
+// translation only ever happens at export time now, not extraction time.
+const EXPORT_LANGUAGES = [
   'English', 'Arabic', 'French', 'Spanish', 'Portuguese', 'Italian', 'German', 'Turkish',
   'Ukrainian', 'Russian', 'Polish', 'Tagalog', 'Hindi', 'Urdu', 'Persian (Farsi)', 'Hebrew',
   'Chinese', 'Vietnamese', 'Thai', 'Korean', 'Japanese',
 ];
+
+// Shared by all 4 export entry points (Recipe Book/Extractor "Export Selected", both
+// Calculators' "Export") -- same curated-select-plus-"Other" widget at each, distinguished only
+// by a DOM id prefix so the 4 instances never collide when more than one could theoretically be
+// present. wireExportLanguagePicker/getSelectedExportLanguage are the JS-side counterpart, kept
+// as separate functions (not bundled into the HTML string) since each call site already has its
+// own click handler to read the selection from.
+function exportLanguagePickerHtml(idPrefix) {
+  return `
+    <label for="${idPrefix}-export-language" style="font-size:12.5px; color:var(--neutral); white-space:nowrap;">Export in</label>
+    <select id="${idPrefix}-export-language" class="builder-select" style="width:auto; max-width:160px;">
+      ${EXPORT_LANGUAGES.map(l => `<option value="${l}">${l}</option>`).join('')}
+      <option value="__other__">Other…</option>
+    </select>
+    <input id="${idPrefix}-export-language-other" style="display:none; max-width:140px; padding:5px 6px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:12.5px;" />
+  `;
+}
+
+function wireExportLanguagePicker(idPrefix) {
+  const select = document.getElementById(`${idPrefix}-export-language`);
+  const other = document.getElementById(`${idPrefix}-export-language-other`);
+  select.addEventListener('change', () => {
+    const isOther = select.value === '__other__';
+    other.style.display = isOther ? '' : 'none';
+    if (isOther) other.focus();
+  });
+}
+
+// Falls back to English if "Other" is picked but left blank -- matches translate-recipe's own
+// fast-path check, so an incomplete pick here never blocks the export.
+function getSelectedExportLanguage(idPrefix) {
+  const select = document.getElementById(`${idPrefix}-export-language`);
+  const other = document.getElementById(`${idPrefix}-export-language-other`);
+  if (select.value === '__other__') return other.value.trim() || 'English';
+  return select.value;
+}
 
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
 
@@ -218,13 +261,16 @@ function renderSectionNav() {
   });
 }
 
+// The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
+const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll'];
+
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
-      // Clicking Item Catalog while it's already open toggles its own section sub-list
+      // Clicking Dish Catalog while it's already open toggles its own section sub-list
       // open/closed, like a normal collapsible nav section; clicking it from anywhere else
       // always opens it expanded. Picking a different nav item just switches views -- the
-      // sub-list belongs only to Item Catalog and is hidden for every other view regardless
+      // sub-list belongs only to Dish Catalog and is hidden for every other view regardless
       // of this flag (see updateItemCatalogExpansion).
       if (btn.dataset.view === 'items' && state.currentView === 'items') {
         state.itemCatalogExpanded = !state.itemCatalogExpanded;
@@ -235,12 +281,26 @@ function wireNav() {
       renderView();
     });
   });
+
+  // "Menu" parent button has no data-view/screen of its own -- it just expands/collapses its
+  // sub-list, landing on the first child (Generate Menu) the first time you enter the group,
+  // same interaction as Dish Catalog above.
+  document.getElementById('menu-parent-btn').addEventListener('click', () => {
+    if (MENU_GROUP_VIEWS.includes(state.currentView)) {
+      state.menuGroupExpanded = !state.menuGroupExpanded;
+    } else {
+      state.menuGroupExpanded = true;
+      state.currentView = 'generate';
+    }
+    renderView();
+  });
 }
 
 function updateActiveViewButtons() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.view === state.currentView);
   });
+  document.getElementById('menu-parent-btn').classList.toggle('active', MENU_GROUP_VIEWS.includes(state.currentView));
 }
 
 function updateItemCatalogExpansion() {
@@ -248,6 +308,11 @@ function updateItemCatalogExpansion() {
   document.getElementById('section-nav').style.display = expanded ? 'block' : 'none';
   const caret = document.getElementById('items-caret');
   if (caret) caret.textContent = expanded ? '▾' : '▸';
+
+  const menuExpanded = MENU_GROUP_VIEWS.includes(state.currentView) && state.menuGroupExpanded;
+  document.getElementById('menu-sublist').style.display = menuExpanded ? 'block' : 'none';
+  const menuCaret = document.getElementById('menu-caret');
+  if (menuCaret) menuCaret.textContent = menuExpanded ? '▾' : '▸';
 }
 
 function renderView() {
@@ -288,11 +353,12 @@ async function renderItemsView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Item Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
+      <div><h1>Dish Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
       <button class="primary" id="add-item-btn">+ Add Item</button>
     </div>
     <div class="search-bar">
-      <input id="item-search" type="search" placeholder="Search items by name…" />
+      <label for="item-search">Search by name</label>
+      <input id="item-search" type="search" />
       <select id="item-category-filter">
         <option value="">All Categories</option>
         ${categoryNames.map(c => `<option value="${c}">${c}</option>`).join('')}
@@ -441,7 +507,7 @@ async function openItemModal(existingItem) {
       <h2>${isEdit ? 'Edit Item' : 'Add Item'}</h2>
       <div class="field">
         <label>Item name</label>
-        <input id="m-name" value="${isEdit ? existingItem.name : ''}" placeholder="e.g. grilled chicken with rice" />
+        <input id="m-name" value="${isEdit ? existingItem.name : ''}" />
       </div>
       <div class="field">
         <label>Meal period</label>
@@ -473,7 +539,7 @@ async function openItemModal(existingItem) {
         <div class="portion-grid">
           ${ageGroups.map(ag => {
             const existing = portions.find(p => p.age_group_code === ag.code);
-            return `<input data-ag="${ag.code}" placeholder="${ag.name} e.g. 150gm" value="${existing ? existing.quantity + existing.unit : ''}" />`;
+            return `<div class="portion-cell"><span class="portion-cell-label">${ag.name}</span><input data-ag="${ag.code}" value="${existing ? existing.quantity + existing.unit : ''}" /></div>`;
           }).join('')}
         </div>
       </div>
@@ -547,7 +613,7 @@ async function openItemModal(existingItem) {
 
   nameInput.addEventListener('blur', async () => {
     if (isEdit || !nameInput.value.trim()) return;
-    const suggestion = await window.api.suggestClassification({ name: nameInput.value, mealPeriod: periodSelect.value });
+    const suggestion = await window.api.suggestClassification({ name: nameInput.value, mealPeriod: periodSelect.value, sectionCode: state.currentSection });
     if (suggestion.category) {
       categorySelect.value = suggestion.category;
       categoryWarning.style.display = 'none';
@@ -584,6 +650,31 @@ async function openItemModal(existingItem) {
       return alert('Please enter a portion size (e.g. 150gm or 180ml) for at least one age group, otherwise the item can\'t be linked to this section and won\'t appear.');
     }
 
+    // This form only ever shows/edits portions for the current section -- if this item also
+    // has portion rows in other sections (not visible here), changing its category could leave
+    // those other sections' rows pointing at a category that no longer belongs there. Surface
+    // that before saving, since silently allowing it is exactly the bug that produced the
+    // cross-section catalog leaks cleaned up earlier; never delete anything without her seeing
+    // it named explicitly first.
+    let removeInvalidSectionPortions = false;
+    if (isEdit && categorySelect.value !== existingItem.category_code) {
+      const { invalidSections } = await window.api.checkCategoryChangeImpact({
+        itemId: existingItem.id, newCategoryCode: categorySelect.value,
+      });
+      if (invalidSections.length > 0) {
+        const sectionList = invalidSections
+          .map(s => `${s.sectionName} (${s.portionCount} portion row${s.portionCount > 1 ? 's' : ''})`)
+          .join(', ');
+        const proceed = confirm(
+          `This item also has portion data in: ${sectionList}. Those sections aren't shown in ` +
+          `this form and won't match the new category.\n\nClick OK to also remove those now-stale ` +
+          `portion rows, or Cancel to leave the category unchanged.`
+        );
+        if (!proceed) return;
+        removeInvalidSectionPortions = true;
+      }
+    }
+
     const result = isEdit
       ? await window.api.updateItem({
           id: existingItem.id, name,
@@ -591,6 +682,7 @@ async function openItemModal(existingItem) {
           proteinCode: proteinSelect.value || null,
           isDailyRepeating: dailyCheckbox.checked,
           isActive: true,
+          removeInvalidSectionPortions,
         })
       : await window.api.addItem({
           name, categoryCode: categorySelect.value,
@@ -616,7 +708,7 @@ async function openItemModal(existingItem) {
 // GENERATE VIEW
 // ============================================================
 // Section selection here is entirely self-contained (the "g-section" <select> below) --
-// deliberately NOT wired to state.currentSection or the Item Catalog sidebar list. The two
+// deliberately NOT wired to state.currentSection or the Dish Catalog sidebar list. The two
 // features used to share that one piece of state, which made whichever nav button was
 // clicked last silently change what the other view meant by "section"; owning it locally
 // removes that coupling entirely.
@@ -633,19 +725,24 @@ function renderGenerateView(main) {
         </select>
       </div>
       <div class="field">
-        <label>Label</label>
-        <input id="g-label" placeholder="e.g. September 2026" />
+        <label>Workbook name</label>
+        <input id="g-label" />
+      </div>
+      <div class="field">
+        <label>Created by</label>
+        <input id="g-created-by" />
       </div>
       <div class="field">
         <label>Start date</label>
         <input id="g-start" type="date" />
       </div>
       <div class="field">
-        <label>Number of school days</label>
-        <input id="g-days" type="number" value="20" min="1" max="60" />
+        <label>End date</label>
+        <input id="g-end" type="date" />
       </div>
       <button class="primary" id="g-generate">Generate Menu</button>
     </div>
+    <div id="g-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
     <div id="g-result"></div>
   `;
 
@@ -655,31 +752,74 @@ function renderGenerateView(main) {
     sectionPill.textContent = state.sections.find(s => s.code === sectionSelect.value)?.name || '';
   });
 
+  wireDateRangeFields('g-start', 'g-end', 'g-day-count');
+
   document.getElementById('g-generate').addEventListener('click', async () => {
     const label = document.getElementById('g-label').value.trim() || 'Untitled Menu';
+    const createdBy = document.getElementById('g-created-by').value.trim() || null;
     const startDate = document.getElementById('g-start').value;
-    const numWeekdays = parseInt(document.getElementById('g-days').value, 10);
-    if (!startDate) return alert('Please choose a start date.');
+    const endDate = document.getElementById('g-end').value;
+    if (!startDate || !endDate) return alert('Please choose a start and end date.');
+    if (endDate < startDate) return alert('End date must be on or after the start date.');
+
+    const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
+    if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
 
     const resultEl = document.getElementById('g-result');
     resultEl.innerHTML = 'Generating…';
     const { menuId, resultDays, warnings } = await window.api.generateMenu({
-      sectionCode: sectionSelect.value, label, startDate, numWeekdays,
+      sectionCode: sectionSelect.value, label, startDate, numWeekdays, createdBy,
     });
     state.currentGeneratedMenuId = menuId;
-    renderMenuResult(resultEl, menuId, resultDays, warnings);
+    renderMenuResult(resultEl, menuId, resultDays, warnings, createdBy);
   });
 }
 
-function renderMenuResult(container, menuId, days, warnings) {
+// Shared by Generate Menu/Build Menu/Export All Sections' Start date + End date field pairs.
+// Keeps End date's native `min` in sync with Start date, so the date picker itself won't offer
+// an earlier date, and live-updates a small "N school days" hint. The hint lives as a sibling
+// of .generate-controls (not inside the End date .field) specifically so it doesn't add a third
+// row to only one of the two fields -- .generate-controls uses align-items: end, so an uneven
+// field height there is what was throwing off the Start/End input alignment.
+function wireDateRangeFields(startId, endId, hintId) {
+  const startEl = document.getElementById(startId);
+  const endEl = document.getElementById(endId);
+
+  function syncMin() {
+    if (startEl.value) endEl.min = startEl.value;
+    else endEl.removeAttribute('min');
+  }
+
+  syncMin();
+  updateSchoolDayCountHint(startId, endId, hintId);
+
+  startEl.addEventListener('change', () => {
+    syncMin();
+    updateSchoolDayCountHint(startId, endId, hintId);
+  });
+  endEl.addEventListener('change', () => updateSchoolDayCountHint(startId, endId, hintId));
+}
+
+async function updateSchoolDayCountHint(startId, endId, hintId) {
+  const startDate = document.getElementById(startId).value;
+  const endDate = document.getElementById(endId).value;
+  const hintEl = document.getElementById(hintId);
+  if (!startDate || !endDate) { hintEl.textContent = ''; return; }
+  if (endDate < startDate) { hintEl.textContent = 'End date is before start date.'; return; }
+  const count = await window.api.getSchoolDayCount({ startDate, endDate });
+  hintEl.textContent = `${count} school day${count === 1 ? '' : 's'}`;
+}
+
+function renderMenuResult(container, menuId, days, warnings, createdBy) {
   container.innerHTML = `
     ${warnings && warnings.length ? `
       <div class="warning-banner">
         ⚠ ${warnings.length} item(s) had to repeat sooner than 4 weeks — the item catalog doesn't yet have
-        enough variety for a full no-repeat cycle. Add more dishes in the Item Catalog to fix this over time.
+        enough variety for a full no-repeat cycle. Add more dishes in the Dish Catalog to fix this over time.
       </div>` : ''}
-    <div style="margin-bottom:14px;">
+    <div style="margin-bottom:14px; display:flex; align-items:center; gap:14px;">
       <button class="secondary" id="export-btn">Export to Excel</button>
+      <span style="color:var(--neutral); font-size:12.5px;">Created by: ${createdBy || '—'}</span>
     </div>
     <div id="days-container"></div>
   `;
@@ -735,17 +875,21 @@ async function renderHistoryView(main) {
       <label><input type="checkbox" id="history-select-all" /> Select All</label>
       <button class="secondary" id="history-delete-btn" disabled>Delete Selected</button>
     </div>
-    <ul class="history-list">${menus.map(m => `
-      <li class="history-item" data-id="${m.id}" ${m.isBatch ? 'title="Bundled export across all sections — no combined detail view, but exportable and deletable as one"' : ''}>
-        <span>
-          <input type="checkbox" class="history-row-check" data-select="${m.id}" />
-          &nbsp; <strong>${m.label}</strong> &nbsp; <span style="color:var(--neutral)">${m.start_date}</span>
-        </span>
-        <span class="chip daily">${m.tag}</span>
-        <span class="chip daily">${m.status}</span>
-        <button class="icon-btn history-export-btn" data-export="${m.id}">Export</button>
-      </li>
-    `).join('')}</ul>
+    <table class="history-table">
+      <thead><tr><th></th><th>Name</th><th>Created By</th><th>Date</th><th>Section</th><th>Export</th></tr></thead>
+      <tbody>
+        ${menus.map(m => `
+          <tr data-id="${m.id}" ${m.isBatch ? 'title="Bundled export across all sections — no combined detail view, but exportable and deletable as one"' : ''}>
+            <td><input type="checkbox" class="history-row-check" data-select="${m.id}" /></td>
+            <td><strong>${m.label}</strong></td>
+            <td>${m.created_by || '—'}</td>
+            <td>${m.start_date}</td>
+            <td>${m.isBatch ? 'All Sections' : m.tag}</td>
+            <td><button class="icon-btn history-export-btn" data-export="${m.id}">Export</button></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
   `;
 
   const selectAllEl = document.getElementById('history-select-all');
@@ -757,7 +901,7 @@ async function renderHistoryView(main) {
   }
 
   listEl.querySelectorAll('.history-row-check').forEach(cb => {
-    // Stop the click from bubbling to the <li>'s own listener below, which opens the detail view.
+    // Stop the click from bubbling to the <tr>'s own listener below, which opens the detail view.
     cb.addEventListener('click', (e) => e.stopPropagation());
     cb.addEventListener('change', () => {
       const id = cb.dataset.select;
@@ -816,17 +960,17 @@ async function renderHistoryView(main) {
     renderHistoryView(main);
   });
 
-  listEl.querySelectorAll('[data-id]').forEach(li => {
-    const entry = menus.find(m => m.id === li.dataset.id);
+  listEl.querySelectorAll('[data-id]').forEach(tr => {
+    const entry = menus.find(m => m.id === tr.dataset.id);
     if (!entry || entry.isBatch) return; // no combined detail view across 5 sections
-    li.addEventListener('click', async () => {
+    tr.addEventListener('click', async () => {
       const days = await window.api.getGeneratedMenuDetail(entry.menuIds[0]);
       const formattedDays = days.map(d => ({
         date: d.menu_date, weekday: d.day_of_week,
         items: d.items.map(it => ({ category: it.category_code, name: it.name })),
       }));
       state.currentGeneratedMenuId = entry.menuIds[0];
-      renderMenuResult(document.getElementById('history-detail'), entry.menuIds[0], formattedDays, []);
+      renderMenuResult(document.getElementById('history-detail'), entry.menuIds[0], formattedDays, [], entry.created_by);
     });
   });
 }
@@ -848,21 +992,26 @@ function renderBuildMenuView(main) {
       </div>
       <div class="generate-controls">
         <div class="field">
-          <label>Label</label>
-          <input id="bm-label" placeholder="e.g. September 2026" value="${state.builder.label}" />
+          <label>Workbook name</label>
+          <input id="bm-label" value="${state.builder.label}" />
+        </div>
+        <div class="field">
+          <label>Created by</label>
+          <input id="bm-created-by" value="${state.builder.createdBy}" />
         </div>
         <div class="field">
           <label>Start date</label>
           <input id="bm-start" type="date" value="${state.builder.startDate}" />
         </div>
         <div class="field">
-          <label>Number of school days</label>
-          <input id="bm-days" type="number" value="${state.builder.numWeekdays}" min="1" max="60" />
+          <label>End date</label>
+          <input id="bm-end" type="date" value="${state.builder.endDate}" />
         </div>
         <button class="secondary" id="bm-build-btn">Build Grids</button>
         <button class="secondary" id="bm-template-btn">Export Blank Template</button>
         <button class="primary" id="bm-export-btn" disabled>Export</button>
       </div>
+      <div id="bm-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
       <div id="bm-status" style="color:var(--neutral); font-size:12.5px; margin-bottom:14px;"></div>
       <div id="bm-grid"></div>
     </div>
@@ -872,6 +1021,7 @@ function renderBuildMenuView(main) {
   document.getElementById('bm-build-btn').addEventListener('click', buildAllBuilderGrids);
   document.getElementById('bm-template-btn').addEventListener('click', exportBuilderBlankTemplate);
   document.getElementById('bm-export-btn').addEventListener('click', exportBuilderMenu);
+  wireDateRangeFields('bm-start', 'bm-end', 'bm-day-count');
 
   renderBuilderTabs();
   renderBuilderGrid();
@@ -894,13 +1044,20 @@ function renderBuilderTabs() {
 
 async function buildAllBuilderGrids() {
   const label = document.getElementById('bm-label').value.trim();
+  const createdBy = document.getElementById('bm-created-by').value.trim();
   const startDate = document.getElementById('bm-start').value;
-  const numWeekdays = parseInt(document.getElementById('bm-days').value, 10);
-  if (!startDate) return alert('Please choose a start date.');
+  const endDate = document.getElementById('bm-end').value;
+  if (!startDate || !endDate) return alert('Please choose a start and end date.');
+  if (endDate < startDate) return alert('End date must be on or after the start date.');
   if (!label) return alert('Please enter a label.');
 
+  const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
+  if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+
   state.builder.label = label;
+  state.builder.createdBy = createdBy;
   state.builder.startDate = startDate;
+  state.builder.endDate = endDate;
   state.builder.numWeekdays = numWeekdays;
 
   const statusEl = document.getElementById('bm-status');
@@ -954,7 +1111,7 @@ function renderBuilderGrid() {
 
   container.innerHTML = `
     <div style="margin-bottom:14px;">
-      <button class="secondary" id="bm-fill-btn">Fill with Suggestions</button>
+      <button class="primary" id="bm-fill-btn">Auto-Fill This Section</button>
     </div>
     <div id="bm-days-container"></div>
   `;
@@ -1026,7 +1183,7 @@ function renderBuilderDayTable(code, day, section, catName) {
 async function fillBuilderSuggestions(code) {
   const { label, startDate, numWeekdays } = state.builder;
   const statusEl = document.getElementById('bm-status');
-  statusEl.textContent = `Filling ${currentBuilderSectionName(code)} with suggestions…`;
+  statusEl.textContent = `Auto-filling ${currentBuilderSectionName(code)}…`;
 
   const { resultDays, warnings } = await window.api.builderFillSuggestions({ sectionCode: code, startDate, numWeekdays });
   const section = state.builder.sections[code];
@@ -1057,8 +1214,8 @@ async function fillBuilderSuggestions(code) {
   renderBuilderGrid();
   updateBuilderCompleteness();
   statusEl.textContent = warnings.length
-    ? `Filled ${currentBuilderSectionName(code)} — ${warnings.length} repeat-rule warning(s) (pool too small for full 4-week variety).`
-    : `Filled ${currentBuilderSectionName(code)} with suggestions.`;
+    ? `Auto-filled ${currentBuilderSectionName(code)} — ${warnings.length} repeat-rule warning(s) (pool too small for full 4-week variety).`
+    : `Auto-filled ${currentBuilderSectionName(code)}.`;
 }
 
 function currentBuilderSectionName(code) {
@@ -1084,14 +1241,14 @@ function updateBuilderCompleteness() {
   if (missing.length > 0) {
     statusEl.textContent = `Not built yet: ${missing.map(currentBuilderSectionName).join(', ')}. Click "Build Grids" first.`;
   } else if (emptyCount > 0) {
-    statusEl.textContent = `${emptyCount} slot(s) still empty across all sections — fill them in, or use "Fill with Suggestions" on each tab.`;
+    statusEl.textContent = `${emptyCount} slot(s) still empty across all sections — fill them in, or use "Auto-Fill This Section" on each tab.`;
   } else {
     statusEl.textContent = 'All sections complete — ready to export.';
   }
 }
 
 async function exportBuilderMenu() {
-  const { label, startDate, days, sections } = state.builder;
+  const { label, createdBy, startDate, days, sections } = state.builder;
   const statusEl = document.getElementById('bm-status');
   document.getElementById('bm-export-btn').disabled = true;
   statusEl.textContent = 'Saving and exporting…';
@@ -1116,7 +1273,7 @@ async function exportBuilderMenu() {
       }
       return { date: day.date, weekday: day.weekday, items };
     });
-    const { menuId } = await window.api.saveManualMenu({ sectionCode: code, label, startDate, days: payloadDays });
+    const { menuId } = await window.api.saveManualMenu({ sectionCode: code, label, createdBy: createdBy || null, startDate, days: payloadDays });
     menuIdsBySection[code] = menuId;
   }
 
@@ -1131,8 +1288,12 @@ async function exportBuilderMenu() {
 
 async function exportBuilderBlankTemplate() {
   const startDate = document.getElementById('bm-start').value;
-  const numWeekdays = parseInt(document.getElementById('bm-days').value, 10);
-  if (!startDate) return alert('Please choose a start date.');
+  const endDate = document.getElementById('bm-end').value;
+  if (!startDate || !endDate) return alert('Please choose a start and end date.');
+  if (endDate < startDate) return alert('End date must be on or after the start date.');
+
+  const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
+  if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
 
   const statusEl = document.getElementById('bm-status');
   statusEl.textContent = 'Exporting blank template…';
@@ -1150,38 +1311,48 @@ async function renderExportAllView(main) {
       <div><h1>Export All Sections</h1><span class="section-pill">One click, one workbook</span></div>
     </div>
     <p style="color:var(--neutral); max-width:640px; margin-bottom:20px;">
-      Generates a fresh menu for every section (Daycare, KG - LP, MS - UP (B-G), Staff, CEO) for the
-      same date range, then exports them all into one workbook with a tab per section --
-      matching your original file's layout.
+      Export all sections together.
     </p>
     <div class="generate-controls">
       <div class="field">
         <label>Workbook name</label>
-        <input id="ea-label" placeholder="e.g. September 2026" />
+        <input id="ea-label" />
+      </div>
+      <div class="field">
+        <label>Created by</label>
+        <input id="ea-created-by" />
       </div>
       <div class="field">
         <label>Start date</label>
         <input id="ea-start" type="date" />
       </div>
       <div class="field">
-        <label>Number of school days</label>
-        <input id="ea-days" type="number" value="20" min="1" max="60" />
+        <label>End date</label>
+        <input id="ea-end" type="date" />
       </div>
       <button class="primary" id="ea-generate-btn">Generate &amp; Export All Sections</button>
     </div>
+    <div id="ea-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
     <div id="ea-result" style="margin-top:16px;"></div>
   `;
 
+  wireDateRangeFields('ea-start', 'ea-end', 'ea-day-count');
+
   document.getElementById('ea-generate-btn').addEventListener('click', async () => {
     const label = document.getElementById('ea-label').value.trim() || 'Untitled Menu';
+    const createdBy = document.getElementById('ea-created-by').value.trim() || null;
     const startDate = document.getElementById('ea-start').value;
-    const numWeekdays = parseInt(document.getElementById('ea-days').value, 10);
-    if (!startDate) return alert('Please choose a start date.');
+    const endDate = document.getElementById('ea-end').value;
+    if (!startDate || !endDate) return alert('Please choose a start and end date.');
+    if (endDate < startDate) return alert('End date must be on or after the start date.');
+
+    const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
+    if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
 
     const resultEl = document.getElementById('ea-result');
     resultEl.textContent = 'Generating all 5 sections and exporting…';
 
-    const result = await window.api.generateAndExportAll({ label, startDate, numWeekdays });
+    const result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy });
 
     if (!result.success) {
       resultEl.textContent = result.cancelled ? '' : 'Export failed.';
@@ -1198,7 +1369,7 @@ async function renderExportAllView(main) {
       ${totalWarnings > 0 ? `
         <div class="warning-banner">
           ⚠ ${totalWarnings} item(s) across all sections had to repeat sooner than 4 weeks
-          -- add more items to those categories in the Item Catalog to improve variety over time.
+          -- add more items to those categories in the Dish Catalog to improve variety over time.
         </div>` : `
         <div style="color:var(--neutral); font-size:13px;">
           No repeat warnings -- every section had enough variety for the full period.
@@ -1285,16 +1456,6 @@ async function renderRecipeListView(main, ns) {
     <div class="topbar">
       <div><h1>${ns.title}</h1><span class="section-pill">${ns.subtitle}</span></div>
       <div style="display:flex; gap:10px; align-items:center;">
-        ${ns.extract ? `
-          <div style="display:flex; align-items:center; gap:6px;">
-            <label for="extract-language-select" style="font-size:12.5px; color:var(--neutral); white-space:nowrap;">Extract in</label>
-            <select id="extract-language-select" class="builder-select" style="width:auto; max-width:160px;">
-              ${EXTRACT_LANGUAGES.map(l => `<option value="${l}">${l}</option>`).join('')}
-              <option value="__other__">Other…</option>
-            </select>
-            <input id="extract-language-other" placeholder="Language name" style="display:none; max-width:140px; padding:5px 6px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:12.5px;" />
-          </div>
-        ` : ''}
         ${ns.extract ? '<button class="secondary" id="import-recipe-btn">Upload Recipe</button>' : ''}
         ${ns.allowManualNew ? '<button class="primary" id="new-recipe-btn">+ New Recipe</button>' : ''}
       </div>
@@ -1302,14 +1463,17 @@ async function renderRecipeListView(main, ns) {
     ${ns.extract ? '<input type="file" id="import-recipe-input" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" multiple hidden />' : ''}
     ${ns.extract ? '<div id="extract-progress-wrap"></div>' : ''}
     <div class="search-bar">
-      <input id="recipe-search" type="search" placeholder="${ns.searchPlaceholder}" />
+      <label for="recipe-search">${ns.searchLabel}</label>
+      <input id="recipe-search" type="search" />
     </div>
-    <div style="margin-bottom:14px;">
+    <div style="margin-bottom:14px; display:flex; align-items:center; gap:10px;">
       <button class="secondary" id="export-selected-btn" disabled>Export Selected</button>
+      ${exportLanguagePickerHtml('list')}
       <button class="secondary" id="delete-selected-btn" disabled>Delete Selected</button>
     </div>
     <div id="recipes-content">Loading…</div>
   `;
+  wireExportLanguagePicker('list');
   if (ns.allowManualNew) {
     document.getElementById('new-recipe-btn').addEventListener('click', () => ns.openNew());
   }
@@ -1318,21 +1482,6 @@ async function renderRecipeListView(main, ns) {
     const importBtn = document.getElementById('import-recipe-btn');
     const importInput = document.getElementById('import-recipe-input');
     const progressWrap = document.getElementById('extract-progress-wrap');
-    const languageSelect = document.getElementById('extract-language-select');
-    const languageOtherInput = document.getElementById('extract-language-other');
-
-    languageSelect.addEventListener('change', () => {
-      const isOther = languageSelect.value === '__other__';
-      languageOtherInput.style.display = isOther ? '' : 'none';
-      if (isOther) languageOtherInput.focus();
-    });
-
-    // Falls back to English if "Other" is picked but left blank -- matches the Edge Function's
-    // own default, so an incomplete pick here never blocks the upload.
-    function currentTargetLanguage() {
-      if (languageSelect.value === '__other__') return languageOtherInput.value.trim() || 'English';
-      return languageSelect.value;
-    }
 
     importBtn.addEventListener('click', () => importInput.click());
     importInput.addEventListener('change', async (e) => {
@@ -1384,7 +1533,7 @@ async function renderRecipeListView(main, ns) {
           reader.onerror = () => reject(reader.error);
           reader.readAsDataURL(file);
         })));
-        const result = await ns.extract({ files: filePayloads, targetLanguage: currentTargetLanguage() });
+        const result = await ns.extract({ files: filePayloads });
         if (!result.success) {
           alert(`Couldn't extract this upload: ${result.error || 'unknown error'}. Opening a blank recipe instead — you can fill it in manually.`);
           ns.openNew();
@@ -1517,11 +1666,23 @@ async function renderRecipeListView(main, ns) {
     const originalLabel = exportBtn.textContent;
     exportBtn.disabled = true;
     exportBtn.textContent = 'Exporting…';
-    const result = await ns.api.exportSelected([...selected]);
-    if (result.success) alert(`Exported to ${result.path}`);
-    else if (!result.cancelled) alert('Export failed.');
-    exportBtn.textContent = originalLabel;
-    updateExportBtn();
+    // Bug found in production: this had no try/catch at all -- when the underlying IPC call
+    // rejected (e.g. a translation failure), the exception escaped this handler uncaught and
+    // every line below (resetting the button) never ran, leaving it stuck on "Exporting…"
+    // forever with no visible error. Looked like an infinite hang; was actually a fast failure
+    // with nothing to surface it. See conversation notes.
+    const unsubscribe = window.api.onExportProgress((message) => { exportBtn.textContent = message; });
+    try {
+      const result = await ns.api.exportSelected([...selected], getSelectedExportLanguage('list'));
+      if (result.success) alert(`Exported to ${result.path}`);
+      else if (!result.cancelled) alert('Export failed.');
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+    } finally {
+      unsubscribe();
+      exportBtn.textContent = originalLabel;
+      updateExportBtn();
+    }
   });
 
   deleteSelectedBtn.addEventListener('click', async () => {
@@ -1543,10 +1704,8 @@ async function renderRecipeListView(main, ns) {
 }
 
 let _recipeRowLocalIdCounter = 0;
-// displayName is Extractor-only (Recipe Book's own ingredient rows never read/write it) -- see
-// renderProcessIngredientRows/buildProcessFromSaved/buildProcessFromImported.
 function makeEmptyIngredientRow() {
-  return { localId: ++_recipeRowLocalIdCounter, ingredientId: null, name: '', displayName: '', quantity: '', unit: '', method: '' };
+  return { localId: ++_recipeRowLocalIdCounter, ingredientId: null, name: '', quantity: '', unit: '', method: '' };
 }
 
 async function renderRecipeFormView(main, ns) {
@@ -1610,12 +1769,12 @@ async function renderRecipeFormView(main, ns) {
     </div>
 
     <div class="generate-controls">
-      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" placeholder="e.g. Chicken Fatteh" /></div>
-      <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" placeholder="e.g. 1 PAX" /></div>
+      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" /></div>
+      <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" /></div>
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" /></div>
-      <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" placeholder="e.g. Main Course" /></div>
+      <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" /></div>
-      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" placeholder="e.g. 15" value="${recipe?.waste_percent ?? ''}" /></div>
+      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" value="${recipe?.waste_percent ?? ''}" /></div>
       <div class="field"><label>Yield (computed)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
       <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
     </div>
@@ -1772,12 +1931,10 @@ const TEXT_LIST_FIELDS = {
   prep: {
     modeKey: 'prepMode', textKey: 'prepText', itemsKey: 'prepItems',
     textareaId: 'rf-prep', mountId: 'rf-prep-field', rows: 5,
-    placeholder: 'Describe preparation and cooking…', itemPlaceholder: 'Step',
   },
   presentation: {
     modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
     textareaId: 'rf-presentation', mountId: 'rf-presentation-field', rows: 4,
-    placeholder: 'Describe presentation, decoration and serving…', itemPlaceholder: 'Step',
   },
 };
 
@@ -1810,13 +1967,13 @@ function renderTextListFieldBody(target, cfg) {
       <button type="button" class="mode-toggle-btn ${mode === 'list' ? 'active' : ''}" data-mode="list">List</button>
     </div>
     ${mode === 'paragraph' ? `
-      <textarea id="${cfg.textareaId}" rows="${cfg.rows}" placeholder="${cfg.placeholder}" ${cfg.dirAuto ? 'dir="auto"' : ''}>${target[cfg.textKey] || ''}</textarea>
+      <textarea id="${cfg.textareaId}" rows="${cfg.rows}" ${cfg.dirAuto ? 'dir="auto"' : ''}>${target[cfg.textKey] || ''}</textarea>
     ` : `
       <div class="text-list">
         ${items.map((item, idx) => `
           <div class="text-list-row" data-item="${item.localId}">
             <span class="text-list-index">${idx + 1}.</span>
-            <input class="text-list-input" value="${item.value}" placeholder="${cfg.itemPlaceholder} ${idx + 1}…" ${cfg.dirAuto ? 'dir="auto"' : ''} />
+            <input class="text-list-input" value="${item.value}" ${cfg.dirAuto ? 'dir="auto"' : ''} />
             <button type="button" class="icon-btn danger" data-remove="${item.localId}" ${items.length <= 1 ? 'disabled' : ''}>✕</button>
           </div>
         `).join('')}
@@ -1892,12 +2049,12 @@ function renderIngredientRows(ns) {
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
       <td class="autocomplete-wrap">
-        <input class="rf-ing-name" value="${row.name}" placeholder="Start typing an ingredient…" autocomplete="off" />
+        <input class="rf-ing-name" value="${row.name}" autocomplete="off" />
         <div class="autocomplete-list" hidden></div>
       </td>
-      <td><input class="rf-ing-qty" value="${row.quantity}" placeholder="e.g. 150" /></td>
-      <td><input class="rf-ing-unit" value="${row.unit}" placeholder="e.g. gm" /></td>
-      <td><input class="rf-ing-method" value="${row.method}" placeholder="e.g. marinated before 2 hours" /></td>
+      <td><input class="rf-ing-qty" value="${row.quantity}" /></td>
+      <td><input class="rf-ing-unit" value="${row.unit}" /></td>
+      <td><input class="rf-ing-method" value="${row.method}" /></td>
       <td style="text-align:right">
         <button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
       </td>
@@ -2001,11 +2158,7 @@ function wireIngredientRowDrag(ns, tbody) {
 // chef to reuse the existing IN- row instead of creating a near-duplicate.
 let _ingredientAcDebounce = null;
 
-// `onPick` fires after a match is picked or created, given (ingredient, row) -- optional, no-op
-// by default (Recipe Book's call site never passes one). Recipe Extractor's own ingredient rows
-// use it to seed the separate displayName/wide-input from the picked canonical name when the
-// chef hasn't typed a display name of her own yet -- see renderProcessIngredientRows.
-function wireIngredientAutocomplete(ns, inputEl, listEl, unitInput, row, onPick) {
+function wireIngredientAutocomplete(ns, inputEl, listEl, unitInput, row) {
   inputEl.addEventListener('input', () => {
     row.name = inputEl.value;
     row.ingredientId = null; // typing invalidates the previous link until something is picked again
@@ -2014,7 +2167,7 @@ function wireIngredientAutocomplete(ns, inputEl, listEl, unitInput, row, onPick)
     if (!query) { listEl.hidden = true; listEl.innerHTML = ''; return; }
     _ingredientAcDebounce = setTimeout(async () => {
       const matches = await ns.api.searchIngredients(query);
-      renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, row, onPick);
+      renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, row);
     }, 150);
   });
 
@@ -2027,7 +2180,7 @@ function wireIngredientAutocomplete(ns, inputEl, listEl, unitInput, row, onPick)
   });
 }
 
-function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, row, onPick) {
+function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, row) {
   const exact = matches.find(m => m.name.toLowerCase() === query.toLowerCase());
   listEl.innerHTML = `
     ${matches.map(m => `
@@ -2045,7 +2198,6 @@ function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, 
       e.preventDefault(); // keep the input from blurring/hiding the list before the click lands
       const match = matches.find(m => m.id === parseInt(el.dataset.pick, 10));
       selectIngredientForRow(match, inputEl, unitInput, row, listEl);
-      if (onPick) onPick(match, row);
     });
   });
   const addEl = listEl.querySelector('[data-add]');
@@ -2057,7 +2209,6 @@ function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, 
         // left blank here (not everyone has one on hand mid-recipe); it's editable later.
         const created = await ns.api.addIngredient({ name: query, defaultUnit: 'G' });
         selectIngredientForRow(created, inputEl, unitInput, row, listEl);
-        if (onPick) onPick(created, row);
       } catch (err) {
         alert(`Couldn't add "${query}" as a new ingredient: ${err.message}`);
       }
@@ -2162,7 +2313,7 @@ function makeProcessMethodCfg(process) {
   return {
     modeKey: 'methodMode', textKey: 'methodText', itemsKey: 'methodItems',
     textareaId: `ep-method-${process.localId}`, mountId: `ep-method-field-${process.localId}`,
-    rows: 5, placeholder: 'Describe preparation and cooking for this process…', itemPlaceholder: 'Step',
+    rows: 5,
     // Extraction can now translate into any chosen language, including RTL ones -- dir="auto"
     // detects direction live from each field's own content (no need to know what language was
     // picked at extraction time), so this costs nothing for LTR text and fixes alignment/cursor
@@ -2197,9 +2348,6 @@ function buildProcessFromSaved(proc) {
           localId: ++_recipeRowLocalIdCounter,
           ingredientId: ri.ingredient_id,
           name: ri.ingredient_name,
-          // Falls back to the canonical English name for a legacy/never-translated row, same
-          // fallback used everywhere else this now needs to display (export, Calculator).
-          displayName: ri.display_name || ri.ingredient_name || '',
           quantity: ri.quantity ?? '',
           unit: ri.unit || '',
           method: ri.method || '',
@@ -2226,7 +2374,6 @@ function buildProcessFromImported(proc) {
           localId: ++_recipeRowLocalIdCounter,
           ingredientId: ing.ingredientId || null,
           name: ing.name || '',
-          displayName: ing.displayName || ing.name || '',
           quantity: ing.quantity != null ? String(ing.quantity) : '',
           unit: ing.unit || '',
           method: ing.method || '',
@@ -2274,26 +2421,24 @@ function goBackToExtractorList() {
 }
 
 // Renders one process's ingredient table into an explicit <tbody> element (not a fixed
-// document-wide id, since several processes' tables are mounted simultaneously).
-// "Ingredient" is a plain free-text field bound to displayName (any language, never touches
-// matching); "English Match" is the actual canonical-ingredient search/link, reusing
-// wireIngredientAutocomplete/selectIngredientForRow completely unchanged, just pointed at this
-// narrower column instead of the wide one. Picking or creating a match there seeds displayName
-// (and its visible input) only if she hasn't typed one of her own yet -- see the onPick callback
-// below. This is what lets her review/correct ingredient names in the recipe's own language
-// without ever risking the canonical English-only ingredient list.
+// document-wide id, since several processes' tables are mounted simultaneously). Single
+// "Ingredient" column, same canonical-ingredient autocomplete/dedupe as Recipe Book's own
+// renderIngredientRows (wireIngredientAutocomplete/selectIngredientForRow, unchanged) -- the
+// separate free-text "display name" column this used to have (for reviewing/correcting a
+// translated ingredient name distinct from its English match) was reverted along with
+// extraction-time language selection; every extracted ingredient name is English again, so
+// there's nothing left for a second column to hold.
 function renderProcessIngredientRows(process, tbodyEl, onChange) {
   tbodyEl.innerHTML = process.ingredientRows.map(row => `
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
-      <td><input class="rf-ing-display" value="${row.displayName}" placeholder="Ingredient name…" dir="auto" /></td>
       <td class="autocomplete-wrap">
-        <input class="rf-ing-name" value="${row.name}" placeholder="Search English name…" autocomplete="off" />
+        <input class="rf-ing-name" value="${row.name}" autocomplete="off" />
         <div class="autocomplete-list" hidden></div>
       </td>
-      <td><input class="rf-ing-qty" value="${row.quantity}" placeholder="e.g. 150" /></td>
-      <td><input class="rf-ing-unit" value="${row.unit}" placeholder="e.g. gm" /></td>
-      <td><input class="rf-ing-method" value="${row.method}" placeholder="e.g. marinated before 2 hours" dir="auto" /></td>
+      <td><input class="rf-ing-qty" value="${row.quantity}" /></td>
+      <td><input class="rf-ing-unit" value="${row.unit}" /></td>
+      <td><input class="rf-ing-method" value="${row.method}" dir="auto" /></td>
       <td style="text-align:right">
         <button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
       </td>
@@ -2302,24 +2447,17 @@ function renderProcessIngredientRows(process, tbodyEl, onChange) {
 
   process.ingredientRows.forEach(row => {
     const tr = tbodyEl.querySelector(`tr[data-row="${row.localId}"]`);
-    const displayInput = tr.querySelector('.rf-ing-display');
     const nameInput = tr.querySelector('.rf-ing-name');
     const qtyInput = tr.querySelector('.rf-ing-qty');
     const unitInput = tr.querySelector('.rf-ing-unit');
     const methodInput = tr.querySelector('.rf-ing-method');
     const listEl = tr.querySelector('.autocomplete-list');
 
-    displayInput.addEventListener('input', () => { row.displayName = displayInput.value; });
     qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; onChange(); });
     unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
     methodInput.addEventListener('input', () => { row.method = methodInput.value; });
 
-    wireIngredientAutocomplete(RECIPE_NS.extractor, nameInput, listEl, unitInput, row, (ingredient) => {
-      if (!row.displayName.trim()) {
-        row.displayName = ingredient.name;
-        displayInput.value = ingredient.name;
-      }
-    });
+    wireIngredientAutocomplete(RECIPE_NS.extractor, nameInput, listEl, unitInput, row);
   });
 
   tbodyEl.querySelectorAll('[data-row-remove]').forEach(btn => {
@@ -2432,10 +2570,10 @@ async function renderExtractorFormView(main) {
     </div>
 
     <div class="generate-controls">
-      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" placeholder="e.g. Crème Brûlée" dir="auto" /></div>
-      <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" placeholder="e.g. 1 PAX" dir="auto" /></div>
+      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" dir="auto" /></div>
+      <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" dir="auto" /></div>
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" dir="auto" /></div>
-      <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" placeholder="e.g. Dessert" dir="auto" /></div>
+      <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" dir="auto" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" dir="auto" /></div>
       <div class="field"><label>Net Weight (computed, sum of processes)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
       <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
@@ -2541,23 +2679,23 @@ async function renderExtractorFormView(main) {
     container.innerHTML = s.processes.map(proc => `
       <div class="process-card" data-process="${proc.localId}">
         <div class="process-card-head">
-          <input class="process-name-input" value="${proc.name}" placeholder="Process name (e.g. Vanilla Base)" dir="auto" />
+          <input class="process-name-input" value="${proc.name}" dir="auto" />
           <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${s.processes.length <= 1 ? 'disabled' : ''}>Remove Process</button>
         </div>
         <table class="recipe-ingredients-table">
-          <thead><tr><th></th><th>Ingredient</th><th>English Match</th><th>Quantity</th><th>Unit</th><th>Note</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Note</th><th></th></tr></thead>
           <tbody class="process-ing-rows"></tbody>
         </table>
         <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
         <div class="process-calc-row" style="display:flex; gap:16px; align-items:flex-end; margin:0 0 16px;">
           <div class="field" style="max-width:160px;">
             <label>Quantity Produced</label>
-            <input id="ep-qty-${proc.localId}" value="${proc.quantityProduced || ''}" placeholder="e.g. 30 trays" dir="auto" />
+            <input id="ep-qty-${proc.localId}" value="${proc.quantityProduced || ''}" dir="auto" />
           </div>
           <div id="ep-total-${proc.localId}" class="total-qty-display"></div>
           <div class="field" style="max-width:160px;">
             <label>Waste %</label>
-            <input id="ep-waste-${proc.localId}" type="number" min="0" max="100" step="0.1" placeholder="e.g. 15" value="${proc.wastePercent ?? ''}" />
+            <input id="ep-waste-${proc.localId}" type="number" min="0" max="100" step="0.1" value="${proc.wastePercent ?? ''}" />
           </div>
           <div class="field" style="max-width:200px;">
             <label>Net Weight (computed)</label>
@@ -2655,15 +2793,11 @@ async function saveExtractorForm() {
       method: collectTextListFieldValue(proc, makeProcessMethodCfg(proc)),
       wastePercent: proc.wastePercent === '' || proc.wastePercent == null ? null : parseFloat(proc.wastePercent),
       quantityProduced: (proc.quantityProduced || '').trim() || null,
-      // Kept if EITHER name (English match) or displayName has something -- a row where she
-      // only filled in the display name and never touched English Match must still save (see
-      // save-extracted-recipe's matching resolveIngredientId fallback), not be silently dropped.
       ingredients: proc.ingredientRows
-        .filter(r => r.name.trim() !== '' || (r.displayName || '').trim() !== '')
+        .filter(r => r.name.trim() !== '')
         .map(r => ({
           ingredientId: r.ingredientId,
           name: r.name.trim(),
-          displayName: (r.displayName || '').trim(),
           quantity: r.quantity ? parseFloat(r.quantity) : null,
           unit: r.unit || null,
           method: r.method || null,
@@ -2803,7 +2937,7 @@ function renderCalculatorView(main) {
       <div class="field" style="min-width:260px;">
         <label>Recipe Name</label>
         <div class="autocomplete-wrap">
-          <input id="calc-recipe-name" placeholder="Start typing or browse recipes…" autocomplete="off" style="padding-right:28px; width:100%;" />
+          <input id="calc-recipe-name" autocomplete="off" style="padding-right:28px; width:100%;" />
           <button type="button" class="autocomplete-browse-btn" id="calc-recipe-browse-btn" aria-label="Browse recipes" title="Browse all recipes">▾</button>
           <div class="autocomplete-list" id="calc-recipe-list" hidden></div>
         </div>
@@ -2829,7 +2963,7 @@ function renderCalculatorView(main) {
       </div>
       <div class="field" style="max-width:160px; display:none;" id="calc-target-field">
         <label>Target Total Quantity (g)</label>
-        <input id="calc-target-qty" type="number" step="1" min="0" placeholder="e.g. 2000" />
+        <input id="calc-target-qty" type="number" step="1" min="0" />
       </div>
       <button class="primary" id="calc-calculate-btn" disabled>Calculate</button>
     </div>
@@ -3177,19 +3311,36 @@ function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
           <div style="white-space:pre-wrap;">${recipe.comment || '—'}</div>
         </div>
 
-        <button class="primary" id="calc-export-btn">Export to Excel</button>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <button class="primary" id="calc-export-btn">Export to Excel</button>
+          ${exportLanguagePickerHtml('calc')}
+        </div>
         <span id="calc-export-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
       </div>
     </div>
   `;
+  wireExportLanguagePicker('calc');
 
   document.getElementById('calc-export-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('calc-export-btn');
     const statusEl = document.getElementById('calc-export-status');
+    btn.disabled = true;
     statusEl.textContent = 'Exporting…';
-    const result = await window.api.exportScaledRecipe({ recipe: scaledRecipe, ingredients: scaledIngredients });
-    if (result.success) statusEl.textContent = `Exported to ${result.path}`;
-    else if (!result.cancelled) statusEl.textContent = 'Export failed.';
-    else statusEl.textContent = '';
+    // See the List "Export Selected" handler's comment -- same missing-try/catch bug fixed here.
+    const unsubscribe = window.api.onExportProgress((message) => { statusEl.textContent = message; });
+    try {
+      const result = await window.api.exportScaledRecipe({
+        recipe: scaledRecipe, ingredients: scaledIngredients, targetLanguage: getSelectedExportLanguage('calc'),
+      });
+      if (result.success) statusEl.textContent = `Exported to ${result.path}`;
+      else if (!result.cancelled) statusEl.textContent = 'Export failed.';
+      else statusEl.textContent = '';
+    } catch (err) {
+      statusEl.textContent = `Export failed: ${err.message}`;
+    } finally {
+      unsubscribe();
+      btn.disabled = false;
+    }
   });
 }
 
@@ -3256,7 +3407,7 @@ function renderScaledExtractedRecipeResult(container, recipeId, recipe, processe
               <tbody>
                 ${proc.ingredients.map(ing => `
                   <tr>
-                    <td>${ing.display_name || ing.ingredient_name}</td>
+                    <td>${ing.ingredient_name}</td>
                     <td>${ing.quantity ?? ''}</td>
                     <td>${ing.unit || ''}</td>
                     <td>${ing.method || ''}</td>
@@ -3291,32 +3442,49 @@ function renderScaledExtractedRecipeResult(container, recipeId, recipe, processe
           <div style="white-space:pre-wrap;">${recipe.comment || '—'}</div>
         </div>
 
-        <button class="primary" id="calc-export-btn">Export to Excel</button>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <button class="primary" id="calc-export-btn">Export to Excel</button>
+          ${exportLanguagePickerHtml('calc')}
+        </div>
         <span id="calc-export-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
       </div>
     </div>
   `;
+  wireExportLanguagePicker('calc');
 
   document.getElementById('calc-export-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('calc-export-btn');
     const statusEl = document.getElementById('calc-export-status');
+    btn.disabled = true;
     statusEl.textContent = 'Exporting…';
-    // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending --
-    // export-scaled-extracted-recipe re-fetches photos fresh by recipeId itself, and the scaled
-    // processes below are the ones that actually belong in the export, not the original full set.
-    const { processes: _origProcesses, photos: _origPhotos, ...recipeFields } = recipe;
-    const exportRecipe = {
-      ...recipeFields,
-      quantity_produced: quantityProducedScaled,
-      yield_notes: `${combinedNetWeight} G`,
-    };
-    const exportProcesses = scaledProcesses.map(p => ({
-      name: p.name, method: p.method, waste_percent: p.waste_percent,
-      quantity_produced: p.scaledQuantityProduced, ingredients: p.ingredients,
-    }));
-    const result = await window.api.exportScaledExtractedRecipe({ recipeId, recipe: exportRecipe, processes: exportProcesses });
-    if (result.success) statusEl.textContent = `Exported to ${result.path}`;
-    else if (!result.cancelled) statusEl.textContent = 'Export failed.';
-    else statusEl.textContent = '';
+    // See the List "Export Selected" handler's comment -- same missing-try/catch bug fixed here.
+    const unsubscribe = window.api.onExportProgress((message) => { statusEl.textContent = message; });
+    try {
+      // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending --
+      // export-scaled-extracted-recipe re-fetches photos fresh by recipeId itself, and the scaled
+      // processes below are the ones that actually belong in the export, not the original full set.
+      const { processes: _origProcesses, photos: _origPhotos, ...recipeFields } = recipe;
+      const exportRecipe = {
+        ...recipeFields,
+        quantity_produced: quantityProducedScaled,
+        yield_notes: `${combinedNetWeight} G`,
+      };
+      const exportProcesses = scaledProcesses.map(p => ({
+        name: p.name, method: p.method, waste_percent: p.waste_percent,
+        quantity_produced: p.scaledQuantityProduced, ingredients: p.ingredients,
+      }));
+      const result = await window.api.exportScaledExtractedRecipe({
+        recipeId, recipe: exportRecipe, processes: exportProcesses, targetLanguage: getSelectedExportLanguage('calc'),
+      });
+      if (result.success) statusEl.textContent = `Exported to ${result.path}`;
+      else if (!result.cancelled) statusEl.textContent = 'Export failed.';
+      else statusEl.textContent = '';
+    } catch (err) {
+      statusEl.textContent = `Export failed: ${err.message}`;
+    } finally {
+      unsubscribe();
+      btn.disabled = false;
+    }
   });
 }
 
@@ -3341,7 +3509,8 @@ async function renderIngredientsView(main) {
       <button class="primary" id="add-ingredient-btn">+ Add Ingredient</button>
     </div>
     <div class="search-bar">
-      <input id="ingredient-search" type="search" placeholder="Search ingredients by name…" />
+      <label for="ingredient-search">Search by name</label>
+      <input id="ingredient-search" type="search" />
       <select id="ingredient-category-filter">
         <option value="">All Categories</option>
         ${uncategorizedCount > 0 ? `<option value="${UNCATEGORIZED_FILTER_VALUE}">Uncategorized (${uncategorizedCount})</option>` : ''}
@@ -3376,7 +3545,7 @@ async function renderIngredientsView(main) {
       return;
     }
 
-    // Same shared-table-with-rowspan-merged-category pattern as the Item Catalog view --
+    // Same shared-table-with-rowspan-merged-category pattern as the Dish Catalog view --
     // keeps columns aligned across every category instead of one table per category.
     const byCategory = new Map();
     for (const ing of filtered) {
@@ -3445,19 +3614,19 @@ async function openIngredientModal(existingIngredient) {
       <h2>${editing ? 'Edit Ingredient' : 'Add Ingredient'}</h2>
       <div class="field">
         <label>Ingredient name</label>
-        <input id="im-name" placeholder="e.g. Bread Bagels" value="${existingIngredient?.name || ''}" />
+        <input id="im-name" value="${existingIngredient?.name || ''}" />
       </div>
       <div class="field">
         <label>Product code</label>
-        <input id="im-code" placeholder="e.g. FB02-00001" value="${existingIngredient?.product_code || ''}" />
+        <input id="im-code" value="${existingIngredient?.product_code || ''}" />
       </div>
       <div class="field">
         <label>Default unit</label>
-        <input id="im-unit" placeholder="e.g. PC, GR, ML, KG" value="${existingIngredient?.default_unit || ''}" />
+        <input id="im-unit" value="${existingIngredient?.default_unit || ''}" />
       </div>
       <div class="field">
         <label>Category</label>
-        <input id="im-category" list="im-category-list" placeholder="Pick existing or type a new one" value="${existingIngredient?.category || ''}" />
+        <input id="im-category" list="im-category-list" value="${existingIngredient?.category || ''}" />
         <datalist id="im-category-list">
           ${categories.map(c => `<option value="${c}"></option>`).join('')}
         </datalist>
@@ -3509,7 +3678,8 @@ async function renderExtractedIngredientsView(main) {
       <div><h1>Extracted Ingredients</h1><span class="section-pill">Recipe Extractor ingredient list (EX-IN-)</span></div>
     </div>
     <div class="search-bar">
-      <input id="extracted-ingredient-search" type="search" placeholder="Search extracted ingredients by name…" />
+      <label for="extracted-ingredient-search">Search by name</label>
+      <input id="extracted-ingredient-search" type="search" />
     </div>
     <div id="extracted-ingredients-content">Loading…</div>
   `;
@@ -3581,7 +3751,7 @@ async function openExtractedIngredientModal(existingIngredient) {
       <h2>Edit Extracted Ingredient</h2>
       <div class="field">
         <label>Ingredient name</label>
-        <input id="eim-name" placeholder="e.g. Bread Bagels" value="${existingIngredient?.name || ''}" />
+        <input id="eim-name" value="${existingIngredient?.name || ''}" />
       </div>
       <div class="field">
         <label>Product code</label>
@@ -3589,7 +3759,7 @@ async function openExtractedIngredientModal(existingIngredient) {
       </div>
       <div class="field">
         <label>Default unit</label>
-        <input id="eim-unit" placeholder="e.g. PC, GR, ML, KG" value="${existingIngredient?.default_unit || ''}" />
+        <input id="eim-unit" value="${existingIngredient?.default_unit || ''}" />
       </div>
       <div class="actions">
         <button class="secondary" id="eim-cancel">Cancel</button>

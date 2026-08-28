@@ -17,12 +17,15 @@
       <div class="tagline">School Nutrition Planning</div>
 
       <div class="section-label">View</div>
-      <button class="nav-btn" data-view="items"><span>Item Catalog</span><span class="nav-caret" id="items-caret">▾</span></button>
+      <button class="nav-btn" data-view="items"><span>Dish Catalog</span><span class="nav-caret" id="items-caret">▾</span></button>
       <div id="section-nav" class="section-sublist"></div>
-      <button class="nav-btn" data-view="generate">Generate Menu</button>
-      <button class="nav-btn" data-view="build">Build Menu</button>
+      <button class="nav-btn" id="menu-parent-btn"><span>Menu</span><span class="nav-caret" id="menu-caret">▾</span></button>
+      <div id="menu-sublist" class="section-sublist">
+        <button class="nav-btn" data-view="generate">Generate Menu</button>
+        <button class="nav-btn" data-view="build">Build Menu</button>
+        <button class="nav-btn" data-view="exportAll">Export All Sections</button>
+      </div>
       <button class="nav-btn" data-view="history">History</button>
-      <button class="nav-btn" data-view="exportAll">Export All Sections</button>
 
       <div class="section-label">Recipes</div>
       <button class="nav-btn" data-view="recipes">Recipe Book</button>

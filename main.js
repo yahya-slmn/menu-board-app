@@ -11,10 +11,11 @@ const {
   getAgeGroups, getAgeGroupsForSection, getAgeGroupByCode, getAgeGroupById,
   getCategoryPortionDefault,
 } = require('./lib/referenceData');
-const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom } = require('./lib/generator');
+const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom, schoolDayCountBetween } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
-const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, exportExtractedRecipes, exportScaledExtractedRecipe, sanitizeSheetName } = require('./lib/export');
+const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, exportExtractedRecipes, exportScaledExtractedRecipe, sanitizeSheetName, DEFAULT_LABELS } = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
+const { translateTexts } = require('./lib/translateRecipe');
 
 let mainWindow;
 let loginWindow;
@@ -280,8 +281,8 @@ ipcMain.handle('get-item-portions', async (e, itemId) => {
   }));
 });
 
-ipcMain.handle('suggest-classification', (e, { name, mealPeriod }) => {
-  return suggestClassification(name, mealPeriod);
+ipcMain.handle('suggest-classification', (e, { name, mealPeriod, sectionCode }) => {
+  return suggestClassification(name, mealPeriod, sectionCode);
 });
 
 // menu_items has UNIQUE(name, category_id) in Postgres too -- adding/renaming/re-categorizing
@@ -337,7 +338,50 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
   return { success: true, itemId };
 });
 
-ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive }) => {
+// Which sections' SECTION_SLOTS actually list this category code -- the same "does this
+// category belong here" definition the category-leak audit used, kept in one place so both
+// stay in sync.
+function sectionCodesForCategory(categoryCode) {
+  return Object.keys(SECTION_SLOTS).filter(sectionCode =>
+    SECTION_SLOTS[sectionCode].some(([catCode]) => catCode === categoryCode)
+  );
+}
+
+// Read-only: called from the Edit Item form only when the category dropdown actually changed.
+// The form only ever shows/edits item_portions for the section currently being viewed
+// (getAgeGroups(state.currentSection) in renderer.js), so it has no visibility into whether
+// this item also has portions in OTHER sections -- this is what gives it that visibility
+// before the save happens, instead of after, silently (the update-item bug that produced the
+// cross-section leaks cleaned up earlier).
+ipcMain.handle('check-category-change-impact', async (e, { itemId, newCategoryCode }) => {
+  const { data: portionRows, error } = await supabase
+    .from('item_portions').select('age_group_id').eq('item_id', itemId);
+  if (error) throw supaFail('check-category-change-impact: load item_portions', error);
+  if (portionRows.length === 0) return { invalidSections: [] };
+
+  const ageGroupIds = [...new Set(portionRows.map(r => r.age_group_id))];
+  const ageGroups = ageGroupIds.map(id => getAgeGroupById(id)).filter(Boolean);
+  const sectionIdsWithPortions = [...new Set(ageGroups.map(a => a.section_id))];
+
+  const validSectionCodes = new Set(sectionCodesForCategory(newCategoryCode));
+
+  const invalidSections = sectionIdsWithPortions
+    .map(sid => getSectionById(sid))
+    .filter(s => s && !validSectionCodes.has(s.code))
+    .map(s => ({
+      sectionCode: s.code,
+      sectionName: s.name,
+      portionCount: ageGroups.filter(a => a.section_id === s.id).length,
+    }));
+
+  return { invalidSections };
+});
+
+// removeInvalidSectionPortions: set only after the renderer has shown the chef exactly which
+// sections/how-many rows would go stale (via check-category-change-impact above) and she's
+// explicitly confirmed -- never inferred or defaulted true, so a category save never deletes
+// portion data the chef hasn't seen and approved in the moment.
+ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, removeInvalidSectionPortions }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
 
@@ -356,6 +400,27 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
     if (error.code === '23505') return { success: false, duplicate: true };
     throw supaFail('update-item', error);
   }
+
+  if (removeInvalidSectionPortions) {
+    const validSectionCodes = new Set(sectionCodesForCategory(categoryCode));
+    const { data: portionRows, error: pErr } = await supabase
+      .from('item_portions').select('id, age_group_id').eq('item_id', id);
+    if (pErr) throw supaFail('update-item: load item_portions for cleanup', pErr);
+
+    const idsToDelete = portionRows
+      .filter(p => {
+        const ag = getAgeGroupById(p.age_group_id);
+        const section = ag ? getSectionById(ag.section_id) : null;
+        return section && !validSectionCodes.has(section.code);
+      })
+      .map(p => p.id);
+
+    if (idsToDelete.length) {
+      const { error: delErr } = await supabase.from('item_portions').delete().in('id', idsToDelete);
+      if (delErr) throw supaFail('update-item: cleanup invalid-section portions', delErr);
+    }
+  }
+
   return { success: true };
 });
 
@@ -645,7 +710,86 @@ ipcMain.handle('delete-recipe', async (e, id) => {
   return { success: true };
 });
 
-ipcMain.handle('export-recipes', async (e, { recipeIds, savePath }) => {
+// ---------------------------------------------------------------
+// Export-time translation (Recipe Book + Recipe Extractor)
+//
+// Shared by all 4 export IPC handlers below. Fast path: targetLanguage 'English' (or unset)
+// skips translate-recipe entirely and returns the recipe/ingredients/processes exactly as
+// passed in, with DEFAULT_LABELS -- content is always English now (extraction dropped its own
+// language picker, see conversation notes), so this is the overwhelmingly common case and adds
+// zero latency/cost to it. Only prepared_by/checked_by (a person's name) and quantity_produced
+// (usually just a number + an already-cross-language catering abbreviation like "PAX") are
+// deliberately left out of the translated fields below -- everything else free-text goes
+// through translate-recipe. One translate-recipe call per recipe, even inside a batch export
+// (export-recipes/export-extracted-recipes loop several recipeIds) -- simpler and safer than
+// combining many recipes into one giant call, at the cost of re-translating the same ~24 fixed
+// labels once per recipe rather than once per batch; not worth the added complexity to avoid.
+const LABEL_KEYS = Object.keys(DEFAULT_LABELS);
+
+function labelsFromTranslatedTexts(translated) {
+  const labels = {};
+  LABEL_KEYS.forEach((k, i) => { labels[k] = translated[i]; });
+  return labels;
+}
+
+async function translateForBookExport(targetLanguage, recipe, ingredients) {
+  if (!targetLanguage || targetLanguage === 'English') {
+    return { recipe, ingredients, labels: DEFAULT_LABELS, targetLanguage };
+  }
+  const texts = [
+    ...LABEL_KEYS.map(k => DEFAULT_LABELS[k]),
+    recipe.name || '', recipe.category || '', recipe.country_origin || '',
+    recipe.comment || '', recipe.preparation_cooking || '', recipe.presentation_serving || '',
+    ...ingredients.flatMap(ing => [ing.ingredient_name || '', ing.method || '']),
+  ];
+  const translated = await translateTexts({ targetLanguage, texts });
+
+  const labels = labelsFromTranslatedTexts(translated);
+  let idx = LABEL_KEYS.length;
+  const translatedRecipe = {
+    ...recipe,
+    name: translated[idx++], category: translated[idx++], country_origin: translated[idx++],
+    comment: translated[idx++], preparation_cooking: translated[idx++], presentation_serving: translated[idx++],
+  };
+  const translatedIngredients = ingredients.map(ing => ({
+    ...ing, ingredient_name: translated[idx++], method: translated[idx++],
+  }));
+  return { recipe: translatedRecipe, ingredients: translatedIngredients, labels, targetLanguage };
+}
+
+async function translateForExtractorExport(targetLanguage, recipe, processes) {
+  if (!targetLanguage || targetLanguage === 'English') {
+    return { recipe, processes, labels: DEFAULT_LABELS, targetLanguage };
+  }
+  const texts = [
+    ...LABEL_KEYS.map(k => DEFAULT_LABELS[k]),
+    recipe.name || '', recipe.category || '', recipe.country_origin || '',
+    recipe.comment || '', recipe.presentation_serving || '',
+    ...processes.flatMap(proc => [
+      proc.name || '', proc.method || '',
+      ...(proc.ingredients || []).flatMap(ing => [ing.ingredient_name || '', ing.method || '']),
+    ]),
+  ];
+  const translated = await translateTexts({ targetLanguage, texts });
+
+  const labels = labelsFromTranslatedTexts(translated);
+  let idx = LABEL_KEYS.length;
+  const translatedRecipe = {
+    ...recipe,
+    name: translated[idx++], category: translated[idx++], country_origin: translated[idx++],
+    comment: translated[idx++], presentation_serving: translated[idx++],
+  };
+  const translatedProcesses = processes.map(proc => ({
+    ...proc,
+    name: translated[idx++], method: translated[idx++],
+    ingredients: (proc.ingredients || []).map(ing => ({
+      ...ing, ingredient_name: translated[idx++], method: translated[idx++],
+    })),
+  }));
+  return { recipe: translatedRecipe, processes: translatedProcesses, labels, targetLanguage };
+}
+
+ipcMain.handle('export-recipes', async (e, { recipeIds, savePath, targetLanguage }) => {
   if (!recipeIds || recipeIds.length === 0) return { success: false };
 
   if (!savePath) {
@@ -664,6 +808,7 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath }) => {
     savePath = result.filePath;
   }
 
+  let doneCount = 0;
   await exportRecipes(async (recipeId) => {
     const full = await fetchRecipeWithIngredients(recipeId);
     const { ingredients, ...recipe } = full;
@@ -676,8 +821,13 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath }) => {
       recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
       recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
     }
-    return { recipe, ingredients };
-  }, recipeIds, savePath);
+    doneCount++;
+    if (targetLanguage && targetLanguage !== 'English') {
+      e.sender.send('export-progress', recipeIds.length > 1
+        ? `Translating recipe ${doneCount} of ${recipeIds.length}…` : 'Translating recipe…');
+    }
+    return translateForBookExport(targetLanguage, recipe, ingredients);
+  }, recipeIds, savePath, (message) => e.sender.send('export-progress', message));
   return { success: true, path: savePath };
 });
 
@@ -687,7 +837,7 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath }) => {
 // recipe row via the Calculator's spread in scaleRecipeForExport). The photo bytes still have
 // to be fetched from Storage here, same as export-recipes above, since buildRecipeSheet only
 // knows how to embed an in-memory photoBuffer, not a storage path.
-ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath }) => {
+ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath, targetLanguage }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Scaled Recipe',
@@ -705,7 +855,11 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath
     recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
   }
 
-  await exportScaledRecipe(recipe, ingredients, savePath);
+  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
+  const translated = await translateForBookExport(targetLanguage, recipe, ingredients);
+  await exportScaledRecipe(translated.recipe, translated.ingredients, savePath, {
+    ...translated, onProgress: (message) => e.sender.send('export-progress', message),
+  });
   return { success: true, path: savePath };
 });
 
@@ -824,7 +978,7 @@ async function fetchExtractedRecipeWithIngredients(id) {
   if (processIds.length) {
     const { data, error: riErr } = await supabase
       .from('extracted_recipe_ingredients')
-      .select('id, extracted_ingredient_id, extracted_recipe_process_id, quantity, unit, method, display_name, sort_order')
+      .select('id, extracted_ingredient_id, extracted_recipe_process_id, quantity, unit, method, sort_order')
       .in('extracted_recipe_process_id', processIds)
       .order('sort_order');
     if (riErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_ingredients', riErr);
@@ -850,7 +1004,6 @@ async function fetchExtractedRecipeWithIngredients(id) {
       method: ri.method,
       sort_order: ri.sort_order,
       ingredient_name: ingredientById.get(ri.extracted_ingredient_id)?.name,
-      display_name: ri.display_name,
       default_unit: ingredientById.get(ri.extracted_ingredient_id)?.default_unit,
     };
     if (!ingredientsByProcess.has(ri.extracted_recipe_process_id)) ingredientsByProcess.set(ri.extracted_recipe_process_id, []);
@@ -1046,19 +1199,14 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
     for (let idx = 0; idx < procIngredients.length; idx++) {
       const ing = procIngredients[idx];
       const name = (ing.name || '').trim();
-      const displayName = (ing.displayName || '').trim();
-      // A row with only a display name typed (English Match column left blank) must still be
-      // saved, not silently dropped -- falls back to matching/creating by displayName in that
-      // case, same best-effort risk already inherent to any row that skips the autocomplete.
-      if (!ing.ingredientId && !name && !displayName) continue;
-      const ingredientId = ing.ingredientId || await resolveIngredientId(name || displayName);
+      if (!ing.ingredientId && !name) continue;
+      const ingredientId = ing.ingredientId || await resolveIngredientId(name);
       ingredientRows.push({
         extracted_recipe_process_id: insertedProcessIds[pIdx],
         extracted_ingredient_id: ingredientId,
         quantity: ing.quantity ?? null,
         unit: ing.unit || null,
         method: ing.method || null,
-        display_name: displayName || null,
         sort_order: idx,
       });
     }
@@ -1112,7 +1260,7 @@ ipcMain.handle('delete-extracted-recipe', async (e, id) => {
   return { success: true };
 });
 
-ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath }) => {
+ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath, targetLanguage }) => {
   if (!recipeIds || recipeIds.length === 0) return { success: false };
 
   if (!savePath) {
@@ -1135,12 +1283,18 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath }) =>
   // (name heading + its own ingredient table + its own Method block), not a merged flat list --
   // see conversation notes for why this needed its own builder rather than reusing
   // buildRecipeSheet, which stays pinned to Recipe Book's exact physical template.
+  let extractorDoneCount = 0;
   await exportExtractedRecipes(async (recipeId) => {
     const full = await fetchExtractedRecipeWithIngredients(recipeId);
     const { processes, photos, ...recipe } = full;
     recipe.photos = await downloadExtractedRecipePhotos(photos);
-    return { recipe, processes };
-  }, recipeIds, savePath);
+    extractorDoneCount++;
+    if (targetLanguage && targetLanguage !== 'English') {
+      e.sender.send('export-progress', recipeIds.length > 1
+        ? `Translating recipe ${extractorDoneCount} of ${recipeIds.length}…` : 'Translating recipe…');
+    }
+    return translateForExtractorExport(targetLanguage, recipe, processes);
+  }, recipeIds, savePath, (message) => e.sender.send('export-progress', message));
   return { success: true, path: savePath };
 });
 
@@ -1149,7 +1303,7 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath }) =>
 // path), nothing here recomputes quantities. `recipeId` is only used to look up this recipe's
 // *original, unscaled* photos fresh from extracted_recipe_photos -- photos aren't a quantity, so
 // there's nothing to scale, same as export-scaled-recipe never scaling recipe.photo_path either.
-ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, processes, savePath }) => {
+ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, processes, savePath, targetLanguage }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Scaled Recipe',
@@ -1165,7 +1319,11 @@ ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, p
   if (photoErr) throw supaFail('export-scaled-extracted-recipe: load extracted_recipe_photos', photoErr);
   recipe.photos = await downloadExtractedRecipePhotos(photoRows);
 
-  await exportScaledExtractedRecipe(recipe, processes, savePath);
+  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
+  const translated = await translateForExtractorExport(targetLanguage, recipe, processes);
+  await exportScaledExtractedRecipe(translated.recipe, translated.processes, savePath, {
+    ...translated, onProgress: (message) => e.sender.send('export-progress', message),
+  });
   return { success: true, path: savePath };
 });
 
@@ -1185,7 +1343,7 @@ const MAX_EXTRACT_FILES = 10;
 const MAX_EXTRACT_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_EXTRACT_TOTAL_BYTES = 20 * 1024 * 1024;
 
-ipcMain.handle('extract-recipe-for-extractor', async (e, { files, targetLanguage }) => {
+ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
   if (!files || files.length === 0) return { success: false, error: 'No files provided' };
   if (files.length > MAX_EXTRACT_FILES) return { success: false, error: `Too many files (max ${MAX_EXTRACT_FILES})` };
   let totalBytes = 0;
@@ -1197,7 +1355,7 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files, targetLanguage
   if (totalBytes > MAX_EXTRACT_TOTAL_BYTES) return { success: false, error: `Combined file size exceeds ${MAX_EXTRACT_TOTAL_BYTES / 1024 / 1024}MB` };
 
   try {
-    const extracted = await extractRecipeFromFile({ files, targetLanguage });
+    const extracted = await extractRecipeFromFile({ files });
     const extractedProcesses = extracted.processes || [];
 
     const ingredientIdByName = new Map();
@@ -1228,7 +1386,6 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files, targetLanguage
           return {
             ingredientId: ingredientIdByName.get(name.toLowerCase()) || null,
             name,
-            displayName: (ing.display_name || '').trim() || name,
             quantity: ing.quantity,
             unit: ing.unit || '',
             method: ing.method || '',
@@ -1250,9 +1407,9 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files, targetLanguage
 // history and the same generated-menu records; see conversation notes on why splitting them
 // across two databases would silently degrade duplicate-avoidance and fragment History)
 // ---------------------------------------------------------------
-ipcMain.handle('generate-menu', async (e, { sectionCode, label, startDate, numWeekdays }) => {
+ipcMain.handle('generate-menu', async (e, { sectionCode, label, startDate, numWeekdays, createdBy }) => {
   const gen = new MenuGenerator();
-  const { menuId, resultDays } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays);
+  const { menuId, resultDays } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays, null, createdBy);
   return { menuId, resultDays, warnings: gen.warnings };
 });
 
@@ -1298,6 +1455,7 @@ ipcMain.handle('list-generated-menus', async () => {
         label: row.label,
         start_date: row.start_date,
         status: row.status,
+        created_by: row.created_by,
         tag: 'all_sections',
         menuIds: batchRows.map(r => r.id),
         menuIdsBySection,
@@ -1310,6 +1468,7 @@ ipcMain.handle('list-generated-menus', async () => {
         label: row.label,
         start_date: row.start_date,
         status: row.status,
+        created_by: row.created_by,
         tag: section?.name || '—',
         menuIds: [row.id],
       });
@@ -1649,7 +1808,7 @@ ipcMain.handle('export-menu-to-excel', async (e, { generatedMenuId, savePath }) 
   return { success: true, path: savePath };
 });
 
-ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekdays, savePath }) => {
+ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekdays, savePath, createdBy }) => {
   const sectionOrder = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];
   const menuIdsBySection = {};
   const warningsBySection = {};
@@ -1658,7 +1817,7 @@ ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekd
 
   for (const sectionCode of sectionOrder) {
     const gen = new MenuGenerator();
-    const { menuId } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays, batchId);
+    const { menuId } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays, batchId, createdBy);
     menuIdsBySection[sectionCode] = menuId;
     warningsBySection[sectionCode] = gen.warnings;
   }
@@ -1702,6 +1861,10 @@ ipcMain.handle('get-school-days', (e, { startDate, numWeekdays }) => {
   return schoolDaysFrom(new Date(startDate), numWeekdays);
 });
 
+ipcMain.handle('get-school-day-count', (e, { startDate, endDate }) => {
+  return schoolDayCountBetween(new Date(startDate), new Date(endDate));
+});
+
 // Build Menu's per-section item pool, grouped by category code -- one call per section (2
 // Supabase queries via sectionItemPoolSupabase) instead of the old get-eligible-items, which
 // fired one call (2 queries) per section*category slot -- ~94 round trips down to ~10 across
@@ -1732,9 +1895,9 @@ ipcMain.handle('builder-fill-suggestions', async (e, { sectionCode, startDate, n
 // Never passes a batchId -- Build Menu's export saves all 5 sections too, but only Export
 // All Sections' batch groups into one History entry; Build Menu's 5 saves stay individual,
 // each tagged with its own section name.
-ipcMain.handle('save-manual-menu', async (e, { sectionCode, label, startDate, days }) => {
+ipcMain.handle('save-manual-menu', async (e, { sectionCode, label, startDate, days, createdBy }) => {
   const gen = new MenuGenerator();
-  const menuId = await gen.persistMenu(sectionCode, label, new Date(startDate), days);
+  const menuId = await gen.persistMenu(sectionCode, label, new Date(startDate), days, null, createdBy);
   return { menuId };
 });
 

@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   suggestClassification: (payload) => ipcRenderer.invoke('suggest-classification', payload),
   addItem: (payload) => ipcRenderer.invoke('add-item', payload),
   updateItem: (payload) => ipcRenderer.invoke('update-item', payload),
+  checkCategoryChangeImpact: (payload) => ipcRenderer.invoke('check-category-change-impact', payload),
   updateItemRc: (payload) => ipcRenderer.invoke('update-item-rc', payload),
   deleteItem: (itemId) => ipcRenderer.invoke('delete-item', itemId),
 
@@ -45,6 +46,17 @@ contextBridge.exposeInMainWorld('api', {
   getExtractedRecipePhotos: (photoPaths) => ipcRenderer.invoke('get-extracted-recipe-photos', photoPaths),
   exportExtractedRecipes: (payload) => ipcRenderer.invoke('export-extracted-recipes', payload),
   exportScaledExtractedRecipe: (payload) => ipcRenderer.invoke('export-scaled-extracted-recipe', payload),
+  // One-way progress events during a translated export (main.js sends 'export-progress' while
+  // translating/building a workbook, since a single invoke() call has no way to report interim
+  // status on its own) -- the only ipcRenderer.on() listener in this app, everything else here
+  // is request/response. Returns an unsubscribe function; callers remove it once their own
+  // export call settles so a later, unrelated export's events are never delivered to a stale
+  // handler from a previous one.
+  onExportProgress: (callback) => {
+    const listener = (event, message) => callback(message);
+    ipcRenderer.on('export-progress', listener);
+    return () => ipcRenderer.removeListener('export-progress', listener);
+  },
   extractRecipeForExtractor: (payload) => ipcRenderer.invoke('extract-recipe-for-extractor', payload),
 
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),
@@ -61,6 +73,7 @@ contextBridge.exposeInMainWorld('api', {
 
   getSectionSlots: (sectionCode) => ipcRenderer.invoke('get-section-slots', sectionCode),
   getSchoolDays: (payload) => ipcRenderer.invoke('get-school-days', payload),
+  getSchoolDayCount: (payload) => ipcRenderer.invoke('get-school-day-count', payload),
   getSectionItemPool: (sectionCode) => ipcRenderer.invoke('get-section-item-pool', sectionCode),
   builderFillSuggestions: (payload) => ipcRenderer.invoke('builder-fill-suggestions', payload),
   saveManualMenu: (payload) => ipcRenderer.invoke('save-manual-menu', payload),

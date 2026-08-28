@@ -1,0 +1,155 @@
+[
+  {
+    "item_id": 49,
+    "item_name": "Blueberry Yogurt",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "AM Snack",
+    "category_code": "AM_SNACK",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      1211
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 341,
+    "item_name": "Chicken Shawarma",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "Lunch Main Course",
+    "category_code": "LUNCH_MAIN",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12369
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 2217,
+    "item_name": "Egg Cream Cheese Sandwich",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "AM Snack",
+    "category_code": "AM_SNACK",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12824
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 2403,
+    "item_name": "English Muffin with Turkey and Eggs",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "AM Snack",
+    "category_code": "AM_SNACK",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12266
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 2268,
+    "item_name": "Fajita Chicken",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "Lunch Main Course",
+    "category_code": "LUNCH_MAIN",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12431
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 2351,
+    "item_name": "Grilled Chicken Wings",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "Lunch Main Course",
+    "category_code": "LUNCH_MAIN",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12293
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 805,
+    "item_name": "Margarita Pizza",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "AM Snack",
+    "category_code": "AM_SNACK",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12191
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 766,
+    "item_name": "Turkey Croissants",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "AM Snack",
+    "category_code": "AM_SNACK",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      12521
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  },
+  {
+    "item_id": 778,
+    "item_name": "White Cheese Croissants",
+    "is_active": true,
+    "wrong_section": "Staff",
+    "wrong_section_code": "STAFF",
+    "category": "AM Snack",
+    "category_code": "AM_SNACK",
+    "affected_age_groups": [
+      "STAFF"
+    ],
+    "portion_ids": [
+      11952
+    ],
+    "portion_row_count": 1,
+    "legit_sections": []
+  }
+]

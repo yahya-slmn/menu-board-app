@@ -43,12 +43,11 @@ const RECIPE_SCHEMA = {
               type: "object",
               properties: {
                 name: { type: "string" },
-                display_name: { type: "string" },
                 quantity: { anyOf: [{ type: "number" }, { type: "null" }] },
                 unit: { anyOf: [{ type: "string" }, { type: "null" }] },
                 method: { anyOf: [{ type: "string" }, { type: "null" }] },
               },
-              required: ["name", "display_name", "quantity", "unit", "method"],
+              required: ["name", "quantity", "unit", "method"],
               additionalProperties: false,
             },
           },
@@ -68,15 +67,13 @@ const RECIPE_SCHEMA = {
   additionalProperties: false,
 };
 
-// Parameterized on the chef's chosen target language (renderer.js's language picker on the
-// Upload Recipe flow) instead of a hardcoded "English" -- everything else about the extraction
-// (schema, accuracy/ambiguous-term handling, multi-image combining, process splitting) is
-// language-independent and stays fixed. Choosing "English" reproduces the exact prompt text
-// this app always sent before this feature existed.
-function buildPrompt(targetLanguage: string): string {
+// Fixed English output regardless of the source card's language -- language selection at
+// extraction time was tried and reverted (see conversation notes); translation now happens, if
+// at all, at export time instead (a separate, later concern from extraction itself).
+function buildPrompt(): string {
   return `You are extracting structured data from a photo or scan of an old kitchen recipe card, for a school-nutrition recipe management app. Read it carefully and extract every field you can find. If a field isn't present on the card or you can't read it confidently, use null (or an empty array for lists) -- never guess or invent a value. Extract ingredient quantities as plain numbers only, with the unit in a separate field.
 
-Translate every extracted text field to ${targetLanguage}, regardless of what language the card is written in -- this applies to name, prepared_by, category, country_origin, comment, process names, ingredient method/notes, method_steps, and presentation_serving_steps. Ingredient NAMES are the one exception: the "name" field on each ingredient is always extracted and translated into English specifically, never ${targetLanguage}, no matter what language every other field above uses. This app matches each extracted ingredient name against an existing English-only ingredient list to avoid duplicate records for the same ingredient -- translating this field into ${targetLanguage} would break that matching and create a duplicate, language-specific copy instead of reusing the existing English one. Each ingredient also has a separate "display_name" field, which is the opposite: it DOES follow ${targetLanguage} like every other field -- it's the ${targetLanguage} translation of that same ingredient's name, shown to the person reviewing the recipe and never used for matching. So every ingredient ends up with two names: "name" in English (matching only, never shown) and "display_name" in ${targetLanguage} (what's actually read) -- when ${targetLanguage} is English these will naturally come out the same. Numbers, units, dates, and percentages are already language-independent and need no translation. Translate country_origin too, using the country's standard name in ${targetLanguage} (e.g. the ${targetLanguage} name for a country like Ukraine), for consistency with every other ${targetLanguage} field. Prioritize accuracy over literalness: for ingredient names, use the standard English culinary term (the specific cut of meat, herb, spice, or preparation the source term actually names), not a generic or overly literal translation; apply that same accuracy standard in ${targetLanguage} for every other translated field (dish name, technique descriptions, method steps, etc.). If a source term is genuinely ambiguous or has no single standard equivalent in the relevant language, translate as best you can and append the original-language term in parentheses so nothing is lost, e.g. "farmer's cheese (original term)".
+Translate every extracted text field to English, regardless of what language the card is written in -- this applies to name, prepared_by, category, country_origin, comment, process names, ingredient names, ingredient method/notes, method_steps, and presentation_serving_steps. Numbers, units, dates, and percentages are already language-independent and need no translation. Translate country_origin too, using the country's standard English name (e.g. "Ukraine"), for consistency with every other English field. Prioritize accuracy over literalness: for ingredient names, use the standard English culinary term (the specific cut of meat, herb, spice, or preparation the source term actually names), not a generic or overly literal translation; apply that same accuracy standard for every other translated field (dish name, technique descriptions, method steps, etc.). If a source term is genuinely ambiguous or has no single standard English equivalent, translate as best you can and append the original-language term in parentheses so nothing is lost, e.g. "farmer's cheese (original term)".
 
 The images/pages above may all be part of the SAME single recipe card -- for example, the front and back of one card, or consecutive pages of a longer recipe. Treat them as one combined source and extract exactly ONE recipe from all of them together, never one recipe per image/page.
 
@@ -111,7 +108,7 @@ Deno.serve(async (req) => {
     return ok({ success: false, error: "Server misconfigured: ANTHROPIC_API_KEY not set" });
   }
 
-  let body: { files?: { base64?: string; mimeType?: string; name?: string }[]; targetLanguage?: string };
+  let body: { files?: { base64?: string; mimeType?: string; name?: string }[] };
   try {
     body = await req.json();
   } catch {
@@ -130,13 +127,6 @@ Deno.serve(async (req) => {
       return ok({ success: false, error: "Missing base64 or mimeType on one or more files" });
     }
   }
-
-  // Free text from renderer.js's language picker (a curated dropdown plus an "Other" free-text
-  // fallback) -- trimmed and length-capped defensively since it flows straight into the prompt
-  // text below, but there's no injection risk worth validating harder than that: worst case a
-  // garbage value just produces a confused translation attempt the chef would immediately notice
-  // on review, not a security issue.
-  const targetLanguage = (body.targetLanguage || "").trim().slice(0, 60) || "English";
 
   // One text label + one file block per upload -- Anthropic's own multi-image guidance
   // recommends labeling each ("Image 1:", "Image 2:", ...) so the model can address them
@@ -164,7 +154,7 @@ Deno.serve(async (req) => {
       max_tokens: 4096,
       // deno-lint-ignore no-explicit-any
       messages: [
-        { role: "user", content: [...fileBlocks, { type: "text", text: buildPrompt(targetLanguage) }] },
+        { role: "user", content: [...fileBlocks, { type: "text", text: buildPrompt() }] },
       ] as any,
       output_config: { format: { type: "json_schema", schema: RECIPE_SCHEMA } },
     });
