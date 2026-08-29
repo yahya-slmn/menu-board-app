@@ -15,8 +15,7 @@ const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupa
 const { suggestClassification } = require('./lib/classify');
 const {
   exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe,
-  exportExtractedRecipes, exportScaledExtractedRecipe, sanitizeSheetName, DEFAULT_LABELS,
-  buildRecipeContentModel, buildExtractedRecipeContentModel,
+  sanitizeSheetName, DEFAULT_LABELS, buildRecipeContentModel,
 } = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 const { translateTexts } = require('./lib/translateRecipe');
@@ -545,39 +544,75 @@ ipcMain.handle('search-recipes', async (e, query) => {
 
 // Shared by Recipe Book (edit form) and Recipe Calculator (scale-and-export) -- both now read
 // the same Supabase recipe, so there's no need for the calculator to have its own copy of this.
-async function fetchRecipeWithIngredients(id) {
+// Mirrors fetchExtractedRecipeWithIngredients exactly (recipes/recipe_processes/
+// recipe_ingredients/ingredients instead of extracted_recipes/extracted_recipe_processes/
+// extracted_recipe_ingredients/extracted_ingredients) -- see the multi-process migration
+// conversation notes for why Recipe Book's data is process-shaped now too.
+async function fetchRecipeWithProcesses(id) {
   const { data: recipe, error: recipeErr } = await supabase.from('recipes').select('*').eq('id', id).single();
   if (recipeErr) {
     if (recipeErr.code === 'PGRST116') return null; // no matching row
-    throw supaFail('fetchRecipeWithIngredients: load recipe', recipeErr);
+    throw supaFail('fetchRecipeWithProcesses: load recipe', recipeErr);
   }
 
-  const { data: ingredientRows, error: riErr } = await supabase
-    .from('recipe_ingredients')
-    .select('id, ingredient_id, quantity, unit, method, sort_order')
+  const { data: processRows, error: procErr } = await supabase
+    .from('recipe_processes')
+    .select('id, name, method, waste_percent, quantity_produced, sort_order')
     .eq('recipe_id', id)
     .order('sort_order');
-  if (riErr) throw supaFail('fetchRecipeWithIngredients: load recipe_ingredients', riErr);
+  if (procErr) throw supaFail('fetchRecipeWithProcesses: load recipe_processes', procErr);
+
+  const processIds = processRows.map(p => p.id);
+  let ingredientRows = [];
+  if (processIds.length) {
+    const { data, error: riErr } = await supabase
+      .from('recipe_ingredients')
+      .select('id, ingredient_id, process_id, quantity, unit, method, sort_order')
+      .in('process_id', processIds)
+      .order('sort_order');
+    if (riErr) throw supaFail('fetchRecipeWithProcesses: load recipe_ingredients', riErr);
+    ingredientRows = data;
+  }
 
   const ingredientIds = [...new Set(ingredientRows.map(r => r.ingredient_id))];
   let ingredientById = new Map();
   if (ingredientIds.length) {
     const { data: ingredientsData, error: ingErr } = await supabase
       .from('ingredients').select('id, name, default_unit').in('id', ingredientIds);
-    if (ingErr) throw supaFail('fetchRecipeWithIngredients: load ingredients', ingErr);
+    if (ingErr) throw supaFail('fetchRecipeWithProcesses: load ingredients', ingErr);
     ingredientById = new Map(ingredientsData.map(i => [i.id, i]));
   }
 
-  const ingredients = ingredientRows.map(ri => ({
-    ...ri,
-    ingredient_name: ingredientById.get(ri.ingredient_id)?.name,
-    default_unit: ingredientById.get(ri.ingredient_id)?.default_unit,
+  const ingredientsByProcess = new Map();
+  for (const ri of ingredientRows) {
+    const ingredient = {
+      id: ri.id,
+      ingredient_id: ri.ingredient_id,
+      quantity: ri.quantity,
+      unit: ri.unit,
+      method: ri.method,
+      sort_order: ri.sort_order,
+      ingredient_name: ingredientById.get(ri.ingredient_id)?.name,
+      default_unit: ingredientById.get(ri.ingredient_id)?.default_unit,
+    };
+    if (!ingredientsByProcess.has(ri.process_id)) ingredientsByProcess.set(ri.process_id, []);
+    ingredientsByProcess.get(ri.process_id).push(ingredient);
+  }
+
+  const processes = processRows.map(p => ({
+    id: p.id,
+    name: p.name,
+    method: p.method,
+    waste_percent: p.waste_percent,
+    quantity_produced: p.quantity_produced,
+    sort_order: p.sort_order,
+    ingredients: ingredientsByProcess.get(p.id) || [],
   }));
 
-  return { ...recipe, ingredients };
+  return { ...recipe, processes };
 }
 
-ipcMain.handle('get-recipe', async (e, id) => fetchRecipeWithIngredients(id));
+ipcMain.handle('get-recipe', async (e, id) => fetchRecipeWithProcesses(id));
 
 // In-app export preview ("eye" icon on the Recipe Book list row) -- builds the exact same
 // content model buildRecipeSheet itself builds internally (see lib/export.js), but returns it
@@ -586,9 +621,9 @@ ipcMain.handle('get-recipe', async (e, id) => fetchRecipeWithIngredients(id));
 // shows this recipe's original saved English content, regardless of the list screen's own
 // export-language picker (translation only happens on an actual export).
 ipcMain.handle('preview-recipe', async (e, id) => {
-  const full = await fetchRecipeWithIngredients(id);
-  const { ingredients, ...recipe } = full;
-  return buildRecipeContentModel(recipe, ingredients);
+  const full = await fetchRecipeWithProcesses(id);
+  const { processes, ...recipe } = full;
+  return buildRecipeContentModel(recipe, processes);
 });
 
 // Finds the highest existing TTY-##### number and increments it client-side. Unlike the old
@@ -637,6 +672,12 @@ ipcMain.handle('get-recipe-photo', async (e, photoPath) => {
   return `data:${mime};base64,${buffer.toString('base64')}`;
 });
 
+// Mirrors save-extracted-recipe's process/ingredient structure exactly, with two deliberate
+// differences: (1) Recipe Book still requires every ingredient row to already carry a real
+// ingredientId (validated client-side in saveProcessRecipeForm before this is ever called, same
+// as before the multi-process migration) rather than auto-resolving/creating by name -- so
+// there's no resolveIngredientId helper here; (2) photo handling stays single photo_path on the
+// recipe row itself (uploadRecipePhoto/deleteRecipePhoto), not a photos gallery table.
 ipcMain.handle('save-recipe', async (e, payload) => {
   let recipeId = payload.id;
   let code;
@@ -647,9 +688,7 @@ ipcMain.handle('save-recipe', async (e, payload) => {
     category: payload.category || null,
     country_origin: payload.countryOrigin || null,
     yield_notes: payload.yieldNotes || null,
-    waste_percent: payload.wastePercent ?? null,
     date_created: payload.dateCreated || null,
-    preparation_cooking: payload.preparationCooking || null,
     presentation_serving: payload.presentationServing || null,
     comment: payload.comment || null,
     checked_by: payload.checkedBy || null,
@@ -688,8 +727,10 @@ ipcMain.handle('save-recipe', async (e, payload) => {
       await deleteRecipePhoto(existing.photo_path);
     }
 
-    const { error: delErr } = await supabase.from('recipe_ingredients').delete().eq('recipe_id', recipeId);
-    if (delErr) throw supaFail('save-recipe: clear old recipe_ingredients', delErr);
+    // Deleting the processes cascades to their ingredients (process_id ON DELETE CASCADE) -- no
+    // separate recipe_ingredients delete needed.
+    const { error: delErr } = await supabase.from('recipe_processes').delete().eq('recipe_id', recipeId);
+    if (delErr) throw supaFail('save-recipe: clear old recipe_processes', delErr);
   } else {
     code = await nextRecipeCode();
     // created_at has no DB-side default on Supabase's recipes table (unlike menu_items/
@@ -701,14 +742,46 @@ ipcMain.handle('save-recipe', async (e, payload) => {
     recipeId = inserted.id;
   }
 
-  const ingredientRows = (payload.ingredients || []).map((ing, idx) => ({
-    recipe_id: recipeId,
-    ingredient_id: ing.ingredientId,
-    quantity: ing.quantity ?? null,
-    unit: ing.unit || null,
-    method: ing.method || null,
-    sort_order: idx,
-  }));
+  // Processes are inserted one at a time (not batched) so each row's returned id is
+  // unambiguously matched back to its own payload entry before that process's ingredients are
+  // built -- a batch insert's row order isn't worth relying on here, where a mismatch would
+  // silently misfile ingredients under the wrong process.
+  const rawProcesses = payload.processes || [];
+  const insertedProcessIds = [];
+  for (let idx = 0; idx < rawProcesses.length; idx++) {
+    const proc = rawProcesses[idx];
+    const { data: insertedProc, error: procInsErr } = await supabase
+      .from('recipe_processes')
+      .insert({
+        recipe_id: recipeId,
+        name: (proc.name || '').trim() || `Process ${idx + 1}`,
+        method: proc.method || null,
+        waste_percent: proc.wastePercent ?? null,
+        quantity_produced: proc.quantityProduced || null,
+        sort_order: idx,
+      })
+      .select('id')
+      .single();
+    if (procInsErr) throw supaFail('save-recipe: insert recipe_processes', procInsErr);
+    insertedProcessIds.push(insertedProc.id);
+  }
+
+  const ingredientRows = [];
+  for (let pIdx = 0; pIdx < rawProcesses.length; pIdx++) {
+    const procIngredients = rawProcesses[pIdx].ingredients || [];
+    for (let idx = 0; idx < procIngredients.length; idx++) {
+      const ing = procIngredients[idx];
+      if (!ing.ingredientId) continue; // saveProcessRecipeForm already blocked save on this
+      ingredientRows.push({
+        process_id: insertedProcessIds[pIdx],
+        ingredient_id: ing.ingredientId,
+        quantity: ing.quantity ?? null,
+        unit: ing.unit || null,
+        method: ing.method || null,
+        sort_order: idx,
+      });
+    }
+  }
   if (ingredientRows.length) {
     const { error: insIngErr } = await supabase.from('recipe_ingredients').insert(ingredientRows);
     if (insIngErr) throw supaFail('save-recipe: insert recipe_ingredients', insIngErr);
@@ -719,7 +792,8 @@ ipcMain.handle('save-recipe', async (e, payload) => {
 
 ipcMain.handle('delete-recipe', async (e, id) => {
   const { data: existing } = await supabase.from('recipes').select('photo_path').eq('id', id).single();
-  await supabase.from('recipe_ingredients').delete().eq('recipe_id', id);
+  // Cascades to recipe_ingredients via process_id ON DELETE CASCADE.
+  await supabase.from('recipe_processes').delete().eq('recipe_id', id);
   const { error } = await supabase.from('recipes').delete().eq('id', id);
   if (error) throw supaFail('delete-recipe', error);
   if (existing?.photo_path) await deleteRecipePhoto(existing.photo_path);
@@ -729,9 +803,11 @@ ipcMain.handle('delete-recipe', async (e, id) => {
 // ---------------------------------------------------------------
 // Export-time translation (Recipe Book + Recipe Extractor)
 //
-// Shared by all 4 export IPC handlers below. Fast path: targetLanguage 'English' (or unset)
-// skips translate-recipe entirely and returns the recipe/ingredients/processes exactly as
-// passed in, with DEFAULT_LABELS -- content is always English now (extraction dropped its own
+// Shared by all 4 export IPC handlers below -- one function, since Recipe Book's recipes are
+// process-shaped now too (see conversation notes on the multi-process migration), there's no
+// longer a flat-ingredients variant of this to keep separate. Fast path: targetLanguage
+// 'English' (or unset) skips translate-recipe entirely and returns the recipe/processes exactly
+// as passed in, with DEFAULT_LABELS -- content is always English now (extraction dropped its own
 // language picker, see conversation notes), so this is the overwhelmingly common case and adds
 // zero latency/cost to it. Only prepared_by/checked_by (a person's name) and quantity_produced
 // (usually just a number + an already-cross-language catering abbreviation like "PAX") are
@@ -748,32 +824,7 @@ function labelsFromTranslatedTexts(translated) {
   return labels;
 }
 
-async function translateForBookExport(targetLanguage, recipe, ingredients) {
-  if (!targetLanguage || targetLanguage === 'English') {
-    return { recipe, ingredients, labels: DEFAULT_LABELS, targetLanguage };
-  }
-  const texts = [
-    ...LABEL_KEYS.map(k => DEFAULT_LABELS[k]),
-    recipe.name || '', recipe.category || '', recipe.country_origin || '',
-    recipe.comment || '', recipe.preparation_cooking || '', recipe.presentation_serving || '',
-    ...ingredients.flatMap(ing => [ing.ingredient_name || '', ing.method || '']),
-  ];
-  const translated = await translateTexts({ targetLanguage, texts });
-
-  const labels = labelsFromTranslatedTexts(translated);
-  let idx = LABEL_KEYS.length;
-  const translatedRecipe = {
-    ...recipe,
-    name: translated[idx++], category: translated[idx++], country_origin: translated[idx++],
-    comment: translated[idx++], preparation_cooking: translated[idx++], presentation_serving: translated[idx++],
-  };
-  const translatedIngredients = ingredients.map(ing => ({
-    ...ing, ingredient_name: translated[idx++], method: translated[idx++],
-  }));
-  return { recipe: translatedRecipe, ingredients: translatedIngredients, labels, targetLanguage };
-}
-
-async function translateForExtractorExport(targetLanguage, recipe, processes) {
+async function translateForRecipeExport(targetLanguage, recipe, processes) {
   if (!targetLanguage || targetLanguage === 'English') {
     return { recipe, processes, labels: DEFAULT_LABELS, targetLanguage };
   }
@@ -826,34 +877,39 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath, targetLanguage
 
   let doneCount = 0;
   await exportRecipes(async (recipeId) => {
-    const full = await fetchRecipeWithIngredients(recipeId);
-    const { ingredients, ...recipe } = full;
+    const full = await fetchRecipeWithProcesses(recipeId);
+    const { processes, ...recipe } = full;
     // lib/export.js stays DB/Storage-agnostic (per its own comment on exportRecipes) -- the
-    // actual image bytes are fetched here and attached onto the plain recipe object it expects.
-    // No photo_path just means buildRecipeSheet leaves today's placeholder box untouched.
+    // actual image bytes are fetched here and attached as a `photos` array (0 or 1 entries --
+    // Recipe Book stays single-photo) onto the plain recipe object buildRecipeSheet expects,
+    // same shape Recipe Extractor's photos array already uses. No photo_path just means an
+    // empty array, same as no photos at all -- buildRecipeSheet leaves its placeholder box alone.
+    recipe.photos = [];
     if (recipe.photo_path) {
       const { data, error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
       if (error) throw supaFail('export-recipes: download photo', error);
-      recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
-      recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+      const buffer = Buffer.from(await data.arrayBuffer());
+      const ext = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+      recipe.photos = [{ buffer, ext }];
     }
     doneCount++;
     if (targetLanguage && targetLanguage !== 'English') {
       e.sender.send('export-progress', recipeIds.length > 1
         ? `Translating recipe ${doneCount} of ${recipeIds.length}…` : 'Translating recipe…');
     }
-    return translateForBookExport(targetLanguage, recipe, ingredients);
+    const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
+    return { ...translated, codeLabelKey: 'ttyCode' };
   }, recipeIds, savePath, (message) => e.sender.send('export-progress', message));
   return { success: true, path: savePath };
 });
 
 // Exports a scaled recipe built entirely in the renderer (Recipe Calculator) -- the recipe
 // row itself and its scaling are never read from or written to the database here, `recipe`/
-// `ingredients` arrive as plain data (already carrying photo_path through from the original
-// recipe row via the Calculator's spread in scaleRecipeForExport). The photo bytes still have
-// to be fetched from Storage here, same as export-recipes above, since buildRecipeSheet only
-// knows how to embed an in-memory photoBuffer, not a storage path.
-ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath, targetLanguage }) => {
+// `processes` arrive as plain data (already carrying photo_path through from the original
+// recipe row via the Calculator's spread in renderScaledRecipeResult). The photo bytes still
+// have to be fetched from Storage here, same as export-recipes above, since buildRecipeSheet
+// only knows how to embed an in-memory photos array, not a storage path.
+ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, targetLanguage }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Scaled Recipe',
@@ -864,17 +920,19 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, ingredients, savePath
     savePath = result.filePath;
   }
 
+  recipe.photos = [];
   if (recipe.photo_path) {
     const { data, error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
     if (error) throw supaFail('export-scaled-recipe: download photo', error);
-    recipe.photoBuffer = Buffer.from(await data.arrayBuffer());
-    recipe.photoExt = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+    const buffer = Buffer.from(await data.arrayBuffer());
+    const ext = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+    recipe.photos = [{ buffer, ext }];
   }
 
   if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
-  const translated = await translateForBookExport(targetLanguage, recipe, ingredients);
-  await exportScaledRecipe(translated.recipe, translated.ingredients, savePath, {
-    ...translated, onProgress: (message) => e.sender.send('export-progress', message),
+  const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
+  await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
+    ...translated, codeLabelKey: 'ttyCode', onProgress: (message) => e.sender.send('export-progress', message),
   });
   return { success: true, path: savePath };
 });
@@ -974,7 +1032,7 @@ ipcMain.handle('search-extracted-recipes', async (e, query) => {
   return data;
 });
 
-// Mirrors fetchRecipeWithIngredients above, against the extracted_* tables.
+// Mirrors fetchRecipeWithProcesses above, against the extracted_* tables.
 async function fetchExtractedRecipeWithIngredients(id) {
   const { data: recipe, error: recipeErr } = await supabase.from('extracted_recipes').select('*').eq('id', id).single();
   if (recipeErr) {
@@ -1052,7 +1110,7 @@ ipcMain.handle('get-extracted-recipe', async (e, id) => fetchExtractedRecipeWith
 ipcMain.handle('preview-extracted-recipe', async (e, id) => {
   const full = await fetchExtractedRecipeWithIngredients(id);
   const { processes, photos, ...recipe } = full;
-  return buildExtractedRecipeContentModel({ ...recipe, photos }, processes);
+  return buildRecipeContentModel({ ...recipe, photos }, processes);
 });
 
 // Mirrors nextRecipeCode above, 'EX-' prefix, own table -- independent counter from TTY-.
@@ -1098,7 +1156,7 @@ async function extractedRecipePhotoDataUrl(photoPath) {
 // Downloads every photo's bytes (in gallery order) for embedding into an export workbook --
 // shared by export-extracted-recipes (batch export) and export-scaled-extracted-recipe (Recipe
 // Calculator), both of which need the full set, not just the first, so
-// buildExtractedRecipePhotosSheet can be built when there are 2+.
+// buildRecipePhotosSheet can be built when there are 2+.
 async function downloadExtractedRecipePhotos(photoRows) {
   const photos = [];
   for (const p of photoRows || []) {
@@ -1302,12 +1360,11 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath, targ
     savePath = result.filePath;
   }
 
-  // lib/export.js's buildExtractedRecipeSheet renders each process as its own labeled section
-  // (name heading + its own ingredient table + its own Method block), not a merged flat list --
-  // see conversation notes for why this needed its own builder rather than reusing
-  // buildRecipeSheet, which stays pinned to Recipe Book's exact physical template.
+  // buildRecipeSheet renders each process as its own labeled section (name heading + its own
+  // ingredient table + its own Method block), not a merged flat list -- shared with Recipe
+  // Book's own export-recipes handler above (see lib/export.js's own comment on exportRecipes).
   let extractorDoneCount = 0;
-  await exportExtractedRecipes(async (recipeId) => {
+  await exportRecipes(async (recipeId) => {
     const full = await fetchExtractedRecipeWithIngredients(recipeId);
     const { processes, photos, ...recipe } = full;
     recipe.photos = await downloadExtractedRecipePhotos(photos);
@@ -1316,7 +1373,8 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath, targ
       e.sender.send('export-progress', recipeIds.length > 1
         ? `Translating recipe ${extractorDoneCount} of ${recipeIds.length}…` : 'Translating recipe…');
     }
-    return translateForExtractorExport(targetLanguage, recipe, processes);
+    const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
+    return { ...translated, codeLabelKey: 'exCode' };
   }, recipeIds, savePath, (message) => e.sender.send('export-progress', message));
   return { success: true, path: savePath };
 });
@@ -1343,9 +1401,9 @@ ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, p
   recipe.photos = await downloadExtractedRecipePhotos(photoRows);
 
   if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
-  const translated = await translateForExtractorExport(targetLanguage, recipe, processes);
-  await exportScaledExtractedRecipe(translated.recipe, translated.processes, savePath, {
-    ...translated, onProgress: (message) => e.sender.send('export-progress', message),
+  const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
+  await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
+    ...translated, codeLabelKey: 'exCode', onProgress: (message) => e.sender.send('export-progress', message),
   });
   return { success: true, path: savePath };
 });
@@ -1353,7 +1411,7 @@ ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, p
 // "Upload Recipe" on the Recipe Extractor screen -- never throws across IPC (a failed/declined
 // extraction must never block filling the form in manually), so every outcome comes back as a
 // plain { success, ... } result. On success, maps the model's raw extracted fields onto the
-// shape renderExtractorFormView seeds a form from (see state.extractor.importedRecipe in
+// shape renderRecipeFormView seeds a form from (see state.extractor.importedRecipe in
 // renderer.js): one or more named processes, each carrying its own ingredients + method. Each
 // extracted ingredient name (across every process) is checked against extracted_ingredients for
 // a case-insensitive EXACT match (not fuzzy -- a wrong silent merge is worse than an extra

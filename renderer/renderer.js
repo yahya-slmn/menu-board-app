@@ -12,39 +12,45 @@ const state = {
   proteinTypes: [],
   currentGeneratedMenuId: null,
   builder: { label: '', createdBy: '', startDate: '', endDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
+  // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
+  // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
+  // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
+  // "Vanilla Base", "Caramelized Sugar Top"), each with its own ingredients + method. The one
+  // remaining structural difference is the photo model (RECIPE_NS.*.photoModel): Recipe Book
+  // stays single-photo (pendingPhoto/removePhoto), Recipe Extractor keeps its up-to-10 gallery
+  // (existingPhotos/pendingPhotos) -- see resetRecipeFormState, which initializes whichever pair
+  // applies.
   recipes: {
-    view: 'list', formId: null, ingredientRows: [], pendingPhoto: null, removePhoto: false,
-    prepMode: null, prepText: '', prepItems: [],
+    view: 'list', formId: null, processes: [], pendingPhoto: null, removePhoto: false,
     presentationMode: null, presentationText: '', presentationItems: [],
     importedRecipe: null,
   },
-  // Recipe Extractor's own state -- structurally different from `recipes` above (processes
-  // instead of a flat ingredientRows/prep pair), since one extracted card can describe several
-  // named sub-recipes (e.g. "Vanilla Base", "Caramelized Sugar Top"), each with its own
-  // ingredients + method. Recipe-level fields (photo, presentation/serving) still mirror
-  // `recipes` -- only ingredients+method moved under `processes`.
   extractor: {
     // Photo gallery (up to 10) is structurally different from Recipe Book's single pendingPhoto/
     // removePhoto pair -- existingPhotos is a live, prunable array of already-saved photos
     // ({ id, photo_path, sort_order } plus a resolved dataUrl for the thumbnail), pendingPhotos
     // is freshly added ones not yet uploaded ({ localId, dataUrl, base64, ext }). Removing either
-    // just splices the array, same convention as ingredientRows/processes.
+    // just splices the array, same convention as processes.
     view: 'list', formId: null, existingPhotos: [], pendingPhotos: [],
     processes: [],
     presentationMode: null, presentationText: '', presentationItems: [],
     // Set by "Upload Recipe" just before opening a fresh New Recipe form; consumed (and
-    // cleared) the moment renderExtractorFormView reads it -- see its non-editing branch.
+    // cleared) the moment renderRecipeFormView reads it -- see its non-editing branch.
     importedRecipe: null,
   },
 };
 
-// Recipe Book and Recipe Extractor are two fully separate screens/tables (see CLAUDE.md-
-// equivalent conversation notes: extracted_recipes/extracted_ingredients have no FK
-// relationship to recipes/ingredients) with two fully separate forms (renderRecipeFormView vs.
-// renderExtractorFormView) -- their shapes diverged once Extractor gained multiple named
-// processes. RECIPE_NS still exists as the shared config both screens' list view reads
-// (title/labels/api), and the ingredient-row-level pieces (autocomplete/dedupe, the Text/List
-// toggle) are still reused by both at a lower level -- just not one shared top-level form.
+// Recipe Book and Recipe Extractor are two fully separate tables (see CLAUDE.md-equivalent
+// conversation notes: extracted_recipes/extracted_ingredients have no FK relationship to
+// recipes/ingredients, and the ingredient catalogs -- product_code prefixes FB-/TTY- vs
+// EX-IN-/EX- -- stay deliberately separate too) sharing ONE set of screens/forms/export code,
+// parameterized entirely through this RECIPE_NS config -- same pattern renderRecipeListView
+// already proved for the list screen, now extended to the form (renderRecipeFormView),
+// preview, and Recipe Calculator. What's left genuinely different between the two, all
+// expressed as plain RECIPE_NS fields rather than forked code: which Supabase tables `api.*`
+// reads/writes, whether an ingredient row must already be linked before saving
+// (requireIngredientLink), whether photos are a single upload or a gallery (photoModel), and
+// the TTY/EX code prefix (codeLabel).
 const RECIPE_NS = {
   book: {
     stateKey: 'recipes',
@@ -56,6 +62,7 @@ const RECIPE_NS = {
     newRecipeHint: 'Click "+ New Recipe" to create the first one.',
     allowManualNew: true,
     requireIngredientLink: true,
+    photoModel: 'single',
     openNew: () => openNewRecipeForm(RECIPE_NS.book),
     openEdit: (id) => openEditRecipeForm(RECIPE_NS.book, id),
     api: {
@@ -67,6 +74,7 @@ const RECIPE_NS = {
       getPhoto: (path) => window.api.getRecipePhoto(path),
       preview: (id) => window.api.previewRecipe(id),
       exportSelected: (recipeIds, targetLanguage) => window.api.exportRecipes({ recipeIds, targetLanguage }),
+      exportScaled: (payload) => window.api.exportScaledRecipe(payload),
       searchIngredients: (q) => window.api.searchIngredients(q),
       addIngredient: (payload) => window.api.addIngredient(payload),
     },
@@ -82,9 +90,10 @@ const RECIPE_NS = {
     // Extraction-only: no blank/manual "+ New Recipe" entry point here -- Recipe Book already
     // covers hand-typed recipes, and mixing the two would blur why an EX- recipe exists.
     allowManualNew: false,
+    photoModel: 'gallery',
     extract: (payload) => window.api.extractRecipeForExtractor(payload),
-    openNew: () => openNewExtractorForm(),
-    openEdit: (id) => openEditExtractorForm(id),
+    openNew: () => openNewRecipeForm(RECIPE_NS.extractor),
+    openEdit: (id) => openEditRecipeForm(RECIPE_NS.extractor, id),
     api: {
       list: () => window.api.listExtractedRecipes(),
       search: (q) => window.api.searchExtractedRecipes(q),
@@ -94,6 +103,7 @@ const RECIPE_NS = {
       getPhotos: (paths) => window.api.getExtractedRecipePhotos(paths),
       preview: (id) => window.api.previewExtractedRecipe(id),
       exportSelected: (recipeIds, targetLanguage) => window.api.exportExtractedRecipes({ recipeIds, targetLanguage }),
+      exportScaled: (payload) => window.api.exportScaledExtractedRecipe(payload),
       searchIngredients: (q) => window.api.searchExtractedIngredients(q),
       addIngredient: (payload) => window.api.addExtractedIngredient(payload),
     },
@@ -121,8 +131,8 @@ const MAX_EXTRACT_TOTAL_BYTES = 20 * 1024 * 1024;
 // "Export Selected", and both Calculators' "Export") -- balances reliability (typed exactly as
 // the translate-recipe Edge Function expects) against flexibility (an "Other" free-text
 // fallback covers anything not listed). English stays first/default -- choosing nothing exports
-// exactly as before this existed (the fast path in main.js's translateForBookExport/
-// translateForExtractorExport skips translate-recipe entirely for 'English'). Not the same list
+// exactly as before this existed (the fast path in main.js's translateForRecipeExport skips
+// translate-recipe entirely for 'English'). Not the same list
 // as extraction ever had -- that per-extraction language picker was tried and reverted;
 // translation only ever happens at export time now, not extraction time.
 const EXPORT_LANGUAGES = [
@@ -1401,24 +1411,28 @@ function renderRecipesView(main) {
 
 function renderExtractorView(main) {
   const ns = RECIPE_NS.extractor;
-  if (state[ns.stateKey].view === 'form') return renderExtractorFormView(main);
+  if (state[ns.stateKey].view === 'form') return renderRecipeFormView(main, ns);
   return renderRecipeListView(main, ns);
 }
 
-// Recipe Book-only now (Recipe Extractor has its own resetExtractorFormState, below) -- clears
-// every piece of in-progress form state so the next renderRecipeFormView() call re-initializes
-// it fresh from whichever recipe (or blank slate) it's opening.
+// Shared by both namespaces -- clears every piece of in-progress form state so the next
+// renderRecipeFormView() call re-initializes it fresh from whichever recipe (or blank slate)
+// it's opening. Photo fields are the one namespace-dependent piece (ns.photoModel): Recipe Book
+// resets its single pendingPhoto/removePhoto pair, Recipe Extractor its existingPhotos/
+// pendingPhotos gallery arrays.
 function resetRecipeFormState(ns) {
   const s = state[ns.stateKey];
-  s.ingredientRows = [];
-  s.pendingPhoto = null;
-  s.removePhoto = false;
-  s.prepMode = null;
-  s.prepText = '';
-  s.prepItems = [];
+  s.processes = [];
   s.presentationMode = null;
   s.presentationText = '';
   s.presentationItems = [];
+  if (ns.photoModel === 'gallery') {
+    s.existingPhotos = [];
+    s.pendingPhotos = [];
+  } else {
+    s.pendingPhoto = null;
+    s.removePhoto = false;
+  }
 }
 
 function openNewRecipeForm(ns) {
@@ -1721,9 +1735,8 @@ async function renderRecipeListView(main, ns) {
 
 // ============================================================
 // In-app export preview ("eye" icon on a Recipe Book/Extractor list row) -- an HTML/CSS
-// approximation of that recipe's Excel export, built from the SAME content model
-// buildRecipeSheet/buildExtractedRecipeSheet themselves build internally (see
-// buildRecipeContentModel/buildExtractedRecipeContentModel in lib/export.js, returned as plain
+// approximation of that recipe's Excel export, built from the SAME content model buildRecipeSheet
+// itself builds internally (see buildRecipeContentModel in lib/export.js, returned as plain
 // JSON by the preview-recipe/preview-extracted-recipe IPC handlers) -- so numbering, totals, and
 // labels here can never drift from what the real export produces. Deliberately never translates:
 // this always shows the recipe's original saved English content regardless of the list screen's
@@ -1750,7 +1763,7 @@ function renderPreviewIngredientsTable(labels, ingredients, totalQuantity, showT
 }
 
 // Photo (square box, object-fit:cover approximates Task 1's real crop-to-fill) + Presentation,
-// side by side -- mirrors buildRecipeSheet's/buildExtractedRecipeSheet's own A:B / C:D layout.
+// side by side -- mirrors buildRecipeSheet's own A:B / C:D layout.
 function renderPreviewPhotoBlock(labels, dataUrl, presentationField) {
   return `
     <div class="preview-photo-row">
@@ -1772,34 +1785,14 @@ function renderPreviewCommentRow(labels, model) {
   `;
 }
 
-function renderBookPreviewBody(ns, model, photoDataUrl) {
+// Shared by Recipe Book and Recipe Extractor -- both build process-shaped models now (see
+// buildRecipeContentModel in lib/export.js), so there's no longer a separate flat-ingredients
+// preview body. Recipe Book's `photoDataUrls` is always 0-1 entries (single-photo model), so it
+// only ever hits the inline (hasSeparatePhotoSheet === false) branch below -- no special-casing
+// needed for it.
+function renderRecipePreviewBody(ns, model, photoDataUrls) {
   const { labels, header } = model;
-  return `
-    <div class="preview-title-row">
-      <div class="preview-title">${header.name}</div>
-      <div class="preview-code">${ns.codeLabel}: ${header.code}</div>
-    </div>
-    <div class="preview-fields-grid">
-      <div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${header.quantityProduced}</span></div>
-      <div class="preview-field"><span class="preview-field-label">${labels.preparedBy}</span><span>${header.preparedBy}</span></div>
-      <div class="preview-field"><span class="preview-field-label">${labels.category}</span><span>${header.category}</span></div>
-      <div class="preview-field"><span class="preview-field-label">${labels.countryOrigin}</span><span>${header.countryOrigin}</span></div>
-      <div class="preview-field"><span class="preview-field-label">${labels.waste}</span><span>${header.wastePercent != null ? header.wastePercent + '%' : ''}</span></div>
-      <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${header.netWeight}</span></div>
-    </div>
-    ${renderPreviewIngredientsTable(labels, model.ingredients, model.totalQuantity, true, labels.methodColumnHeader)}
-    <div class="preview-section">
-      <div class="preview-section-label">${labels.preparationAndCooking}</div>
-      ${renderPreviewLinesBlock(model.preparation)}
-    </div>
-    ${renderPreviewPhotoBlock(labels, photoDataUrl, model.presentation)}
-    ${renderPreviewCommentRow(labels, model)}
-  `;
-}
-
-function renderExtractorPreviewBody(ns, model, photoDataUrls) {
-  const { labels, header } = model;
-  // Mirrors buildExtractedRecipeSheet/buildExtractedRecipePhotosSheet's own branch: 0-1 photos
+  // Mirrors buildRecipeSheet/buildRecipePhotosSheet's own branch: 0-1 photos
   // show the Photo cell inline beside Presentation; 2+ move to a separate "Photos" page with
   // Presentation shown above the grid instead -- see hasSeparatePhotoSheet's own comment.
   const photoBlock = model.hasSeparatePhotoSheet
@@ -1861,17 +1854,19 @@ async function openRecipePreviewModal(ns, id, triggerBtn) {
     if (triggerBtn) triggerBtn.innerHTML = EYE_OFF_ICON_SVG;
   };
 
-  let model, recipe, photoDataUrl = null, photoDataUrls = [];
+  let model, recipe, photoDataUrls = [];
   try {
     [model, recipe] = await Promise.all([ns.api.preview(id), ns.api.get(id)]);
     // Photo bytes never go through preview-recipe/preview-extracted-recipe -- the form view
     // already fetches these same data URLs from Storage via getPhoto/getPhotos, so the preview
-    // just reuses that path directly instead of round-tripping image bytes through a new endpoint.
-    if (ns.extract) {
+    // just reuses that path directly instead of round-tripping image bytes through a new
+    // endpoint. Recipe Book's single photo_path becomes a 0-or-1-length array here, matching
+    // buildRecipeContentModel's own photos.length <= 1 / >= 2 branching exactly.
+    if (ns.photoModel === 'gallery') {
       const paths = (recipe.photos || []).map(p => p.photo_path);
       if (paths.length > 0) photoDataUrls = await ns.api.getPhotos(paths);
     } else if (recipe.photo_path) {
-      photoDataUrl = await ns.api.getPhoto(recipe.photo_path);
+      photoDataUrls = [await ns.api.getPhoto(recipe.photo_path)];
     }
   } catch (err) {
     revertIcon();
@@ -1887,7 +1882,7 @@ async function openRecipePreviewModal(ns, id, triggerBtn) {
         <h2>Export Preview</h2>
         <button class="secondary" id="pv-close">Close</button>
       </div>
-      ${ns.extract ? renderExtractorPreviewBody(ns, model, photoDataUrls) : renderBookPreviewBody(ns, model, photoDataUrl)}
+      ${renderRecipePreviewBody(ns, model, photoDataUrls)}
     </div>
   `;
   document.body.appendChild(overlay);
@@ -1901,198 +1896,10 @@ function makeEmptyIngredientRow() {
   return { localId: ++_recipeRowLocalIdCounter, ingredientId: null, name: '', quantity: '', unit: '', method: '' };
 }
 
-async function renderRecipeFormView(main, ns) {
-  const s = state[ns.stateKey];
-  const editing = !!s.formId;
-  let recipe = null;
-  let existingPhotoDataUrl = null;
-  if (editing) {
-    recipe = await ns.api.get(s.formId);
-    if (recipe.photo_path) {
-      existingPhotoDataUrl = await ns.api.getPhoto(recipe.photo_path);
-    }
-    if (s.ingredientRows.length === 0) {
-      s.ingredientRows = recipe.ingredients.map(ri => ({
-        localId: ++_recipeRowLocalIdCounter,
-        ingredientId: ri.ingredient_id,
-        name: ri.ingredient_name,
-        quantity: ri.quantity ?? '',
-        unit: ri.unit || '',
-        method: ri.method || '',
-      }));
-    }
-  } else {
-    // A New Recipe form opened via "Upload Recipe" carries extracted values here -- consumed
-    // once (and cleared) so a later plain "+ New Recipe" click starts blank. Every downstream
-    // read below goes through the same recipe?.field accessors the editing branch above uses,
-    // so imported data is fully editable and goes through the exact same save path as a
-    // hand-typed new recipe -- it's never sent anywhere on its own. ingredientId comes through
-    // already resolved when the extraction handler found an exact-name match against this
-    // namespace's ingredient table; otherwise it's null, same as typing a new name by hand.
-    recipe = s.importedRecipe;
-    s.importedRecipe = null;
-    if (s.ingredientRows.length === 0) {
-      const importedIngredients = recipe?.ingredients || [];
-      s.ingredientRows = importedIngredients.length > 0
-        ? importedIngredients.map(ing => ({
-            localId: ++_recipeRowLocalIdCounter,
-            ingredientId: ing.ingredientId || null,
-            name: ing.name || '',
-            quantity: ing.quantity != null ? String(ing.quantity) : '',
-            unit: ing.unit || '',
-            method: ing.method || '',
-          }))
-        : [makeEmptyIngredientRow()];
-    }
-  }
-
-  initTextListField(s, TEXT_LIST_FIELDS.prep, recipe?.preparation_cooking);
-  initTextListField(s, TEXT_LIST_FIELDS.presentation, recipe?.presentation_serving);
-
-  const currentPhotoSrc = s.pendingPhoto
-    ? s.pendingPhoto.dataUrl
-    : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-
-  main.innerHTML = `
-    <div class="topbar">
-      <div><h1>${editing ? 'Edit Recipe' : 'New Recipe'}</h1>
-        <span class="section-pill">${editing ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
-      </div>
-      <button class="secondary" id="rf-back-btn">${ns.backLabel}</button>
-    </div>
-
-    <div class="generate-controls">
-      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" /></div>
-      <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" /></div>
-      <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" /></div>
-      <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" /></div>
-      <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" /></div>
-      <div class="field"><label>Waste %</label><input id="rf-waste" type="number" min="0" max="100" step="0.1" value="${recipe?.waste_percent ?? ''}" /></div>
-      <div class="field"><label>Yield (computed)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
-      <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
-    </div>
-
-    <h3 style="margin-bottom:10px;">Ingredients</h3>
-    <table class="recipe-ingredients-table">
-      <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th><th></th></tr></thead>
-      <tbody id="rf-ing-rows"></tbody>
-    </table>
-    <div id="rf-total-qty" class="total-qty-display"></div>
-    <button class="secondary" id="rf-add-row-btn" style="margin:10px 0 24px;">+ Add Ingredient Row</button>
-
-    <div class="field" style="margin-bottom:16px;">
-      <label>Preparation and Cooking</label>
-      <div id="rf-prep-field"></div>
-    </div>
-    <div class="field" style="margin-bottom:16px;">
-      <label>Presentation / Decoration / Serving</label>
-      <div id="rf-presentation-field"></div>
-    </div>
-    <div class="field" style="margin-bottom:16px;">
-      <label>Comment</label>
-      <textarea id="rf-comment" rows="3">${recipe?.comment || ''}</textarea>
-    </div>
-    <div class="field" style="margin-bottom:16px; max-width:320px;">
-      <label>Upload Photo</label>
-      <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" />
-      <div id="rf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
-        <img id="rf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
-        <button type="button" class="secondary" id="rf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
-      </div>
-    </div>
-    <div class="field" style="margin-bottom:20px; max-width:320px;">
-      <label>Checked By</label>
-      <input id="rf-checked-by" value="${recipe?.checked_by || ''}" />
-    </div>
-
-    <button class="primary" id="rf-save-btn">${editing ? 'Save Changes' : 'Save Recipe'}</button>
-    <span id="rf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
-  `;
-
-  function updatePhotoPreview() {
-    const src = s.pendingPhoto
-      ? s.pendingPhoto.dataUrl
-      : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-    document.getElementById('rf-photo-preview-wrap').style.display = src ? '' : 'none';
-    document.getElementById('rf-photo-preview').src = src || '';
-  }
-
-  document.getElementById('rf-photo-input').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (!['image/jpeg', 'image/png'].includes(file.type)) {
-      alert('Please choose a JPG or PNG image.');
-      e.target.value = '';
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Photo must be 5MB or smaller.');
-      e.target.value = '';
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      const base64 = dataUrl.split(',')[1];
-      const ext = file.type === 'image/png' ? 'png' : 'jpeg';
-      s.pendingPhoto = { dataUrl, base64, ext };
-      s.removePhoto = false;
-      updatePhotoPreview();
-    };
-    reader.readAsDataURL(file);
-  });
-
-  document.getElementById('rf-photo-remove-btn').addEventListener('click', () => {
-    s.pendingPhoto = null;
-    s.removePhoto = true;
-    document.getElementById('rf-photo-input').value = '';
-    updatePhotoPreview();
-  });
-
-  document.getElementById('rf-back-btn').addEventListener('click', () => goBackToRecipeList(ns));
-  document.getElementById('rf-add-row-btn').addEventListener('click', () => {
-    s.ingredientRows.push(makeEmptyIngredientRow());
-    renderIngredientRows(ns);
-  });
-  document.getElementById('rf-save-btn').addEventListener('click', () => saveRecipeForm(ns));
-  document.getElementById('rf-waste').addEventListener('input', () => updateYieldCalculation(s.ingredientRows));
-
-  renderIngredientRows(ns);
-  renderTextListFieldBody(s, TEXT_LIST_FIELDS.prep);
-  renderTextListFieldBody(s, TEXT_LIST_FIELDS.presentation);
-}
-
-// Total Quantity is the sum of every ingredient row's numeric quantity -- same convention
-// the Excel export's "Total Quantity" row already uses (lib/export.js, showTotalQuantity),
-// just surfaced live in the form instead of only appearing after exporting. All ingredients
-// are recorded in grams today, so a plain sum is meaningful with no unit conversion needed.
-// Yield is read-only and always reflects Total Quantity reduced by Waste % (0% if blank).
-// Waste % is a persisted, fixed-per-recipe value (recipes.waste_percent) -- since it's always
-// correctly pre-filled on load, recomputing here on every render reproduces exactly what was
-// last saved, so there's no clobbering risk the way there was when waste was transient.
-// Takes the flat array of ingredient rows to total directly, rather than a namespace -- Recipe
-// Book passes its one ingredientRows array; Recipe Extractor passes every process's rows
-// flattened together, since Total Quantity/Yield stay recipe-level even with multiple
-// processes (see sumIngredientQuantities, reused here for the same arithmetic export uses).
-function updateYieldCalculation(allIngredientRows) {
-  const totalEl = document.getElementById('rf-total-qty');
-  const yieldEl = document.getElementById('rf-yield');
-  const wasteEl = document.getElementById('rf-waste');
-  if (!totalEl || !yieldEl || !wasteEl) return;
-
-  const totalQty = sumIngredientQuantities(allIngredientRows);
-  totalEl.textContent = `Total Quantity: ${roundNice(totalQty)} G`;
-
-  const waste = parseFloat(wasteEl.value);
-  const wastePct = isNaN(waste) ? 0 : Math.min(Math.max(waste, 0), 100);
-  yieldEl.value = `${roundNice(totalQty * (1 - wastePct / 100))} G`;
-}
-
-// Recipe Extractor's per-process equivalent of updateYieldCalculation above -- Waste %/Net
-// Weight live on each process now, not the recipe, so this reads/writes that one process
-// card's own elements (ep-total-<id>/ep-waste-<id>/ep-yield-<id>) instead of the shared
-// rf-total-qty/rf-waste/rf-yield ids. Returns the computed net weight (a Number) so callers
-// summing across every process don't need to re-read the DOM afterward.
+// Each process's own Waste %/Net Weight -- reads/writes that one process card's own elements
+// (ep-total-<id>/ep-waste-<id>/ep-yield-<id>). Returns the computed net weight (a Number) so
+// callers summing across every process don't need to re-read the DOM afterward. Shared by
+// Recipe Book and Recipe Extractor (both process-shaped since the multi-process migration).
 function updateProcessNetWeight(proc) {
   const totalEl = document.getElementById(`ep-total-${proc.localId}`);
   const wasteEl = document.getElementById(`ep-waste-${proc.localId}`);
@@ -2109,22 +1916,29 @@ function updateProcessNetWeight(proc) {
   return netWeight;
 }
 
+// Recomputes every process's own Total Quantity/Net Weight (via updateProcessNetWeight above)
+// and writes the recipe-level Net Weight (rf-yield) as their plain sum -- no recipe-level waste
+// is applied on top, matching how neither recipes nor extracted_recipes has its own waste field
+// any more (waste lives per-process only, since the multi-process migration).
+function updateNetWeightSum(ns) {
+  const s = state[ns.stateKey];
+  const yieldEl = document.getElementById('rf-yield');
+  if (!yieldEl) return;
+  const sum = s.processes.reduce((acc, proc) => acc + updateProcessNetWeight(proc), 0);
+  yieldEl.value = `${roundNice(sum)} G`;
+}
+
 // ------------------------------------------------------------------
-// Preparation/Presentation Text-vs-List toggle
+// Presentation Text-vs-List toggle (recipe-level) and Method (per-process, see
+// makeProcessMethodCfg) both use this same mechanism.
 //
-// Both fields are plain TEXT columns in the DB (no schema change here) --
-// list items are just newline-joined text, same convention the Excel export
-// already used for presentation_serving. Mode isn't persisted as a flag; it's
-// inferred on load (initTextListField): more than one non-empty line after
-// split-by-newline opens in List mode, otherwise Text mode. Toggling between
-// modes is non-destructive in both directions (split on \n / join with \n),
-// so a wrong guess costs one click, never data.
+// The field is a plain TEXT column in the DB -- list items are just newline-joined text, same
+// convention the Excel export already uses. Mode isn't persisted as a flag; it's inferred on
+// load (initTextListField): more than one non-empty line after split-by-newline opens in List
+// mode, otherwise Text mode. Toggling between modes is non-destructive in both directions (split
+// on \n / join with \n), so a wrong guess costs one click, never data.
 // ------------------------------------------------------------------
 const TEXT_LIST_FIELDS = {
-  prep: {
-    modeKey: 'prepMode', textKey: 'prepText', itemsKey: 'prepItems',
-    textareaId: 'rf-prep', mountId: 'rf-prep-field', rows: 5,
-  },
   presentation: {
     modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
     textareaId: 'rf-presentation', mountId: 'rf-presentation-field', rows: 4,
@@ -2132,10 +1946,9 @@ const TEXT_LIST_FIELDS = {
 };
 
 // Takes the object to read/write directly (`target`) and a field config (`cfg`) rather than a
-// namespace+key lookup -- Recipe Book calls these against state.recipes with TEXT_LIST_FIELDS.
-// prep/.presentation; Recipe Extractor reuses the same mechanism against state.extractor
-// (TEXT_LIST_FIELDS.presentation, recipe-level) AND against each process object individually
-// (a per-process cfg from makeProcessMethodCfg, below) -- same toggle/Enter-to-insert/remove
+// namespace+key lookup -- both namespaces call this against state[ns.stateKey] with
+// TEXT_LIST_FIELDS.presentation (recipe-level) AND against each process object individually (a
+// per-process cfg from makeProcessMethodCfg, below) -- same toggle/Enter-to-insert/remove
 // behavior either way, just pointed at a different object.
 function initTextListField(target, cfg, rawValue) {
   if (target[cfg.modeKey] != null) return; // already initialized this form session
@@ -2147,7 +1960,7 @@ function initTextListField(target, cfg, rawValue) {
 }
 
 // Renders the Text/List toggle plus whichever editor is active, and rewires its listeners --
-// a full rebuild on every change, same approach as renderIngredientRows.
+// a full rebuild on every change, same approach as renderProcessIngredientRows.
 function renderTextListFieldBody(target, cfg) {
   const mount = document.getElementById(cfg.mountId);
   if (!mount) return;
@@ -2231,116 +2044,6 @@ function collectTextListFieldValue(target, cfg) {
     return (el ? el.value : target[cfg.textKey] || '').trim();
   }
   return target[cfg.itemsKey].map(it => it.value.trim()).filter(Boolean).join('\n');
-}
-
-function renderIngredientRows(ns) {
-  const s = state[ns.stateKey];
-  const tbody = document.getElementById('rf-ing-rows');
-  if (!tbody) return;
-
-  tbody.innerHTML = s.ingredientRows.map(row => `
-    <tr data-row="${row.localId}">
-      <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
-      <td class="autocomplete-wrap">
-        <input class="rf-ing-name" value="${row.name}" autocomplete="off" />
-        <div class="autocomplete-list" hidden></div>
-      </td>
-      <td><input class="rf-ing-qty" value="${row.quantity}" /></td>
-      <td><input class="rf-ing-unit" value="${row.unit}" /></td>
-      <td><input class="rf-ing-method" value="${row.method}" /></td>
-      <td style="text-align:right">
-        <button class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
-      </td>
-    </tr>
-  `).join('');
-
-  s.ingredientRows.forEach(row => {
-    const tr = tbody.querySelector(`tr[data-row="${row.localId}"]`);
-    const nameInput = tr.querySelector('.rf-ing-name');
-    const qtyInput = tr.querySelector('.rf-ing-qty');
-    const unitInput = tr.querySelector('.rf-ing-unit');
-    const methodInput = tr.querySelector('.rf-ing-method');
-    const listEl = tr.querySelector('.autocomplete-list');
-
-    qtyInput.addEventListener('input', () => { row.quantity = qtyInput.value; updateYieldCalculation(s.ingredientRows); });
-    unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
-    methodInput.addEventListener('input', () => { row.method = methodInput.value; });
-
-    wireIngredientAutocomplete(ns, nameInput, listEl, unitInput, row);
-  });
-
-  tbody.querySelectorAll('[data-row-remove]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const id = parseInt(btn.dataset.rowRemove, 10);
-      s.ingredientRows = s.ingredientRows.filter(r => r.localId !== id);
-      if (s.ingredientRows.length === 0) s.ingredientRows.push(makeEmptyIngredientRow());
-      renderIngredientRows(ns);
-    });
-  });
-
-  wireIngredientRowDrag(ns, tbody);
-  updateYieldCalculation(s.ingredientRows);
-}
-
-// Drag-and-drop reordering. draggable="true" lives ONLY on the ⠿ handle cell, never on the
-// <tr> or the inputs -- dragstart is otherwise a mousedown-drag gesture, which would hijack
-// text selection/dragging inside the ingredient-name input (and the autocomplete dropdown
-// that hangs off it) into a row-drag instead. Reordering just moves one entry within
-// ingredientRows -- saveRecipeForm already builds its payload from that same array
-// (order-preserving), and save-recipe/save-extracted-recipe already renumber sort_order from
-// array position on every save, so a reordered array is all that's needed for the new order to
-// persist and show up in the Excel export.
-function wireIngredientRowDrag(ns, tbody) {
-  let draggedId = null;
-
-  tbody.querySelectorAll('[data-drag-handle]').forEach(handle => {
-    handle.addEventListener('dragstart', (e) => {
-      draggedId = parseInt(handle.dataset.dragHandle, 10);
-      const tr = handle.closest('tr');
-      tr.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', String(draggedId));
-      // Drag the whole row's image, not just the small handle glyph, so it reads as "picking
-      // up the row" rather than dragging a tiny icon around.
-      e.dataTransfer.setDragImage(tr, 20, tr.offsetHeight / 2);
-    });
-    handle.addEventListener('dragend', () => {
-      tbody.querySelectorAll('tr').forEach(tr => tr.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
-      draggedId = null;
-    });
-  });
-
-  tbody.querySelectorAll('tr').forEach(tr => {
-    tr.addEventListener('dragover', (e) => {
-      if (draggedId === null) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      const targetId = parseInt(tr.dataset.row, 10);
-      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over-top', 'drag-over-bottom'));
-      if (targetId === draggedId) return;
-      const rect = tr.getBoundingClientRect();
-      const before = e.clientY - rect.top < rect.height / 2;
-      tr.classList.add(before ? 'drag-over-top' : 'drag-over-bottom');
-    });
-
-    tr.addEventListener('drop', (e) => {
-      if (draggedId === null) return;
-      e.preventDefault();
-      const targetId = parseInt(tr.dataset.row, 10);
-      const rows = state[ns.stateKey].ingredientRows;
-      const fromIdx = rows.findIndex(r => r.localId === draggedId);
-      let toIdx = rows.findIndex(r => r.localId === targetId);
-      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
-      const rect = tr.getBoundingClientRect();
-      const before = e.clientY - rect.top < rect.height / 2;
-      const [moved] = rows.splice(fromIdx, 1);
-      if (!before) toIdx += 1;
-      if (fromIdx < toIdx) toIdx -= 1; // account for the shift caused by removing `moved` above
-      rows.splice(toIdx, 0, moved);
-      draggedId = null;
-      renderIngredientRows(ns);
-    });
-  });
 }
 
 // Anti-typo autocomplete: matches what's typed against this namespace's own ingredient table
@@ -2430,73 +2133,11 @@ function goBackToRecipeList(ns) {
   renderView();
 }
 
-async function saveRecipeForm(ns) {
-  const s = state[ns.stateKey];
-  const name = document.getElementById('rf-name').value.trim();
-  if (!name) return alert('Please enter a recipe name.');
-
-  const rows = s.ingredientRows.filter(r => r.name.trim() !== '');
-  // Recipe Book requires every row to already be linked to a real ingredientId (picked from the
-  // dropdown or added inline). Recipe Extractor skips this block entirely -- ns.api.save
-  // auto-resolves/creates unlinked rows by name server-side, so she's never stopped by it.
-  if (ns.requireIngredientLink) {
-    for (let i = 0; i < rows.length; i++) {
-      if (!rows[i].ingredientId) {
-        return alert(`Row ${i + 1}: please pick "${rows[i].name}" from the dropdown (or add it as a new ingredient) before saving.`);
-      }
-    }
-  }
-
-  const statusEl = document.getElementById('rf-status');
-  statusEl.textContent = 'Saving…';
-
-  const payload = {
-    id: s.formId || undefined,
-    name,
-    quantityProduced: document.getElementById('rf-qty').value.trim(),
-    preparedBy: document.getElementById('rf-prepared-by').value.trim(),
-    category: document.getElementById('rf-category').value.trim(),
-    countryOrigin: document.getElementById('rf-country').value.trim(),
-    yieldNotes: document.getElementById('rf-yield').value.trim(),
-    wastePercent: document.getElementById('rf-waste').value === '' ? null : parseFloat(document.getElementById('rf-waste').value),
-    dateCreated: document.getElementById('rf-date').value,
-    preparationCooking: collectTextListFieldValue(s, TEXT_LIST_FIELDS.prep),
-    presentationServing: collectTextListFieldValue(s, TEXT_LIST_FIELDS.presentation),
-    comment: document.getElementById('rf-comment').value,
-    checkedBy: document.getElementById('rf-checked-by').value.trim(),
-    ingredients: rows.map(r => ({
-      ingredientId: r.ingredientId,
-      name: r.name.trim(),
-      quantity: r.quantity ? parseFloat(r.quantity) : null,
-      unit: r.unit || null,
-      method: r.method || null,
-    })),
-  };
-  if (s.pendingPhoto) {
-    payload.photoBase64 = s.pendingPhoto.base64;
-    payload.photoExt = s.pendingPhoto.ext;
-  } else if (s.removePhoto) {
-    payload.removePhoto = true;
-  }
-
-  try {
-    await ns.api.save(payload);
-    goBackToRecipeList(ns);
-  } catch (err) {
-    statusEl.textContent = '';
-    alert(`Save failed: ${err.message}`);
-  }
-}
-
 // ============================================================
-// RECIPE EXTRACTOR FORM -- one or more named processes (e.g. "Vanilla Base", "Caramelized
-// Sugar Top"), each with its own ingredient table and method, under shared recipe-level fields.
-// Recipe Book's form above stays flat (one ingredient list, one method field) since its data
-// genuinely has that shape; Extractor's diverged once a card could describe multiple
-// components, so it gets its own form here rather than forcing both into one shape. The
-// ingredient-row-level pieces (wireIngredientAutocomplete/renderAutocompleteList/
-// selectIngredientForRow, the Text/List toggle) are still reused as-is -- only the "one process
-// vs. many" structure around them is new.
+// RECIPE FORM -- shared by Recipe Book and Recipe Extractor (see RECIPE_NS's own comment): one
+// or more named processes (e.g. "Vanilla Base", "Caramelized Sugar Top"), each with its own
+// ingredient table and method, under shared recipe-level fields. The ingredient-row-level pieces
+// (wireIngredientAutocomplete/renderAutocompleteList, the Text/List toggle) are reused as-is.
 // ============================================================
 
 // Per-process Text/List config for the Method field -- same TEXT_LIST_FIELDS mechanism as
@@ -2582,46 +2223,16 @@ function buildProcessFromImported(proc) {
   return built;
 }
 
-function resetExtractorFormState() {
-  const s = state.extractor;
-  s.processes = [];
-  s.existingPhotos = [];
-  s.pendingPhotos = [];
-  s.presentationMode = null;
-  s.presentationText = '';
-  s.presentationItems = [];
-}
-
-function openNewExtractorForm() {
-  state.extractor.view = 'form';
-  state.extractor.formId = null;
-  resetExtractorFormState();
-  renderView();
-}
-
-function openEditExtractorForm(id) {
-  state.extractor.view = 'form';
-  state.extractor.formId = id;
-  resetExtractorFormState();
-  renderView();
-}
-
-function goBackToExtractorList() {
-  state.extractor.view = 'list';
-  state.extractor.formId = null;
-  resetExtractorFormState();
-  renderView();
-}
-
 // Renders one process's ingredient table into an explicit <tbody> element (not a fixed
 // document-wide id, since several processes' tables are mounted simultaneously). Single
-// "Ingredient" column, same canonical-ingredient autocomplete/dedupe as Recipe Book's own
-// renderIngredientRows (wireIngredientAutocomplete/selectIngredientForRow, unchanged) -- the
-// separate free-text "display name" column this used to have (for reviewing/correcting a
-// translated ingredient name distinct from its English match) was reverted along with
-// extraction-time language selection; every extracted ingredient name is English again, so
-// there's nothing left for a second column to hold.
-function renderProcessIngredientRows(process, tbodyEl, onChange) {
+// "Ingredient" column, same canonical-ingredient autocomplete/dedupe as before the multi-process
+// migration (wireIngredientAutocomplete, unchanged) -- the separate free-text "display name"
+// column this used to have (for reviewing/correcting a translated ingredient name distinct from
+// its English match) was reverted along with extraction-time language selection; every
+// extracted ingredient name is English again, so there's nothing left for a second column to
+// hold. `ns` picks which namespace's ingredient table the autocomplete searches (Recipe Book's
+// `ingredients` vs Recipe Extractor's `extracted_ingredients`) -- never cross-matched.
+function renderProcessIngredientRows(ns, process, tbodyEl, onChange) {
   tbodyEl.innerHTML = process.ingredientRows.map(row => `
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
@@ -2650,7 +2261,7 @@ function renderProcessIngredientRows(process, tbodyEl, onChange) {
     unitInput.addEventListener('input', () => { row.unit = unitInput.value; });
     methodInput.addEventListener('input', () => { row.method = methodInput.value; });
 
-    wireIngredientAutocomplete(RECIPE_NS.extractor, nameInput, listEl, unitInput, row);
+    wireIngredientAutocomplete(ns, nameInput, listEl, unitInput, row);
   });
 
   tbodyEl.querySelectorAll('[data-row-remove]').forEach(btn => {
@@ -2658,16 +2269,18 @@ function renderProcessIngredientRows(process, tbodyEl, onChange) {
       const id = parseInt(btn.dataset.rowRemove, 10);
       process.ingredientRows = process.ingredientRows.filter(r => r.localId !== id);
       if (process.ingredientRows.length === 0) process.ingredientRows.push(makeEmptyIngredientRow());
-      renderProcessIngredientRows(process, tbodyEl, onChange);
+      renderProcessIngredientRows(ns, process, tbodyEl, onChange);
     });
   });
 
-  wireProcessIngredientRowDrag(process, tbodyEl, () => renderProcessIngredientRows(process, tbodyEl, onChange));
+  wireProcessIngredientRowDrag(process, tbodyEl, () => renderProcessIngredientRows(ns, process, tbodyEl, onChange));
   onChange();
 }
 
-// Same drag-reorder mechanics as wireIngredientRowDrag, scoped to one process's rows/tbody
-// instead of a namespace-wide fixed id.
+// Drag-and-drop reordering, scoped to one process's rows/tbody. draggable="true" lives ONLY on
+// the ⠿ handle cell, never on the <tr> or the inputs -- dragstart is otherwise a mousedown-drag
+// gesture, which would hijack text selection/dragging inside the ingredient-name input (and the
+// autocomplete dropdown that hangs off it) into a row-drag instead.
 function wireProcessIngredientRowDrag(process, tbodyEl, rerender) {
   let draggedId = null;
 
@@ -2719,19 +2332,24 @@ function wireProcessIngredientRowDrag(process, tbodyEl, rerender) {
   });
 }
 
-async function renderExtractorFormView(main) {
-  const ns = RECIPE_NS.extractor;
-  const s = state.extractor;
+async function renderRecipeFormView(main, ns) {
+  const s = state[ns.stateKey];
   const editing = !!s.formId;
   let recipe = null;
+  let existingPhotoDataUrl = null; // single-photo model only (Recipe Book)
 
   if (editing) {
     recipe = await ns.api.get(s.formId);
-    // Guarded the same way s.processes is below -- avoids re-fetching/clobbering photos already
-    // loaded into the live-editable gallery array if this ever runs again without navigating away.
-    if (s.existingPhotos.length === 0 && recipe.photos && recipe.photos.length > 0) {
-      const dataUrls = await ns.api.getPhotos(recipe.photos.map(p => p.photo_path));
-      s.existingPhotos = recipe.photos.map((p, i) => ({ ...p, dataUrl: dataUrls[i] }));
+    if (ns.photoModel === 'gallery') {
+      // Guarded the same way s.processes is below -- avoids re-fetching/clobbering photos
+      // already loaded into the live-editable gallery array if this ever runs again without
+      // navigating away.
+      if (s.existingPhotos.length === 0 && recipe.photos && recipe.photos.length > 0) {
+        const dataUrls = await ns.api.getPhotos(recipe.photos.map(p => p.photo_path));
+        s.existingPhotos = recipe.photos.map((p, i) => ({ ...p, dataUrl: dataUrls[i] }));
+      }
+    } else if (recipe.photo_path) {
+      existingPhotoDataUrl = await ns.api.getPhoto(recipe.photo_path);
     }
     if (s.processes.length === 0) {
       s.processes = (recipe.processes && recipe.processes.length > 0)
@@ -2741,7 +2359,7 @@ async function renderExtractorFormView(main) {
   } else {
     // A New Recipe form opened via "Upload Recipe" carries extracted values here -- consumed
     // once (and cleared) so a later edit/new open starts blank. Fully editable before saving,
-    // same review-before-save discipline as Recipe Book.
+    // same review-before-save discipline either way.
     recipe = s.importedRecipe;
     s.importedRecipe = null;
     if (s.processes.length === 0) {
@@ -2753,6 +2371,10 @@ async function renderExtractorFormView(main) {
   }
 
   initTextListField(s, TEXT_LIST_FIELDS.presentation, recipe?.presentation_serving);
+
+  const currentPhotoSrc = s.pendingPhoto
+    ? s.pendingPhoto.dataUrl
+    : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
 
   main.innerHTML = `
     <div class="topbar">
@@ -2784,11 +2406,22 @@ async function renderExtractorFormView(main) {
       <label>Comment</label>
       <textarea id="rf-comment" rows="3" dir="auto">${recipe?.comment || ''}</textarea>
     </div>
+    ${ns.photoModel === 'gallery' ? `
     <div class="field" style="margin-bottom:20px;">
       <label>Photos (up to 10)</label>
       <div id="rf-photo-gallery" class="photo-gallery"></div>
       <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" multiple />
     </div>
+    ` : `
+    <div class="field" style="margin-bottom:16px; max-width:320px;">
+      <label>Upload Photo</label>
+      <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" />
+      <div id="rf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
+        <img id="rf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <button type="button" class="secondary" id="rf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
+      </div>
+    </div>
+    `}
     <div class="field" style="margin-bottom:20px; max-width:320px;">
       <label>Checked By</label>
       <input id="rf-checked-by" value="${recipe?.checked_by || ''}" dir="auto" />
@@ -2798,81 +2431,125 @@ async function renderExtractorFormView(main) {
     <span id="rf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
   `;
 
-  function totalPhotoCount() {
-    return s.existingPhotos.length + s.pendingPhotos.length;
-  }
+  if (ns.photoModel === 'gallery') {
+    function totalPhotoCount() {
+      return s.existingPhotos.length + s.pendingPhotos.length;
+    }
 
-  // Existing (already-saved) and pending (freshly added, not yet uploaded) photos are rendered
-  // as one combined, ordered strip of thumbnails -- removing either kind just splices it out of
-  // its own array (same "live editable array" convention as ingredientRows/processes), no
-  // separate remove-flag bookkeeping needed the way the old single-photo pendingPhoto/removePhoto
-  // pair required.
-  function renderPhotoGallery() {
-    const gallery = document.getElementById('rf-photo-gallery');
-    const tiles = [
-      ...s.existingPhotos.map(p => ({ kind: 'existing', key: p.id, src: p.dataUrl })),
-      ...s.pendingPhotos.map(p => ({ kind: 'pending', key: p.localId, src: p.dataUrl })),
-    ];
-    gallery.innerHTML = tiles.length > 0
-      ? tiles.map(t => `
-          <div class="photo-thumb">
-            <img src="${t.src}" />
-            <button type="button" class="photo-thumb-remove" data-remove-photo="${t.kind}:${t.key}" title="Remove photo">×</button>
-          </div>
-        `).join('')
-      : `<div class="photo-gallery-empty">No photos yet.</div>`;
+    // Existing (already-saved) and pending (freshly added, not yet uploaded) photos are rendered
+    // as one combined, ordered strip of thumbnails -- removing either kind just splices it out
+    // of its own array (same "live editable array" convention as processes), no separate
+    // remove-flag bookkeeping needed the way the single-photo pendingPhoto/removePhoto pair below
+    // uses.
+    function renderPhotoGallery() {
+      const gallery = document.getElementById('rf-photo-gallery');
+      const tiles = [
+        ...s.existingPhotos.map(p => ({ kind: 'existing', key: p.id, src: p.dataUrl })),
+        ...s.pendingPhotos.map(p => ({ kind: 'pending', key: p.localId, src: p.dataUrl })),
+      ];
+      gallery.innerHTML = tiles.length > 0
+        ? tiles.map(t => `
+            <div class="photo-thumb">
+              <img src="${t.src}" />
+              <button type="button" class="photo-thumb-remove" data-remove-photo="${t.kind}:${t.key}" title="Remove photo">×</button>
+            </div>
+          `).join('')
+        : `<div class="photo-gallery-empty">No photos yet.</div>`;
 
-    gallery.querySelectorAll('[data-remove-photo]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const [kind, key] = btn.dataset.removePhoto.split(':');
-        if (kind === 'existing') {
-          s.existingPhotos = s.existingPhotos.filter(p => String(p.id) !== key);
-        } else {
-          s.pendingPhotos = s.pendingPhotos.filter(p => String(p.localId) !== key);
-        }
-        renderPhotoGallery();
+      gallery.querySelectorAll('[data-remove-photo]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const [kind, key] = btn.dataset.removePhoto.split(':');
+          if (kind === 'existing') {
+            s.existingPhotos = s.existingPhotos.filter(p => String(p.id) !== key);
+          } else {
+            s.pendingPhotos = s.pendingPhotos.filter(p => String(p.localId) !== key);
+          }
+          renderPhotoGallery();
+        });
       });
+    }
+
+    document.getElementById('rf-photo-input').addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+
+      let remaining = 10 - totalPhotoCount();
+      let hitCap = false;
+      for (const file of files) {
+        if (remaining <= 0) { hitCap = true; break; }
+        if (!['image/jpeg', 'image/png'].includes(file.type)) {
+          alert(`"${file.name}" isn't a JPG or PNG image and was skipped.`);
+          continue;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+          alert(`"${file.name}" is larger than 5MB and was skipped.`);
+          continue;
+        }
+        remaining -= 1;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          const base64 = dataUrl.split(',')[1];
+          const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+          s.pendingPhotos.push({ localId: ++_recipeRowLocalIdCounter, dataUrl, base64, ext });
+          renderPhotoGallery();
+        };
+        reader.readAsDataURL(file);
+      }
+      if (hitCap) alert('You can attach up to 10 photos per recipe.');
     });
-  }
 
-  document.getElementById('rf-photo-input').addEventListener('change', (e) => {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
+    renderPhotoGallery();
+  } else {
+    function updatePhotoPreview() {
+      const src = s.pendingPhoto
+        ? s.pendingPhoto.dataUrl
+        : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+      document.getElementById('rf-photo-preview-wrap').style.display = src ? '' : 'none';
+      document.getElementById('rf-photo-preview').src = src || '';
+    }
 
-    let remaining = 10 - totalPhotoCount();
-    let hitCap = false;
-    for (const file of files) {
-      if (remaining <= 0) { hitCap = true; break; }
+    document.getElementById('rf-photo-input').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
       if (!['image/jpeg', 'image/png'].includes(file.type)) {
-        alert(`"${file.name}" isn't a JPG or PNG image and was skipped.`);
-        continue;
+        alert('Please choose a JPG or PNG image.');
+        e.target.value = '';
+        return;
       }
       if (file.size > 5 * 1024 * 1024) {
-        alert(`"${file.name}" is larger than 5MB and was skipped.`);
-        continue;
+        alert('Photo must be 5MB or smaller.');
+        e.target.value = '';
+        return;
       }
-      remaining -= 1;
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = reader.result;
         const base64 = dataUrl.split(',')[1];
         const ext = file.type === 'image/png' ? 'png' : 'jpeg';
-        s.pendingPhotos.push({ localId: ++_recipeRowLocalIdCounter, dataUrl, base64, ext });
-        renderPhotoGallery();
+        s.pendingPhoto = { dataUrl, base64, ext };
+        s.removePhoto = false;
+        updatePhotoPreview();
       };
       reader.readAsDataURL(file);
-    }
-    if (hitCap) alert('You can attach up to 10 photos per recipe.');
-  });
+    });
 
-  renderPhotoGallery();
+    document.getElementById('rf-photo-remove-btn').addEventListener('click', () => {
+      s.pendingPhoto = null;
+      s.removePhoto = true;
+      document.getElementById('rf-photo-input').value = '';
+      updatePhotoPreview();
+    });
+  }
 
   function renderProcessCards() {
     const container = document.getElementById('ep-process-list');
-    container.innerHTML = s.processes.map(proc => `
+    container.innerHTML = s.processes.map((proc, idx) => `
       <div class="process-card" data-process="${proc.localId}">
         <div class="process-card-head">
           <input class="process-name-input" value="${proc.name}" dir="auto" />
+          <button type="button" class="icon-btn" data-move-process-up="${proc.localId}" title="Move process up" aria-label="Move process up" ${idx === 0 ? 'disabled' : ''}>▲</button>
+          <button type="button" class="icon-btn" data-move-process-down="${proc.localId}" title="Move process down" aria-label="Move process down" ${idx === s.processes.length - 1 ? 'disabled' : ''}>▼</button>
           <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${s.processes.length <= 1 ? 'disabled' : ''}>Remove Process</button>
         </div>
         <table class="recipe-ingredients-table">
@@ -2914,17 +2591,36 @@ async function renderExtractorFormView(main) {
         renderProcessCards();
       });
 
+      // Swaps this process with its neighbor in s.processes -- same "reorder the array, then
+      // renumber sort_order from array position on save" convention ingredient-row reordering
+      // already uses. Up/down buttons (not drag-and-drop) since process cards are tall, few in
+      // number, and full of nested interactive content -- see conversation notes.
+      const moveUpBtn = card.querySelector('[data-move-process-up]');
+      const moveDownBtn = card.querySelector('[data-move-process-down]');
+      moveUpBtn.addEventListener('click', () => {
+        const i = s.processes.findIndex(p => p.localId === proc.localId);
+        if (i <= 0) return;
+        [s.processes[i - 1], s.processes[i]] = [s.processes[i], s.processes[i - 1]];
+        renderProcessCards();
+      });
+      moveDownBtn.addEventListener('click', () => {
+        const i = s.processes.findIndex(p => p.localId === proc.localId);
+        if (i === -1 || i >= s.processes.length - 1) return;
+        [s.processes[i], s.processes[i + 1]] = [s.processes[i + 1], s.processes[i]];
+        renderProcessCards();
+      });
+
       const tbody = card.querySelector('.process-ing-rows');
-      const onIngredientChange = () => updateExtractorNetWeightSum();
-      renderProcessIngredientRows(proc, tbody, onIngredientChange);
+      const onIngredientChange = () => updateNetWeightSum(ns);
+      renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
 
       card.querySelector('.process-add-row-btn').addEventListener('click', () => {
         proc.ingredientRows.push(makeEmptyIngredientRow());
-        renderProcessIngredientRows(proc, tbody, onIngredientChange);
+        renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
       });
 
       const wasteInput = card.querySelector(`#ep-waste-${proc.localId}`);
-      wasteInput.addEventListener('input', () => { proc.wastePercent = wasteInput.value; updateExtractorNetWeightSum(); });
+      wasteInput.addEventListener('input', () => { proc.wastePercent = wasteInput.value; updateNetWeightSum(ns); });
 
       const qtyProducedInput = card.querySelector(`#ep-qty-${proc.localId}`);
       qtyProducedInput.addEventListener('input', () => { proc.quantityProduced = qtyProducedInput.value; });
@@ -2932,36 +2628,42 @@ async function renderExtractorFormView(main) {
       renderTextListFieldBody(proc, makeProcessMethodCfg(proc));
     });
 
-    updateExtractorNetWeightSum();
+    updateNetWeightSum(ns);
   }
 
-  // Recomputes every process's own Total Quantity/Net Weight (from that process's ingredient
-  // rows + its own Waste % input) and writes the recipe-level Net Weight as their plain sum --
-  // no recipe-level waste is applied on top, unlike Recipe Book's shared updateYieldCalculation.
-  function updateExtractorNetWeightSum() {
-    const yieldEl = document.getElementById('rf-yield');
-    if (!yieldEl) return;
-    const sum = s.processes.reduce((acc, proc) => acc + updateProcessNetWeight(proc), 0);
-    yieldEl.value = `${roundNice(sum)} G`;
-  }
-
-  document.getElementById('rf-back-btn').addEventListener('click', goBackToExtractorList);
+  document.getElementById('rf-back-btn').addEventListener('click', () => goBackToRecipeList(ns));
   document.getElementById('ep-add-process-btn').addEventListener('click', () => {
     s.processes.push(makeEmptyProcess());
     renderProcessCards();
   });
-  document.getElementById('rf-save-btn').addEventListener('click', saveExtractorForm);
+  document.getElementById('rf-save-btn').addEventListener('click', () => saveProcessRecipeForm(ns));
 
   renderProcessCards();
-  // Overrides dirAuto per-call rather than setting it on TEXT_LIST_FIELDS.presentation itself --
-  // that object is shared with Recipe Book's own form (line ~1708 above), which stays untouched.
+  // Overrides dirAuto per-call rather than setting it on TEXT_LIST_FIELDS.presentation itself,
+  // since that config object is used for this same field's init above too.
   renderTextListFieldBody(s, { ...TEXT_LIST_FIELDS.presentation, dirAuto: true });
 }
 
-async function saveExtractorForm() {
-  const s = state.extractor;
+async function saveProcessRecipeForm(ns) {
+  const s = state[ns.stateKey];
   const name = document.getElementById('rf-name').value.trim();
   if (!name) return alert('Please enter a recipe name.');
+
+  // Recipe Book requires every ingredient row to already be linked to a real ingredientId
+  // (picked from the dropdown or added inline) before saving. Recipe Extractor skips this block
+  // entirely -- ns.api.save auto-resolves/creates unlinked rows by name server-side instead, so
+  // it's never stopped by this.
+  if (ns.requireIngredientLink) {
+    for (const proc of s.processes) {
+      for (let i = 0; i < proc.ingredientRows.length; i++) {
+        const row = proc.ingredientRows[i];
+        if (row.name.trim() !== '' && !row.ingredientId) {
+          const label = proc.name.trim() || 'this process';
+          return alert(`"${label}", row ${i + 1}: please pick "${row.name}" from the dropdown (or add it as a new ingredient) before saving.`);
+        }
+      }
+    }
+  }
 
   const statusEl = document.getElementById('rf-status');
   statusEl.textContent = 'Saving…';
@@ -2978,9 +2680,6 @@ async function saveExtractorForm() {
     presentationServing: collectTextListFieldValue(s, TEXT_LIST_FIELDS.presentation),
     comment: document.getElementById('rf-comment').value,
     checkedBy: document.getElementById('rf-checked-by').value.trim(),
-    // No dropdown-block validation here (unlike Recipe Book's saveRecipeForm) -- any row
-    // without a linked ingredientId is auto-resolved/created by name server-side instead, see
-    // save-extracted-recipe.
     processes: s.processes.map(proc => ({
       name: proc.name.trim(),
       method: collectTextListFieldValue(proc, makeProcessMethodCfg(proc)),
@@ -2996,18 +2695,26 @@ async function saveExtractorForm() {
           method: r.method || null,
         })),
     })),
+  };
+
+  if (ns.photoModel === 'gallery') {
     // Ordered list of kept-existing + newly-added photos -- save-extracted-recipe clears and
     // reinserts extracted_recipe_photos from this array (same convention as processes above),
     // purging from Storage any existing photo that's no longer present.
-    photos: [
+    payload.photos = [
       ...s.existingPhotos.map(p => ({ existingPhotoPath: p.photo_path })),
       ...s.pendingPhotos.map(p => ({ photoBase64: p.base64, photoExt: p.ext })),
-    ],
-  };
+    ];
+  } else if (s.pendingPhoto) {
+    payload.photoBase64 = s.pendingPhoto.base64;
+    payload.photoExt = s.pendingPhoto.ext;
+  } else if (s.removePhoto) {
+    payload.removePhoto = true;
+  }
 
   try {
-    await RECIPE_NS.extractor.api.save(payload);
-    goBackToExtractorList();
+    await ns.api.save(payload);
+    goBackToRecipeList(ns);
   } catch (err) {
     statusEl.textContent = '';
     alert(`Save failed: ${err.message}`);
@@ -3064,10 +2771,8 @@ function scaleQuantityProducedText(text, multiplier) {
   return scaled;
 }
 
-// Shared by Book's single flat ingredient list (via scaleRecipeForExport below) and the
-// Extractor's per-process scaling (renderCalculatorView, called once per process being scaled)
-// -- the arithmetic is identical either way, only how many times it's called differs, so this is
-// shared rather than duplicated per source.
+// Called once per process being scaled (renderCalculatorView/renderScaledRecipeResult) -- Recipe
+// Book and Recipe Extractor share this, since both are process-shaped now.
 function scaleIngredients(ingredients, multiplier) {
   return ingredients.map(ing => ({
     ...ing,
@@ -3075,15 +2780,6 @@ function scaleIngredients(ingredients, multiplier) {
       ? ing.quantity
       : roundNice(parseFloat(ing.quantity) * multiplier),
   }));
-}
-
-function scaleRecipeForExport(recipe, ingredients, multiplier) {
-  const scaledRecipe = {
-    ...recipe,
-    quantity_produced: scaleQuantityProducedText(recipe.quantity_produced, multiplier),
-  };
-  const scaledIngredients = scaleIngredients(ingredients, multiplier);
-  return { scaledRecipe, scaledIngredients };
 }
 
 // Sums every ingredient's raw quantity number regardless of unit (120 GR + 5 PC = 125) --
@@ -3139,28 +2835,35 @@ function renderCalculatorView(main) {
         <label>Process</label>
         <select id="calc-process-select"></select>
       </div>
-      <div class="field" style="max-width:200px;">
-        <label id="calc-qty-original-label">Quantity Produced (original)</label>
-        <input id="calc-qty-original" value="" disabled />
-      </div>
-      <div class="field" style="max-width:260px;">
-        <label>Scaling Mode</label>
-        <div class="mode-toggle">
-          <button type="button" class="mode-toggle-btn active" data-mode="factor">Multiply by factor</button>
-          <button type="button" class="mode-toggle-btn" data-mode="target">Scale to target quantity</button>
+      <div id="calc-single-scale-fields" style="display:contents;">
+        <div class="field" style="max-width:200px;">
+          <label id="calc-qty-original-label">Quantity Produced (original)</label>
+          <input id="calc-qty-original" value="" disabled />
         </div>
-      </div>
-      <div class="field" style="max-width:120px;" id="calc-multiplier-field">
-        <label>Multiplier</label>
-        <input id="calc-multiplier" type="number" step="0.1" min="0" value="1" />
-      </div>
-      <div class="field" style="max-width:160px; display:none;" id="calc-target-field">
-        <label>Target Total Quantity (g)</label>
-        <input id="calc-target-qty" type="number" step="1" min="0" />
+        <div class="field" style="max-width:260px;">
+          <label>Scaling Mode</label>
+          <div class="mode-toggle">
+            <button type="button" class="mode-toggle-btn active" data-mode="factor">Multiply by factor</button>
+            <button type="button" class="mode-toggle-btn" data-mode="target">Scale to target quantity</button>
+          </div>
+        </div>
+        <div class="field" style="max-width:120px;" id="calc-multiplier-field">
+          <label>Multiplier</label>
+          <input id="calc-multiplier" type="number" step="0.1" min="0" value="1" />
+        </div>
+        <div class="field" style="max-width:160px; display:none;" id="calc-target-field">
+          <label>Target Total Quantity (g)</label>
+          <input id="calc-target-qty" type="number" step="1" min="0" />
+        </div>
       </div>
       <button class="primary" id="calc-calculate-btn" disabled>Calculate</button>
     </div>
     <div id="calc-mode-error" style="display:none; color:var(--danger, #c0392b); font-size:12.5px; margin:-10px 0 14px;"></div>
+
+    <!-- Shown instead of #calc-single-scale-fields when "All Processes" resolves to 2+
+         processes -- one scaling control per process (own Mode/Multiplier/Target), so each can
+         be scaled independently in the same Calculate step. See renderPerProcessScalingControls. -->
+    <div id="calc-per-process-controls" style="display:none; margin-bottom:14px;"></div>
 
     <div id="calc-result"></div>
   `;
@@ -3170,6 +2873,7 @@ function renderCalculatorView(main) {
   const browseBtn = document.getElementById('calc-recipe-browse-btn');
   const processField = document.getElementById('calc-process-field');
   const processSelect = document.getElementById('calc-process-select');
+  const singleScaleFields = document.getElementById('calc-single-scale-fields');
   const qtyOriginalLabel = document.getElementById('calc-qty-original-label');
   const qtyOriginalInput = document.getElementById('calc-qty-original');
   const multiplierField = document.getElementById('calc-multiplier-field');
@@ -3177,24 +2881,25 @@ function renderCalculatorView(main) {
   const targetField = document.getElementById('calc-target-field');
   const targetInput = document.getElementById('calc-target-qty');
   const modeErrorEl = document.getElementById('calc-mode-error');
+  const perProcessControlsEl = document.getElementById('calc-per-process-controls');
   const calculateBtn = document.getElementById('calc-calculate-btn');
   const resultEl = document.getElementById('calc-result');
 
   let source = 'book'; // 'book' | 'extractor'
   let scalingMode = 'factor';
   let selectedRecipe = null;
-  // Full recipe is fetched once per selection (below) and cached here. For 'book' this excludes
-  // ingredients (kept separately in selectedIngredients, same as before); for 'extractor' it
-  // keeps its own `processes` (each carrying its own ingredients) and `photos` array intact.
+  // Full recipe is fetched once per selection (below) and cached here -- keeps its own
+  // `processes` (each carrying its own ingredients) and, for Extractor, `photos` array intact.
+  // Both namespaces are process-shaped since the Recipe Book multi-process migration.
   let selectedFullRecipe = null;
-  // The CURRENT scaling pool: Book's flat ingredient list, or (Extractor) the flattened
-  // ingredients of whichever process(es) processSelection currently resolves to -- used for the
-  // "original" display and the scale-to-target multiplier calc. Actual per-process scaling for
-  // export/display still reads the real process objects via processesToScale(), not this flat
-  // view -- see renderScaledExtractedRecipeResult.
+  // The CURRENT scaling pool: the flattened ingredients of whichever process(es)
+  // processSelection currently resolves to -- used for the "original" display and the
+  // scale-to-target multiplier calc. Actual per-process scaling for export/display still reads
+  // the real process objects via processesToScale(), not this flat view -- see
+  // renderScaledRecipeResult.
   let selectedIngredients = null;
-  // Extractor only: '__all__' or a specific process id string. Irrelevant (and the picker
-  // stays hidden) when the recipe has 1 process or fewer.
+  // '__all__' or a specific process id string. Irrelevant (and the picker stays hidden) when
+  // the recipe has 1 process or fewer.
   let processSelection = null;
   // Tracks whether the currently-open list is the "browse all" list specifically, so a second
   // click on the browse button closes it instead of just re-opening the same full list -- but
@@ -3218,12 +2923,11 @@ function renderCalculatorView(main) {
     return procs.filter(p => String(p.id) === String(processSelection));
   }
 
-  // Quantity Produced's source: the recipe-level field for Book, "All Processes", or a genuinely
-  // single-process recipe (nothing else to pick) -- a specifically-selected process's own field
+  // Quantity Produced's source: "All Processes", or a genuinely single-process recipe (nothing
+  // else to pick) uses the recipe-level field -- a specifically-selected process's own field
   // otherwise, since it can describe a completely independent production context (see
-  // renderScaledExtractedRecipeResult, which detects this the same structural way).
+  // renderScaledRecipeResult, which detects this the same structural way).
   function quantityProducedSource() {
-    if (source === 'book') return selectedFullRecipe?.quantity_produced || '';
     const scaled = processesToScale();
     if (scaled.length === 1 && allProcesses().length > 1) return scaled[0].quantity_produced || '';
     return selectedFullRecipe?.quantity_produced || '';
@@ -3231,7 +2935,7 @@ function renderCalculatorView(main) {
 
   function populateProcessSelect() {
     const procs = allProcesses();
-    if (source !== 'extractor' || procs.length <= 1) {
+    if (procs.length <= 1) {
       processField.style.display = 'none';
       processSelect.innerHTML = '';
       return;
@@ -3255,24 +2959,95 @@ function renderCalculatorView(main) {
     calculateBtn.disabled = true;
     resultEl.innerHTML = '';
     modeErrorEl.style.display = 'none';
+    singleScaleFields.style.display = 'contents';
+    perProcessControlsEl.style.display = 'none';
+    perProcessControlsEl.innerHTML = '';
   }
 
   // "Quantity Produced (original)" shows a free-text serving/container count in Multiply-by-
   // factor mode (what it's always meant) -- source picked by quantityProducedSource() above
   // (recipe-level, or a specifically-selected process's own). In Scale-to-target mode that field
   // isn't what the target is measured against -- so it switches to showing the actual basis (the
-  // current scaling pool's total ingredient quantity), with the label swapped to match.
+  // current scaling pool's total ingredient quantity), with the label swapped to match. Only
+  // meaningful for the single-control case -- see updateScalingControlsVisibility, which is what
+  // actually decides whether this or the per-process cards show.
   function updateQtyOriginalDisplay() {
     if (!selectedFullRecipe) return;
     if (scalingMode === 'factor') {
-      const scaled = source === 'extractor' ? processesToScale() : null;
-      const isProcessLevel = scaled && scaled.length === 1 && allProcesses().length > 1;
+      const scaled = processesToScale();
+      const isProcessLevel = scaled.length === 1 && allProcesses().length > 1;
       qtyOriginalLabel.textContent = isProcessLevel ? 'Quantity Produced (process, original)' : 'Quantity Produced (original)';
       qtyOriginalInput.value = quantityProducedSource();
     } else {
       qtyOriginalLabel.textContent = 'Total Ingredient Quantity (original)';
       qtyOriginalInput.value = `${sumIngredientQuantities(selectedIngredients || [])}g`;
     }
+  }
+
+  // Decides which scaling UI applies: the single shared Mode/Multiplier/Target block (a specific
+  // process is selected, or the recipe has only one process to begin with -- unchanged from
+  // before this feature) vs. one independent scaling control per process ("All Processes"
+  // resolves to 2+ processes) -- see renderPerProcessScalingControls.
+  function updateScalingControlsVisibility() {
+    const scaled = processesToScale();
+    if (scaled.length > 1) {
+      singleScaleFields.style.display = 'none';
+      perProcessControlsEl.style.display = '';
+      renderPerProcessScalingControls(scaled);
+    } else {
+      singleScaleFields.style.display = 'contents';
+      perProcessControlsEl.style.display = 'none';
+      perProcessControlsEl.innerHTML = '';
+      updateQtyOriginalDisplay();
+    }
+  }
+
+  // One process's own Scaling Mode/Multiplier/Target, in a process-card styled block -- same
+  // visual language as the recipe form's own process cards. Built fresh each time "All
+  // Processes" resolves to a different process set (a different recipe picked, or a process
+  // added/removed from the underlying recipe since -- not expected mid-session, but cheap to
+  // just rebuild). Mode toggling/error display is scoped per-card via [data-scale-process],
+  // read back at Calculate time -- see the button handler below.
+  function renderPerProcessScalingControls(procs) {
+    perProcessControlsEl.innerHTML = procs.map(proc => `
+      <div class="process-card" data-scale-process="${proc.id}" style="margin-bottom:10px;">
+        <div class="process-card-head"><strong>${proc.name}</strong></div>
+        <div class="generate-controls" style="border:none; padding:0; margin:10px 0 0; gap:14px;">
+          <div class="field" style="max-width:200px;">
+            <label>Quantity Produced (original)</label>
+            <input value="${proc.quantity_produced || ''}" disabled />
+          </div>
+          <div class="field" style="max-width:240px;">
+            <label>Scaling Mode</label>
+            <div class="mode-toggle">
+              <button type="button" class="mode-toggle-btn active" data-proc-mode-btn="factor">Multiply by factor</button>
+              <button type="button" class="mode-toggle-btn" data-proc-mode-btn="target">Scale to target quantity</button>
+            </div>
+          </div>
+          <div class="field" style="max-width:120px;" data-proc-multiplier-field>
+            <label>Multiplier</label>
+            <input type="number" step="0.1" min="0" value="1" data-proc-multiplier />
+          </div>
+          <div class="field" style="max-width:160px; display:none;" data-proc-target-field>
+            <label>Target Total Quantity (g)</label>
+            <input type="number" step="1" min="0" data-proc-target />
+          </div>
+        </div>
+        <div data-proc-error style="display:none; color:var(--danger, #c0392b); font-size:12px; margin-top:8px;"></div>
+      </div>
+    `).join('');
+
+    perProcessControlsEl.querySelectorAll('[data-scale-process]').forEach(card => {
+      card.querySelectorAll('[data-proc-mode-btn]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const mode = btn.dataset.procModeBtn;
+          card.querySelectorAll('[data-proc-mode-btn]').forEach(b => b.classList.toggle('active', b.dataset.procModeBtn === mode));
+          card.querySelector('[data-proc-multiplier-field]').style.display = mode === 'factor' ? 'flex' : 'none';
+          card.querySelector('[data-proc-target-field]').style.display = mode === 'target' ? 'flex' : 'none';
+          card.querySelector('[data-proc-error]').style.display = 'none';
+        });
+      });
+    });
   }
 
   document.querySelectorAll('.generate-controls [data-source]').forEach(btn => {
@@ -3303,7 +3078,7 @@ function renderCalculatorView(main) {
   processSelect.addEventListener('change', () => {
     processSelection = processSelect.value;
     selectedIngredients = processesToScale().flatMap(p => p.ingredients);
-    updateQtyOriginalDisplay();
+    updateScalingControlsVisibility();
   });
 
   async function onRecipePicked(recipe) {
@@ -3320,18 +3095,12 @@ function renderCalculatorView(main) {
     const full = await currentNs().api.get(recipe.id);
     if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
 
-    if (source === 'book') {
-      const { ingredients, ...fullRecipe } = full;
-      selectedFullRecipe = fullRecipe;
-      selectedIngredients = ingredients;
-    } else {
-      selectedFullRecipe = full; // keeps .processes/.photos intact
-      processSelection = '__all__';
-      populateProcessSelect();
-      selectedIngredients = processesToScale().flatMap(p => p.ingredients);
-    }
+    selectedFullRecipe = full; // keeps .processes (and, for Extractor, .photos) intact
+    processSelection = '__all__';
+    populateProcessSelect();
+    selectedIngredients = processesToScale().flatMap(p => p.ingredients);
     calculateBtn.disabled = false;
-    updateQtyOriginalDisplay();
+    updateScalingControlsVisibility();
   }
 
   nameInput.addEventListener('input', () => {
@@ -3365,25 +3134,62 @@ function renderCalculatorView(main) {
     if (!selectedFullRecipe || !selectedIngredients) return;
     modeErrorEl.style.display = 'none';
 
-    let multiplier;
-    if (scalingMode === 'factor') {
-      multiplier = parseFloat(multiplierInput.value);
-      if (!multiplier || multiplier <= 0) return alert('Please enter a multiplier greater than 0.');
-    } else {
-      const result = computeMultiplierFromTarget(selectedIngredients, targetInput.value);
-      if (result.error) {
-        modeErrorEl.textContent = result.error;
-        modeErrorEl.style.display = 'block';
-        return;
+    const scaled = processesToScale();
+    const multiplierByProcessId = new Map();
+
+    if (scaled.length > 1) {
+      // Independent per-process scaling -- validate every process's own control and collect
+      // every error at once (unlike the single-control path below, more than one process can be
+      // invalid at the same time), rather than stopping at the first.
+      let hasError = false;
+      for (const proc of scaled) {
+        const card = perProcessControlsEl.querySelector(`[data-scale-process="${proc.id}"]`);
+        const errorEl = card.querySelector('[data-proc-error]');
+        errorEl.style.display = 'none';
+
+        const isTarget = card.querySelector('[data-proc-mode-btn="target"]').classList.contains('active');
+        if (!isTarget) {
+          const val = parseFloat(card.querySelector('[data-proc-multiplier]').value);
+          if (!val || val <= 0) {
+            errorEl.textContent = 'Please enter a multiplier greater than 0.';
+            errorEl.style.display = 'block';
+            hasError = true;
+            continue;
+          }
+          multiplierByProcessId.set(proc.id, val);
+        } else {
+          // Scoped to this process's OWN ingredients only -- scaling Dough to 5kg shouldn't be
+          // measured against Poolish's ingredients too, unlike the single-control path's target
+          // mode, which is deliberately measured against whatever pool is currently selected.
+          const result = computeMultiplierFromTarget(proc.ingredients, card.querySelector('[data-proc-target]').value);
+          if (result.error) {
+            errorEl.textContent = result.error;
+            errorEl.style.display = 'block';
+            hasError = true;
+            continue;
+          }
+          multiplierByProcessId.set(proc.id, result.multiplier);
+        }
       }
-      multiplier = result.multiplier;
+      if (hasError) return;
+    } else {
+      let multiplier;
+      if (scalingMode === 'factor') {
+        multiplier = parseFloat(multiplierInput.value);
+        if (!multiplier || multiplier <= 0) return alert('Please enter a multiplier greater than 0.');
+      } else {
+        const result = computeMultiplierFromTarget(selectedIngredients, targetInput.value);
+        if (result.error) {
+          modeErrorEl.textContent = result.error;
+          modeErrorEl.style.display = 'block';
+          return;
+        }
+        multiplier = result.multiplier;
+      }
+      multiplierByProcessId.set(scaled[0].id, multiplier);
     }
 
-    if (source === 'book') {
-      renderScaledRecipeResult(resultEl, selectedFullRecipe, selectedIngredients, multiplier);
-    } else {
-      renderScaledExtractedRecipeResult(resultEl, selectedRecipe.id, selectedFullRecipe, processesToScale(), multiplier);
-    }
+    renderScaledRecipeResult(resultEl, currentNs(), selectedRecipe.id, selectedFullRecipe, scaled, multiplierByProcessId);
   });
 }
 
@@ -3438,114 +3244,23 @@ function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick, emptyMes
   });
 }
 
-function renderScaledRecipeResult(container, recipe, ingredients, multiplier) {
-  const { scaledRecipe, scaledIngredients } = scaleRecipeForExport(recipe, ingredients, multiplier);
-
-  // Same logic as the "Total Quantity" row in the Excel export, kept in sync with it.
-  const totalQuantity = sumIngredientQuantities(scaledIngredients);
-
-  // Yield here is always recomputed from the scaled Total Quantity and the recipe's own fixed
-  // waste_percent (read-only -- waste is set once on the recipe, not re-entered per
-  // calculation), NOT read from the original recipe's saved yield_notes, which reflects the
-  // unscaled quantity. This overwrites scaledRecipe.yield_notes so both this live display and
-  // the exported Excel show the scaled, waste-adjusted figure -- waste_percent itself never
-  // gets written into scaledRecipe fields that reach the export.
-  const wastePct = recipe.waste_percent != null ? Math.min(Math.max(parseFloat(recipe.waste_percent), 0), 100) : 0;
-  scaledRecipe.yield_notes = `${roundNice(totalQuantity * (1 - wastePct / 100))} G`;
-
-  container.innerHTML = `
-    <div class="day-card">
-      <div class="day-head">
-        <span>${recipe.name}</span>
-        <span class="date">×${roundNice(multiplier)}</span>
-      </div>
-      <div style="padding:16px 18px;">
-        <div class="generate-controls" style="border:none; padding:0; margin-bottom:18px;">
-          <div class="field"><label>Quantity Produced (original)</label><div>${recipe.quantity_produced || '—'}</div></div>
-          <div class="field"><label>Quantity Produced (scaled)</label><div><strong>${scaledRecipe.quantity_produced || '—'}</strong></div></div>
-          <div class="field"><label>Prepared By</label><div>${recipe.prepared_by || '—'}</div></div>
-          <div class="field"><label>Category</label><div>${recipe.category || '—'}</div></div>
-          <div class="field"><label>Country/Origin</label><div>${recipe.country_origin || '—'}</div></div>
-          <div class="field"><label>Waste %</label><div>${recipe.waste_percent != null ? recipe.waste_percent + '%' : '—'}</div></div>
-          <div class="field"><label>Yield (scaled)</label><div><strong>${scaledRecipe.yield_notes}</strong></div></div>
-        </div>
-
-        <h3 style="margin-bottom:10px;">Ingredients (scaled)</h3>
-        <table class="recipe-ingredients-table">
-          <thead><tr><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th></tr></thead>
-          <tbody>
-            ${scaledIngredients.map(ing => `
-              <tr>
-                <td>${ing.ingredient_name}</td>
-                <td>${ing.quantity ?? ''}</td>
-                <td>${ing.unit || ''}</td>
-                <td>${ing.method || ''}</td>
-              </tr>
-            `).join('')}
-            <tr style="font-weight:600;">
-              <td>Total Quantity</td>
-              <td>${totalQuantity}</td>
-              <td></td>
-              <td></td>
-            </tr>
-          </tbody>
-        </table>
-
-        <div class="field" style="margin:16px 0;">
-          <label>Preparation and Cooking</label>
-          <div style="white-space:pre-wrap;">${recipe.preparation_cooking || '—'}</div>
-        </div>
-        <div class="field" style="margin-bottom:16px;">
-          <label>Presentation / Decoration / Serving</label>
-          <div style="white-space:pre-wrap;">${recipe.presentation_serving || '—'}</div>
-        </div>
-        <div class="field" style="margin-bottom:16px;">
-          <label>Comment</label>
-          <div style="white-space:pre-wrap;">${recipe.comment || '—'}</div>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:10px;">
-          <button class="primary" id="calc-export-btn">Export to Excel</button>
-          ${exportLanguagePickerHtml('calc')}
-        </div>
-        <span id="calc-export-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
-      </div>
-    </div>
-  `;
-  wireExportLanguagePicker('calc');
-
-  document.getElementById('calc-export-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('calc-export-btn');
-    const statusEl = document.getElementById('calc-export-status');
-    btn.disabled = true;
-    statusEl.textContent = 'Exporting…';
-    // See the List "Export Selected" handler's comment -- same missing-try/catch bug fixed here.
-    const unsubscribe = window.api.onExportProgress((message) => { statusEl.textContent = message; });
-    try {
-      const result = await window.api.exportScaledRecipe({
-        recipe: scaledRecipe, ingredients: scaledIngredients, targetLanguage: getSelectedExportLanguage('calc'),
-      });
-      if (result.success) statusEl.textContent = `Exported to ${result.path}`;
-      else if (!result.cancelled) statusEl.textContent = 'Export failed.';
-      else statusEl.textContent = '';
-    } catch (err) {
-      statusEl.textContent = `Export failed: ${err.message}`;
-    } finally {
-      unsubscribe();
-      btn.disabled = false;
-    }
-  });
-}
-
-// Recipe Calculator's EX- counterpart to renderScaledRecipeResult above. `processes` is either
-// every process on the recipe ("All Processes") or just the one the chef picked -- either way
-// each is scaled independently (own ingredients, own waste%) and shown as its own section, same
-// visual pattern as the Extractor form's process cards and the export sheet's per-process
-// sections, rather than merged into one flat list (see conversation notes: preserves per-
-// component meaning, and lets the export payload below match buildExtractedRecipeSheet's
-// existing shape exactly, unchanged).
-function renderScaledExtractedRecipeResult(container, recipeId, recipe, processes, multiplier) {
+// Shared by Recipe Book and Recipe Extractor (both process-shaped since the multi-process
+// migration). `processes` is either every process on the recipe ("All Processes") or just the
+// one the chef picked -- either way each is scaled independently (own ingredients, own waste%,
+// and now its own multiplier -- see multiplierByProcessId) and shown as its own section, same
+// visual pattern as the form's own process cards and the export sheet's per-process sections,
+// rather than merged into one flat list (preserves per-component meaning, and lets the export
+// payload below match buildRecipeSheet's shape exactly).
+//
+// `multiplierByProcessId` is a Map<processId, multiplier> -- always one entry per process in
+// `processes`, whether that's a single shared multiplier (the calculator's single-control path,
+// which still just puts one entry in the map keyed by that one process's id) or genuinely
+// different multipliers per process (the "All Processes" independent-scaling path). This
+// function itself never distinguishes the two cases beyond that lookup -- the UI decision of
+// "one control or many" lives entirely in renderCalculatorView.
+function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, multiplierByProcessId) {
   const scaledProcesses = processes.map(proc => {
+    const multiplier = multiplierByProcessId.get(proc.id);
     const scaledIngredients = scaleIngredients(proc.ingredients, multiplier);
     const totalQuantity = sumIngredientQuantities(scaledIngredients);
     // Waste % itself is never scaled -- it's a percentage, not a quantity, same reasoning
@@ -3558,11 +3273,11 @@ function renderScaledExtractedRecipeResult(container, recipeId, recipe, processe
     // regardless of which selection mode is active (see quantityProducedSource below for the
     // *summary* row, which switches source instead of showing both).
     const scaledQuantityProduced = scaleQuantityProducedText(proc.quantity_produced, multiplier);
-    return { ...proc, ingredients: scaledIngredients, totalQuantity, netWeight, scaledQuantityProduced };
+    return { ...proc, ingredients: scaledIngredients, totalQuantity, netWeight, scaledQuantityProduced, multiplier };
   });
 
   // Recipe-level Net Weight is the sum of every shown process's own scaled, waste-adjusted net
-  // weight -- same convention updateExtractorNetWeightSum uses live in the Extractor form.
+  // weight -- same convention updateNetWeightSum uses live in the form.
   const combinedNetWeight = roundNice(scaledProcesses.reduce((sum, p) => sum + p.netWeight, 0));
 
   // "All Processes" (or a single-process recipe, where there's nothing else to pick) uses the
@@ -3572,20 +3287,26 @@ function renderScaledExtractedRecipeResult(container, recipeId, recipe, processe
   // recipe that actually has more than one) rather than from separate UI state, so this can't
   // drift out of sync with what processesToScale() actually resolved.
   const isSingleProcessSelection = processes.length === 1 && (recipe.processes || []).length > 1;
+  // 2+ processes scaled together with (possibly) different multipliers each -- there's no
+  // longer one coherent scale factor for the recipe-level Quantity Produced to apply, so it's
+  // shown unscaled, for context only. Each process's own scaled Quantity Produced still shows on
+  // its own card below regardless.
+  const isMultiProcessScaling = processes.length > 1;
   const quantityProducedLabel = isSingleProcessSelection ? 'process' : 'recipe';
   const quantityProducedOriginal = isSingleProcessSelection ? processes[0].quantity_produced : recipe.quantity_produced;
-  const quantityProducedScaled = isSingleProcessSelection ? scaledProcesses[0].scaledQuantityProduced : scaleQuantityProducedText(recipe.quantity_produced, multiplier);
+  const quantityProducedScaled = isMultiProcessScaling
+    ? null
+    : (isSingleProcessSelection ? scaledProcesses[0].scaledQuantityProduced : scaleQuantityProducedText(recipe.quantity_produced, scaledProcesses[0].multiplier));
 
   container.innerHTML = `
     <div class="day-card">
       <div class="day-head">
         <span>${recipe.name}</span>
-        <span class="date">×${roundNice(multiplier)}</span>
       </div>
       <div style="padding:16px 18px;">
         <div class="generate-controls" style="border:none; padding:0; margin-bottom:18px;">
           <div class="field"><label>Quantity Produced (${quantityProducedLabel}, original)</label><div>${quantityProducedOriginal || '—'}</div></div>
-          <div class="field"><label>Quantity Produced (${quantityProducedLabel}, scaled)</label><div><strong>${quantityProducedScaled || '—'}</strong></div></div>
+          <div class="field"><label>Quantity Produced (${quantityProducedLabel}, scaled)</label><div><strong>${quantityProducedScaled || (isMultiProcessScaling ? 'Scaled independently per process' : '—')}</strong></div></div>
           <div class="field"><label>Prepared By</label><div>${recipe.prepared_by || '—'}</div></div>
           <div class="field"><label>Category</label><div>${recipe.category || '—'}</div></div>
           <div class="field"><label>Country/Origin</label><div>${recipe.country_origin || '—'}</div></div>
@@ -3594,7 +3315,7 @@ function renderScaledExtractedRecipeResult(container, recipeId, recipe, processe
 
         ${scaledProcesses.map(proc => `
           <div class="process-card">
-            <div class="process-card-head"><strong>${proc.name}</strong></div>
+            <div class="process-card-head"><strong>${proc.name}</strong> <span style="font-size:12px; color:var(--neutral); font-weight:400;">×${roundNice(proc.multiplier)}</span></div>
             <table class="recipe-ingredients-table">
               <thead><tr><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th></tr></thead>
               <tbody>
@@ -3654,19 +3375,25 @@ function renderScaledExtractedRecipeResult(container, recipeId, recipe, processe
     const unsubscribe = window.api.onExportProgress((message) => { statusEl.textContent = message; });
     try {
       // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending --
-      // export-scaled-extracted-recipe re-fetches photos fresh by recipeId itself, and the scaled
-      // processes below are the ones that actually belong in the export, not the original full set.
+      // export-scaled-extracted-recipe re-fetches Extractor photos fresh by recipeId itself (a
+      // no-op for Recipe Book, whose export-scaled-recipe handler ignores recipeId and reads
+      // photo_path off `recipe` directly instead), and the scaled processes below are the ones
+      // that actually belong in the export, not the original full set.
       const { processes: _origProcesses, photos: _origPhotos, ...recipeFields } = recipe;
       const exportRecipe = {
         ...recipeFields,
-        quantity_produced: quantityProducedScaled,
+        // Falls back to the original, unscaled recipe-level quantity when processes were scaled
+        // independently (quantityProducedScaled is null in that case, see above) -- each
+        // process's own scaled Quantity Produced is still exported correctly via exportProcesses
+        // below regardless.
+        quantity_produced: quantityProducedScaled || recipe.quantity_produced,
         yield_notes: `${combinedNetWeight} G`,
       };
       const exportProcesses = scaledProcesses.map(p => ({
         name: p.name, method: p.method, waste_percent: p.waste_percent,
         quantity_produced: p.scaledQuantityProduced, ingredients: p.ingredients,
       }));
-      const result = await window.api.exportScaledExtractedRecipe({
+      const result = await ns.api.exportScaled({
         recipeId, recipe: exportRecipe, processes: exportProcesses, targetLanguage: getSelectedExportLanguage('calc'),
       });
       if (result.success) statusEl.textContent = `Exported to ${result.path}`;
