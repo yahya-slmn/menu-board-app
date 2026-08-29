@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('api', {
   saveRecipe: (payload) => ipcRenderer.invoke('save-recipe', payload),
   deleteRecipe: (id) => ipcRenderer.invoke('delete-recipe', id),
   getRecipePhoto: (photoPath) => ipcRenderer.invoke('get-recipe-photo', photoPath),
+  previewRecipe: (id) => ipcRenderer.invoke('preview-recipe', id),
   exportRecipes: (payload) => ipcRenderer.invoke('export-recipes', payload),
   exportScaledRecipe: (payload) => ipcRenderer.invoke('export-scaled-recipe', payload),
 
@@ -44,6 +45,7 @@ contextBridge.exposeInMainWorld('api', {
   saveExtractedRecipe: (payload) => ipcRenderer.invoke('save-extracted-recipe', payload),
   deleteExtractedRecipe: (id) => ipcRenderer.invoke('delete-extracted-recipe', id),
   getExtractedRecipePhotos: (photoPaths) => ipcRenderer.invoke('get-extracted-recipe-photos', photoPaths),
+  previewExtractedRecipe: (id) => ipcRenderer.invoke('preview-extracted-recipe', id),
   exportExtractedRecipes: (payload) => ipcRenderer.invoke('export-extracted-recipes', payload),
   exportScaledExtractedRecipe: (payload) => ipcRenderer.invoke('export-scaled-extracted-recipe', payload),
   // One-way progress events during a translated export (main.js sends 'export-progress' while

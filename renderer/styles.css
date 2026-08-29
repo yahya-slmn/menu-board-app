@@ -290,6 +290,7 @@ table.items-table td.cat-cell {
 }
 .icon-btn:hover { color: var(--sage-dark); }
 .icon-btn.danger:hover { color: var(--danger); }
+.icon-btn svg { display: inline-block; }
 
 /* ---------------- Generate view ---------------- */
 .generate-controls {
@@ -543,6 +544,70 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 .portion-cell-label {
   font-size: 10.5px; color: var(--neutral); text-transform: uppercase; letter-spacing: 0.03em;
 }
+
+/* ---------------- Export preview modal ---------------- */
+/* Reuses .modal's own scroll behavior (max-height: 84vh; overflow-y: auto) unchanged -- a long
+   recipe (multi-process Extractor card, long method list) just scrolls, same as every other
+   modal in this app; no separate pagination. Just wider, to fit an approximated recipe layout. */
+.preview-modal { width: 760px; max-width: 92vw; font-family: 'Times New Roman', serif; }
+.preview-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.preview-modal-head h2 { margin-bottom: 0; }
+.preview-title-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  background: var(--sage-fill, #DCE6DC); padding: 8px 12px; border: 1px solid var(--line);
+}
+.preview-title { font-size: 17px; font-weight: 700; }
+.preview-code { font-family: 'IBM Plex Sans', sans-serif; font-size: 10.5px; color: var(--neutral); }
+.preview-fields-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 24px;
+  border: 1px solid var(--line); border-top: none; padding: 10px 12px; margin-bottom: 14px;
+}
+.preview-fields-grid-2col { grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); margin-top: 14px; }
+.preview-fields-grid-inline { grid-template-columns: repeat(4, 1fr); border: none; padding: 4px 0 8px; margin-bottom: 0; }
+.preview-field { display: flex; gap: 6px; font-size: 13px; }
+.preview-field-label { font-weight: 600; text-decoration: underline; white-space: nowrap; }
+.preview-field-strong { font-weight: 700; color: #B00000; }
+
+.preview-table { width: 100%; border-collapse: collapse; margin-bottom: 14px; font-size: 13px; }
+.preview-table th, .preview-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+.preview-table th { background: var(--sage-fill, #DCE6DC); font-weight: 700; text-decoration: underline; text-align: center; }
+.preview-table td:nth-child(2), .preview-table td:nth-child(3) { text-align: center; }
+.preview-total-row { font-weight: 700; background: var(--paper-dim); }
+.preview-empty-note { font-style: italic; color: var(--neutral); text-align: center; }
+
+.preview-section { margin-bottom: 14px; }
+.preview-section-label {
+  font-weight: 700; text-decoration: underline; font-size: 13.5px;
+  background: var(--sage-fill, #DCE6DC); padding: 4px 8px; margin-bottom: 6px;
+}
+.preview-section-sublabel { font-weight: 700; text-decoration: underline; font-size: 13px; margin: 8px 0 4px; }
+.preview-numbered-list { margin: 0; padding-left: 22px; font-size: 13px; line-height: 1.5; }
+.preview-text-block { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+
+/* Square photo box, crop-to-fill via object-fit -- approximates Task 1's real Jimp crop, which
+   only the actual .xlsx export needs since CSS already handles this natively for a preview. */
+.preview-photo-row { display: flex; gap: 14px; margin-bottom: 14px; align-items: flex-start; }
+.preview-photo-box {
+  width: 160px; aspect-ratio: 1 / 1; flex: 0 0 auto; background: var(--paper-dim);
+  border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.preview-photo-box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.preview-photo-box span { font-size: 12px; color: var(--neutral); }
+.preview-presentation { flex: 1 1 auto; min-width: 0; }
+
+.preview-process-card { border: 1px solid var(--line); padding: 10px 12px; margin-bottom: 12px; border-radius: 4px; }
+.preview-total-row-standalone {
+  font-weight: 700; background: var(--paper-dim); border: 1px solid var(--line);
+  padding: 6px 12px; margin-bottom: 14px; font-size: 13px;
+}
+.preview-photos-divider {
+  font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; color: var(--neutral);
+  text-align: center; text-transform: uppercase; letter-spacing: 0.04em;
+  border-top: 1px dashed var(--line); padding-top: 10px; margin: 6px 0 10px;
+}
+.preview-photo-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }
+.preview-photo-grid .preview-photo-tile { width: auto; }
 
 .empty-state { text-align: center; padding: 60px 20px; color: var(--neutral); }
 .empty-state .display { font-size: 20px; margin-bottom: 8px; color: var(--ink); }

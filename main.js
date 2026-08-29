@@ -13,7 +13,11 @@ const {
 } = require('./lib/referenceData');
 const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom, schoolDayCountBetween } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
-const { exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe, exportExtractedRecipes, exportScaledExtractedRecipe, sanitizeSheetName, DEFAULT_LABELS } = require('./lib/export');
+const {
+  exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe,
+  exportExtractedRecipes, exportScaledExtractedRecipe, sanitizeSheetName, DEFAULT_LABELS,
+  buildRecipeContentModel, buildExtractedRecipeContentModel,
+} = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 const { translateTexts } = require('./lib/translateRecipe');
 
@@ -575,6 +579,18 @@ async function fetchRecipeWithIngredients(id) {
 
 ipcMain.handle('get-recipe', async (e, id) => fetchRecipeWithIngredients(id));
 
+// In-app export preview ("eye" icon on the Recipe Book list row) -- builds the exact same
+// content model buildRecipeSheet itself builds internally (see lib/export.js), but returns it
+// as plain JSON instead of writing to a worksheet, so the renderer can render it as HTML/CSS.
+// Deliberately never translates and never reads DEFAULT_LABELS overrides -- the preview always
+// shows this recipe's original saved English content, regardless of the list screen's own
+// export-language picker (translation only happens on an actual export).
+ipcMain.handle('preview-recipe', async (e, id) => {
+  const full = await fetchRecipeWithIngredients(id);
+  const { ingredients, ...recipe } = full;
+  return buildRecipeContentModel(recipe, ingredients);
+});
+
 // Finds the highest existing TTY-##### number and increments it client-side. Unlike the old
 // synchronous SQLite transaction, this isn't race-proof against two simultaneous saves -- an
 // acceptable tradeoff for a single-user desktop tool without a Postgres sequence/RPC backing it.
@@ -1031,6 +1047,13 @@ async function fetchExtractedRecipeWithIngredients(id) {
 }
 
 ipcMain.handle('get-extracted-recipe', async (e, id) => fetchExtractedRecipeWithIngredients(id));
+
+// Recipe Extractor's counterpart to preview-recipe above -- see its comment.
+ipcMain.handle('preview-extracted-recipe', async (e, id) => {
+  const full = await fetchExtractedRecipeWithIngredients(id);
+  const { processes, photos, ...recipe } = full;
+  return buildExtractedRecipeContentModel({ ...recipe, photos }, processes);
+});
 
 // Mirrors nextRecipeCode above, 'EX-' prefix, own table -- independent counter from TTY-.
 async function nextExtractedRecipeCode() {

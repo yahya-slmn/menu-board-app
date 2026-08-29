@@ -53,6 +53,7 @@
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
+    "jimp": "^0.22.12",
     "ws": "^8.21.2"
   },
   "devDependencies": {

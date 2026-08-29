@@ -65,6 +65,7 @@ const RECIPE_NS = {
       save: (payload) => window.api.saveRecipe(payload),
       del: (id) => window.api.deleteRecipe(id),
       getPhoto: (path) => window.api.getRecipePhoto(path),
+      preview: (id) => window.api.previewRecipe(id),
       exportSelected: (recipeIds, targetLanguage) => window.api.exportRecipes({ recipeIds, targetLanguage }),
       searchIngredients: (q) => window.api.searchIngredients(q),
       addIngredient: (payload) => window.api.addIngredient(payload),
@@ -91,12 +92,23 @@ const RECIPE_NS = {
       save: (payload) => window.api.saveExtractedRecipe(payload),
       del: (id) => window.api.deleteExtractedRecipe(id),
       getPhotos: (paths) => window.api.getExtractedRecipePhotos(paths),
+      preview: (id) => window.api.previewExtractedRecipe(id),
       exportSelected: (recipeIds, targetLanguage) => window.api.exportExtractedRecipes({ recipeIds, targetLanguage }),
       searchIngredients: (q) => window.api.searchExtractedIngredients(q),
       addIngredient: (payload) => window.api.addExtractedIngredient(payload),
     },
   },
 };
+
+// Icons for the Recipe Book/Extractor list rows' "preview export" button -- inline SVGs
+// (Feather icons' eye/eye-off glyphs) rather than emoji, since no icon font/library exists in
+// this app and an emoji eye doesn't render a slash reliably across platforms. stroke="currentColor"
+// so both inherit .icon-btn's own color/hover-color rules with no extra CSS needed. The button
+// shows EYE_OFF (hidden/closed) by default and on row hover; while ITS OWN preview modal is open
+// it swaps to plain EYE (this recipe is actively being viewed), then back to EYE_OFF on close --
+// see openRecipePreviewModal.
+const EYE_OFF_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px;"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+const EYE_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
 
 // Recipe Extractor's "Upload Recipe" multi-file caps -- mirrored independently in main.js's
 // extract-recipe-for-extractor handler and the extract-recipe Edge Function, since this is
@@ -1608,6 +1620,7 @@ async function renderRecipeListView(main, ns) {
                 <td>${r.prepared_by || ''}</td>
                 <td>${r.date_created || ''}</td>
                 <td style="text-align:right">
+                  <button class="icon-btn" data-preview="${r.id}" title="Preview export" aria-label="Preview export">${EYE_OFF_ICON_SVG}</button>
                   <button class="icon-btn" data-edit="${r.id}">Edit</button>
                   <button class="icon-btn danger" data-delete="${r.id}">Delete</button>
                 </td>
@@ -1648,6 +1661,9 @@ async function renderRecipeListView(main, ns) {
     });
     updateMonthCheckboxStates();
 
+    content.querySelectorAll('[data-preview]').forEach(btn => {
+      btn.addEventListener('click', () => openRecipePreviewModal(ns, parseInt(btn.dataset.preview, 10), btn));
+    });
     content.querySelectorAll('[data-edit]').forEach(btn => {
       btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.edit, 10)));
     });
@@ -1701,6 +1717,183 @@ async function renderRecipeListView(main, ns) {
   searchInput.addEventListener('input', renderFiltered);
   updateExportBtn();
   renderFiltered();
+}
+
+// ============================================================
+// In-app export preview ("eye" icon on a Recipe Book/Extractor list row) -- an HTML/CSS
+// approximation of that recipe's Excel export, built from the SAME content model
+// buildRecipeSheet/buildExtractedRecipeSheet themselves build internally (see
+// buildRecipeContentModel/buildExtractedRecipeContentModel in lib/export.js, returned as plain
+// JSON by the preview-recipe/preview-extracted-recipe IPC handlers) -- so numbering, totals, and
+// labels here can never drift from what the real export produces. Deliberately never translates:
+// this always shows the recipe's original saved English content regardless of the list screen's
+// own export-language picker (translation only happens on an actual export). No .xlsx file is
+// written or opened -- this is a pure in-app view.
+function renderPreviewLinesBlock(field) {
+  if (!field || field.lines.length === 0) return '<div class="preview-empty-note">—</div>';
+  if (!field.numbered) return `<p class="preview-text-block">${field.lines[0]}</p>`;
+  return `<ol class="preview-numbered-list">${field.lines.map(l => `<li>${l}</li>`).join('')}</ol>`;
+}
+
+function renderPreviewIngredientsTable(labels, ingredients, totalQuantity, showTotal, noteLabel) {
+  return `
+    <table class="preview-table">
+      <thead><tr><th>${labels.ingredientsHeader}</th><th>${labels.quantityHeader}</th><th>${labels.unitHeader}</th><th>${noteLabel}</th></tr></thead>
+      <tbody>
+        ${ingredients.length ? ingredients.map(ing => `
+          <tr><td>${ing.name}</td><td>${ing.quantity}</td><td>${ing.unit}</td><td>${ing.method}</td></tr>
+        `).join('') : `<tr><td colspan="4" class="preview-empty-note">${labels.noIngredientsPlaceholder}</td></tr>`}
+        ${showTotal ? `<tr class="preview-total-row"><td>${labels.totalQuantity}</td><td>${totalQuantity}</td><td></td><td></td></tr>` : ''}
+      </tbody>
+    </table>
+  `;
+}
+
+// Photo (square box, object-fit:cover approximates Task 1's real crop-to-fill) + Presentation,
+// side by side -- mirrors buildRecipeSheet's/buildExtractedRecipeSheet's own A:B / C:D layout.
+function renderPreviewPhotoBlock(labels, dataUrl, presentationField) {
+  return `
+    <div class="preview-photo-row">
+      <div class="preview-photo-box">${dataUrl ? `<img src="${dataUrl}" alt="" />` : `<span>${labels.photoPlaceholder}</span>`}</div>
+      <div class="preview-presentation">
+        <div class="preview-section-label">${labels.presentationDecorationServing}</div>
+        ${renderPreviewLinesBlock(presentationField)}
+      </div>
+    </div>
+  `;
+}
+
+function renderPreviewCommentRow(labels, model) {
+  return `
+    <div class="preview-fields-grid preview-fields-grid-2col">
+      <div class="preview-field"><span class="preview-field-label">${labels.comment}</span><div>${model.comment}</div></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.checkedBy}</span><div>${model.checkedBy}</div></div>
+    </div>
+  `;
+}
+
+function renderBookPreviewBody(ns, model, photoDataUrl) {
+  const { labels, header } = model;
+  return `
+    <div class="preview-title-row">
+      <div class="preview-title">${header.name}</div>
+      <div class="preview-code">${ns.codeLabel}: ${header.code}</div>
+    </div>
+    <div class="preview-fields-grid">
+      <div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${header.quantityProduced}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.preparedBy}</span><span>${header.preparedBy}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.category}</span><span>${header.category}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.countryOrigin}</span><span>${header.countryOrigin}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.waste}</span><span>${header.wastePercent != null ? header.wastePercent + '%' : ''}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${header.netWeight}</span></div>
+    </div>
+    ${renderPreviewIngredientsTable(labels, model.ingredients, model.totalQuantity, true, labels.methodColumnHeader)}
+    <div class="preview-section">
+      <div class="preview-section-label">${labels.preparationAndCooking}</div>
+      ${renderPreviewLinesBlock(model.preparation)}
+    </div>
+    ${renderPreviewPhotoBlock(labels, photoDataUrl, model.presentation)}
+    ${renderPreviewCommentRow(labels, model)}
+  `;
+}
+
+function renderExtractorPreviewBody(ns, model, photoDataUrls) {
+  const { labels, header } = model;
+  // Mirrors buildExtractedRecipeSheet/buildExtractedRecipePhotosSheet's own branch: 0-1 photos
+  // show the Photo cell inline beside Presentation; 2+ move to a separate "Photos" page with
+  // Presentation shown above the grid instead -- see hasSeparatePhotoSheet's own comment.
+  const photoBlock = model.hasSeparatePhotoSheet
+    ? `
+      <div class="preview-photos-divider">Photos (${model.photoCount}) — separate sheet in the real export</div>
+      <div class="preview-section">
+        <div class="preview-section-label">${labels.presentationDecorationServing}</div>
+        ${renderPreviewLinesBlock(model.presentation)}
+      </div>
+      <div class="preview-photo-grid">
+        ${photoDataUrls.map(src => `<div class="preview-photo-box preview-photo-tile">${src ? `<img src="${src}" alt="" />` : ''}</div>`).join('')}
+      </div>
+    `
+    : renderPreviewPhotoBlock(labels, photoDataUrls[0] || null, model.presentation);
+
+  return `
+    <div class="preview-title-row">
+      <div class="preview-title">${header.name}</div>
+      <div class="preview-code">${ns.codeLabel}: ${header.code}</div>
+    </div>
+    <div class="preview-fields-grid">
+      <div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${header.quantityProduced}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.preparedBy}</span><span>${header.preparedBy}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.category}</span><span>${header.category}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.countryOrigin}</span><span>${header.countryOrigin}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${header.netWeight}</span></div>
+    </div>
+    ${model.processes.map(proc => `
+      <div class="preview-process-card">
+        <div class="preview-section-label">${proc.name}</div>
+        ${proc.ingredients.length ? `
+          ${renderPreviewIngredientsTable(labels, proc.ingredients, proc.totalQuantity, false, labels.noteColumnHeader)}
+          <div class="preview-fields-grid preview-fields-grid-inline">
+            ${proc.quantityProduced ? `<div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${proc.quantityProduced}</span></div>` : ''}
+            <div class="preview-field"><span class="preview-field-label">${labels.totalQuantity}</span><span>${proc.totalQuantity}</span></div>
+            ${proc.wastePercent != null ? `<div class="preview-field"><span class="preview-field-label">${labels.waste}</span><span>${proc.wastePercent}%</span></div>` : ''}
+            <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${proc.netWeight}</span></div>
+          </div>
+        ` : ''}
+        ${proc.method.lines.length ? `
+          <div class="preview-section-sublabel">${labels.methodLabel}</div>
+          ${renderPreviewLinesBlock(proc.method)}
+        ` : ''}
+      </div>
+    `).join('')}
+    <div class="preview-total-row-standalone">${labels.totalQuantity}: ${model.totalQuantity}</div>
+    ${photoBlock}
+    ${renderPreviewCommentRow(labels, model)}
+  `;
+}
+
+async function openRecipePreviewModal(ns, id, triggerBtn) {
+  // Row icon is always visible, but reflects preview state: eye-off (closed) flips to a plain
+  // eye the moment this recipe's preview opens -- it's actively being viewed -- and back to
+  // eye-off once the modal closes, whether by "Close", clicking the backdrop, or a load failure
+  // below aborting before the modal shows.
+  if (triggerBtn) triggerBtn.innerHTML = EYE_ICON_SVG;
+  const revertIcon = () => {
+    if (triggerBtn) triggerBtn.innerHTML = EYE_OFF_ICON_SVG;
+  };
+
+  let model, recipe, photoDataUrl = null, photoDataUrls = [];
+  try {
+    [model, recipe] = await Promise.all([ns.api.preview(id), ns.api.get(id)]);
+    // Photo bytes never go through preview-recipe/preview-extracted-recipe -- the form view
+    // already fetches these same data URLs from Storage via getPhoto/getPhotos, so the preview
+    // just reuses that path directly instead of round-tripping image bytes through a new endpoint.
+    if (ns.extract) {
+      const paths = (recipe.photos || []).map(p => p.photo_path);
+      if (paths.length > 0) photoDataUrls = await ns.api.getPhotos(paths);
+    } else if (recipe.photo_path) {
+      photoDataUrl = await ns.api.getPhoto(recipe.photo_path);
+    }
+  } catch (err) {
+    revertIcon();
+    alert(`Couldn't load preview: ${err.message}`);
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal preview-modal">
+      <div class="preview-modal-head">
+        <h2>Export Preview</h2>
+        <button class="secondary" id="pv-close">Close</button>
+      </div>
+      ${ns.extract ? renderExtractorPreviewBody(ns, model, photoDataUrls) : renderBookPreviewBody(ns, model, photoDataUrl)}
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const closePreview = () => { overlay.remove(); revertIcon(); };
+  overlay.querySelector('#pv-close').addEventListener('click', closePreview);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closePreview(); });
 }
 
 let _recipeRowLocalIdCounter = 0;
