@@ -24,6 +24,11 @@ contextBridge.exposeInMainWorld('api', {
   updateIngredient: (payload) => ipcRenderer.invoke('update-ingredient', payload),
   listIngredients: () => ipcRenderer.invoke('list-ingredients'),
   deleteIngredient: (id) => ipcRenderer.invoke('delete-ingredient', id),
+
+  listWasteTypes: () => ipcRenderer.invoke('list-waste-types'),
+  addWasteType: (payload) => ipcRenderer.invoke('add-waste-type', payload),
+  updateWasteType: (payload) => ipcRenderer.invoke('update-waste-type', payload),
+  deleteWasteType: (id) => ipcRenderer.invoke('delete-waste-type', id),
   listRecipes: () => ipcRenderer.invoke('list-recipes'),
   searchRecipes: (query) => ipcRenderer.invoke('search-recipes', query),
   getRecipe: (id) => ipcRenderer.invoke('get-recipe', id),

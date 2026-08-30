@@ -1482,6 +1482,7 @@ async function renderRecipeListView(main, ns) {
     <div class="topbar">
       <div><h1>${ns.title}</h1><span class="section-pill">${ns.subtitle}</span></div>
       <div style="display:flex; gap:10px; align-items:center;">
+        ${ns.stateKey === RECIPE_NS.book.stateKey ? '<button class="secondary" id="waste-types-btn">Waste Types</button>' : ''}
         ${ns.extract ? '<button class="secondary" id="import-recipe-btn">Upload Recipe</button>' : ''}
         ${ns.allowManualNew ? '<button class="primary" id="new-recipe-btn">+ New Recipe</button>' : ''}
       </div>
@@ -1500,6 +1501,12 @@ async function renderRecipeListView(main, ns) {
     <div id="recipes-content">Loading…</div>
   `;
   wireExportLanguagePicker('list');
+  // Waste Types catalog is global (shared by Book and Extractor process cards alike), but its
+  // one management entry point lives only on Recipe Book's screen -- see conversation notes on
+  // the composable process-waste feature.
+  if (ns.stateKey === RECIPE_NS.book.stateKey) {
+    document.getElementById('waste-types-btn').addEventListener('click', () => openWasteTypesModal());
+  }
   if (ns.allowManualNew) {
     document.getElementById('new-recipe-btn').addEventListener('click', () => ns.openNew());
   }
@@ -1828,7 +1835,7 @@ function renderRecipePreviewBody(ns, model, photoDataUrls) {
           <div class="preview-fields-grid preview-fields-grid-inline">
             ${proc.quantityProduced ? `<div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${proc.quantityProduced}</span></div>` : ''}
             <div class="preview-field"><span class="preview-field-label">${labels.totalQuantity}</span><span>${proc.totalQuantity}</span></div>
-            ${proc.wastePercent != null ? `<div class="preview-field"><span class="preview-field-label">${labels.waste}</span><span>${proc.wastePercent}%</span></div>` : ''}
+            ${(proc.wastes || []).map(w => `<div class="preview-field"><span class="preview-field-label">${w.name}</span><span>${w.percent}%</span></div>`).join('')}
             <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${proc.netWeight}</span></div>
           </div>
         ` : ''}
@@ -1896,22 +1903,27 @@ function makeEmptyIngredientRow() {
   return { localId: ++_recipeRowLocalIdCounter, ingredientId: null, name: '', quantity: '', unit: '', method: '' };
 }
 
-// Each process's own Waste %/Net Weight -- reads/writes that one process card's own elements
-// (ep-total-<id>/ep-waste-<id>/ep-yield-<id>). Returns the computed net weight (a Number) so
-// callers summing across every process don't need to re-read the DOM afterward. Shared by
-// Recipe Book and Recipe Extractor (both process-shaped since the multi-process migration).
+// Each process's own Wastes Applied/Net Weight -- reads/writes that one process card's own
+// elements (ep-total-<id>/ep-yield-<id>). Returns the computed net weight (a Number) so callers
+// summing across every process don't need to re-read the DOM afterward. Shared by Recipe Book
+// and Recipe Extractor (both process-shaped since the multi-process migration). Every selected
+// waste type is compounded sequentially, not summed -- Qty x (1-w1%) x (1-w2%) x ... -- confirmed
+// with the chef; mathematically order-independent (multiplication commutes), so proc.wastes's
+// own order only matters for display. Reads proc.wastes directly (kept live by each waste row's
+// own 'input' listener, see renderProcessWastes) rather than re-querying every input here.
 function updateProcessNetWeight(proc) {
   const totalEl = document.getElementById(`ep-total-${proc.localId}`);
-  const wasteEl = document.getElementById(`ep-waste-${proc.localId}`);
   const yieldEl = document.getElementById(`ep-yield-${proc.localId}`);
-  if (!totalEl || !wasteEl || !yieldEl) return 0;
+  if (!totalEl || !yieldEl) return 0;
 
   const totalQty = sumIngredientQuantities(proc.ingredientRows);
   totalEl.textContent = `Total Quantity: ${roundNice(totalQty)} G`;
 
-  const waste = parseFloat(wasteEl.value);
-  const wastePct = isNaN(waste) ? 0 : Math.min(Math.max(waste, 0), 100);
-  const netWeight = roundNice(totalQty * (1 - wastePct / 100));
+  const netWeight = roundNice((proc.wastes || []).reduce((acc, w) => {
+    const raw = parseFloat(w.percent);
+    const pct = isNaN(raw) ? 0 : Math.min(Math.max(raw, 0), 100);
+    return acc * (1 - pct / 100);
+  }, totalQty));
   yieldEl.value = `${netWeight} G`;
   return netWeight;
 }
@@ -2163,7 +2175,7 @@ function makeEmptyProcess() {
     id: null,
     name: '',
     ingredientRows: [makeEmptyIngredientRow()],
-    wastePercent: null,
+    wastes: [],
     quantityProduced: '',
     methodMode: null, methodText: '', methodItems: [],
   };
@@ -2187,7 +2199,17 @@ function buildProcessFromSaved(proc) {
           method: ri.method || '',
         }))
       : [makeEmptyIngredientRow()],
-    wastePercent: proc.waste_percent ?? null,
+    wastes: (proc.wastes || []).map(w => ({
+      localId: ++_recipeRowLocalIdCounter,
+      wasteTypeId: w.waste_type_id,
+      name: w.name,
+      percent: w.percent,
+      // The value at form-open, to diff against on Save (see saveProcessRecipeForm's
+      // scoped-impact prompt) -- never set on a row added fresh in this session (+ Add
+      // Waste/+ Create new waste type…), which is how that check knows to skip those rows
+      // entirely: a brand-new row has no "existing usage elsewhere" to reach in the first place.
+      originalPercent: w.percent,
+    })),
     quantityProduced: proc.quantity_produced || '',
     methodMode: null, methodText: '', methodItems: [],
   };
@@ -2213,9 +2235,9 @@ function buildProcessFromImported(proc) {
           method: ing.method || '',
         }))
       : [makeEmptyIngredientRow()],
-    wastePercent: null,
-    // Never extracted from the card, same as wastePercent -- a production-planning figure like
-    // "30 trays" isn't something the source recipe card would reliably show; chef-entered only.
+    // Never extracted from the card, same reasoning as quantityProduced below -- a source
+    // recipe card wouldn't reliably show a decomposed waste breakdown; chef-entered only.
+    wastes: [],
     quantityProduced: '',
     methodMode: null, methodText: '', methodItems: [],
   };
@@ -2332,11 +2354,203 @@ function wireProcessIngredientRowDrag(process, tbodyEl, rerender) {
   });
 }
 
+// One process's "Wastes Applied" list -- each row is a catalog waste type snapshotted onto this
+// process (own editable/overridable percent, defaulted from the catalog's default_percent only
+// at the moment it's added, per the composable-waste feature). Re-run after every add/remove
+// (not just once per card render) since the "+ Add Waste" select's own options must exclude
+// whichever waste types are already applied to this specific process. `wasteTypes` is the full
+// catalog, fetched once per form open (see renderRecipeFormView) -- shared by every process card
+// on the form, never re-fetched per process.
+// A row's percent has "changed" only relative to originalPercent (see buildProcessFromSaved/the
+// "+ Add Waste" pick handler below) -- a row with none (added via "+ Create new waste type…")
+// never shows as changed, since it has no existing usage elsewhere for the choice to mean
+// anything against.
+function wasteRowIsChanged(w) {
+  return w.originalPercent != null && parseFloat(w.percent) !== parseFloat(w.originalPercent);
+}
+
+function renderProcessWasteRow(proc, w) {
+  return `
+    <div class="process-waste-row" data-waste="${w.localId}" style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+      <span style="min-width:150px;" dir="auto">${w.name}</span>
+      <input type="number" min="0" max="100" step="0.1" id="ew-waste-${proc.localId}-${w.localId}" value="${w.percent ?? ''}" style="width:80px;" />
+      <span>%</span>
+      <button type="button" class="icon-btn" data-update-waste="${w.localId}" ${wasteRowIsChanged(w) ? '' : 'hidden'}>Update</button>
+      <button type="button" class="icon-btn danger" data-remove-waste="${w.localId}">Remove</button>
+    </div>
+  `;
+}
+
+function renderProcessWastes(proc, wasteTypes, onChange) {
+  const rowsEl = document.getElementById(`ep-wastes-${proc.localId}`);
+  const selectEl = document.querySelector(`[data-add-waste="${proc.localId}"]`);
+  if (!rowsEl || !selectEl) return;
+
+  rowsEl.innerHTML = proc.wastes.length > 0
+    ? proc.wastes.map(w => renderProcessWasteRow(proc, w)).join('')
+    : `<div style="color:var(--neutral); font-size:12.5px;">No wastes applied.</div>`;
+
+  proc.wastes.forEach(w => {
+    const input = document.getElementById(`ew-waste-${proc.localId}-${w.localId}`);
+    const updateBtn = rowsEl.querySelector(`[data-update-waste="${w.localId}"]`);
+    // Freely adjustable (typing, spinner clicks, backspacing) with no prompt at any point here --
+    // only toggles the "Update" button's visibility. The choice modal fires solely on that
+    // button's own click, never automatically off this input.
+    input.addEventListener('input', () => {
+      w.percent = input.value;
+      onChange();
+      updateBtn.hidden = !wasteRowIsChanged(w);
+    });
+    updateBtn.addEventListener('click', () => onWastePercentUpdateClicked(proc, w, wasteTypes, onChange));
+  });
+  rowsEl.querySelectorAll('[data-remove-waste]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const localId = parseInt(btn.dataset.removeWaste, 10);
+      proc.wastes = proc.wastes.filter(w => w.localId !== localId);
+      renderProcessWastes(proc, wasteTypes, onChange);
+      onChange();
+    });
+  });
+
+  // Reassigned (not addEventListener) every render -- selectEl itself persists across a
+  // rows-only refresh, so this avoids stacking duplicate handlers on repeated add/remove.
+  const availableTypes = wasteTypes.filter(wt => !proc.wastes.some(w => w.wasteTypeId === wt.id));
+  selectEl.innerHTML = `<option value="">+ Add Waste…</option>` +
+    availableTypes.map(wt => `<option value="${wt.id}">${wt.name} (${wt.default_percent}%)</option>`).join('') +
+    `<option value="__create__">+ Create new waste type…</option>`;
+  selectEl.value = '';
+  selectEl.onchange = () => {
+    const rawValue = selectEl.value;
+    selectEl.value = ''; // always reset immediately -- both branches below act on the value themselves
+    if (!rawValue) return;
+    if (rawValue === '__create__') {
+      showCreateWasteTypeForm(proc, wasteTypes, onChange);
+      return;
+    }
+    const wasteTypeId = parseInt(rawValue, 10);
+    const wt = wasteTypes.find(w => w.id === wasteTypeId);
+    if (!wt) return;
+    // originalPercent = the catalog default at the moment it was picked -- a freshly-added
+    // EXISTING type has a meaningful "already-saved elsewhere" baseline (the catalog itself, and
+    // potentially other recipes) the instant it's applied, unlike a brand-new type created via
+    // "+ Create new waste type…" (see showCreateWasteTypeForm), which has none yet.
+    proc.wastes.push({ localId: ++_recipeRowLocalIdCounter, wasteTypeId: wt.id, name: wt.name, percent: wt.default_percent, originalPercent: wt.default_percent });
+    renderProcessWastes(proc, wasteTypes, onChange);
+    onChange();
+  };
+}
+
+// Fires ONLY on the row's own "Update" button click -- never automatically off typing or the
+// input losing focus, so she can freely adjust the value (typing, spinner clicks, backspacing,
+// retyping) with no prompt at any point until she deliberately asks for one. Compares against
+// w.originalPercent -- the value this row's percentage carried the moment it last became
+// "current" (loaded from a saved recipe via buildProcessFromSaved, or the catalog's
+// default_percent at the moment an existing type was picked from "+ Add Waste"). A row with no
+// originalPercent (added via "+ Create new waste type…") never shows the button at all -- a
+// brand-new, not-yet-saved-anywhere type has no "already-saved elsewhere" for cascade/
+// default-only to mean anything against.
+async function onWastePercentUpdateClicked(proc, w, wasteTypes, onChange) {
+  const newPct = parseFloat(w.percent);
+  const oldPct = parseFloat(w.originalPercent);
+  if (isNaN(newPct) || newPct === oldPct) return;
+
+  const choice = await openChoiceModal({
+    title: `Update "${w.name}"`,
+    message: `You changed this process's "${w.name}" waste from ${oldPct}% to ${newPct}%.`,
+    options: [
+      { value: 'cascade', label: `Apply ${newPct}% to every recipe process using this waste type, and update the catalog default` },
+      { value: 'default-only', label: `Update the default going forward, and use ${newPct}% here too — other existing recipes stay as they are` },
+      { value: 'this-only', label: 'Apply only to this process — leave the catalog default and every other recipe untouched', default: true },
+    ],
+  });
+
+  if (choice === 'cascade' || choice === 'default-only') {
+    try {
+      await window.api.updateWasteType({ id: w.wasteTypeId, name: w.name, defaultPercent: newPct, cascadeToExisting: choice === 'cascade' });
+    } catch (err) {
+      alert(`Couldn't update "${w.name}": ${err.message}`);
+    }
+  }
+
+  // Every accepted choice (cascade, default-only, this-only) keeps this row's own edited value --
+  // only a Cancel reverts it. What differs between the three is exclusively how far the write
+  // reaches beyond this one row (every other process + catalog / catalog only / nowhere else).
+  if (!choice) {
+    w.percent = w.originalPercent; // cancelled -- revert in place
+  } else {
+    w.originalPercent = newPct; // new baseline for any further edit to this same row
+  }
+  // Either way the Update button must disappear again (the value now matches its new baseline,
+  // whichever way that baseline moved) -- a full re-render is the simplest way to get that right
+  // alongside the reverted-or-kept input value, same as add/remove already do.
+  renderProcessWastes(proc, wasteTypes, onChange);
+  onChange();
+}
+
+// Inline "+ Create new waste type…" form -- lets the chef add a brand-new catalog entry and
+// apply it to this process in one action, without leaving the recipe form or opening the Waste
+// Types modal. Name is matched case-insensitively against the already-loaded catalog before
+// creating anything -- a match reuses that existing type rather than creating a near-duplicate;
+// the waste row that then appears shows the catalog's own canonical name (e.g. typing "baking
+// waste" produces a row reading "Baking Waste"), which doubles as the only surfacing this needs
+// for the quiet-reuse case, no separate notice.
+function showCreateWasteTypeForm(proc, wasteTypes, onChange) {
+  const holder = document.getElementById(`ep-new-waste-${proc.localId}`);
+  if (!holder) return;
+
+  holder.innerHTML = `
+    <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+      <input type="text" class="new-waste-name" placeholder="New waste type name" dir="auto" style="max-width:180px;" />
+      <input type="number" class="new-waste-percent" placeholder="Default %" min="0" max="100" step="0.1" style="width:90px;" />
+      <button type="button" class="primary new-waste-confirm">Add</button>
+      <button type="button" class="secondary new-waste-cancel">Cancel</button>
+    </div>
+  `;
+  const nameInput = holder.querySelector('.new-waste-name');
+  const pctInput = holder.querySelector('.new-waste-percent');
+  nameInput.focus();
+
+  holder.querySelector('.new-waste-cancel').addEventListener('click', () => { holder.innerHTML = ''; });
+
+  holder.querySelector('.new-waste-confirm').addEventListener('click', async () => {
+    const name = nameInput.value.trim();
+    const pct = parseFloat(pctInput.value);
+    if (!name) return alert('Please enter a name for the new waste type.');
+    if (isNaN(pct) || pct < 0 || pct > 100) return alert('Please enter a default % between 0 and 100.');
+
+    let wasteType = wasteTypes.find(wt => wt.name.toLowerCase() === name.toLowerCase());
+    if (!wasteType) {
+      try {
+        wasteType = await window.api.addWasteType({ name, defaultPercent: pct });
+        wasteTypes.push(wasteType);
+      } catch (err) {
+        alert(`Couldn't create "${name}": ${err.message}`);
+        return;
+      }
+    }
+
+    if (proc.wastes.some(w => w.wasteTypeId === wasteType.id)) {
+      alert(`"${wasteType.name}" is already applied to this process.`);
+      return;
+    }
+    // The percentage she just typed is applied here regardless of whether the type was newly
+    // created or reused -- she typed it for this use, it's never assumed to equal the catalog's
+    // own default_percent (which stays untouched either way).
+    proc.wastes.push({ localId: ++_recipeRowLocalIdCounter, wasteTypeId: wasteType.id, name: wasteType.name, percent: pct });
+    holder.innerHTML = '';
+    renderProcessWastes(proc, wasteTypes, onChange);
+    onChange();
+  });
+}
+
 async function renderRecipeFormView(main, ns) {
   const s = state[ns.stateKey];
   const editing = !!s.formId;
   let recipe = null;
   let existingPhotoDataUrl = null; // single-photo model only (Recipe Book)
+  // Fetched once per form open (not per process) -- the same global catalog backs every
+  // process card's "+ Add Waste" control on this form, Book and Extractor alike.
+  const wasteTypes = await window.api.listWasteTypes();
 
   if (editing) {
     recipe = await ns.api.get(s.formId);
@@ -2557,20 +2771,24 @@ async function renderRecipeFormView(main, ns) {
           <tbody class="process-ing-rows"></tbody>
         </table>
         <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
-        <div class="process-calc-row" style="display:flex; gap:16px; align-items:flex-end; margin:0 0 16px;">
+        <div class="process-calc-row" style="display:flex; gap:16px; align-items:flex-end; margin:0 0 16px; flex-wrap:wrap;">
           <div class="field" style="max-width:160px;">
             <label>Quantity Produced</label>
             <input id="ep-qty-${proc.localId}" value="${proc.quantityProduced || ''}" dir="auto" />
           </div>
           <div id="ep-total-${proc.localId}" class="total-qty-display"></div>
-          <div class="field" style="max-width:160px;">
-            <label>Waste %</label>
-            <input id="ep-waste-${proc.localId}" type="number" min="0" max="100" step="0.1" value="${proc.wastePercent ?? ''}" />
-          </div>
           <div class="field" style="max-width:200px;">
             <label>Net Weight (computed)</label>
             <input id="ep-yield-${proc.localId}" readonly />
           </div>
+        </div>
+        <div class="field" style="margin:0 0 16px;">
+          <label>Wastes Applied</label>
+          <div class="process-waste-rows" id="ep-wastes-${proc.localId}"></div>
+          <select class="builder-select process-add-waste-select" data-add-waste="${proc.localId}" style="margin-top:6px; max-width:240px;">
+            <option value="">+ Add Waste…</option>
+          </select>
+          <div id="ep-new-waste-${proc.localId}"></div>
         </div>
         <div class="field" style="margin-bottom:8px;">
           <label>Method</label>
@@ -2619,8 +2837,7 @@ async function renderRecipeFormView(main, ns) {
         renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
       });
 
-      const wasteInput = card.querySelector(`#ep-waste-${proc.localId}`);
-      wasteInput.addEventListener('input', () => { proc.wastePercent = wasteInput.value; updateNetWeightSum(ns); });
+      renderProcessWastes(proc, wasteTypes, () => updateNetWeightSum(ns));
 
       const qtyProducedInput = card.querySelector(`#ep-qty-${proc.localId}`);
       qtyProducedInput.addEventListener('input', () => { proc.quantityProduced = qtyProducedInput.value; });
@@ -2683,7 +2900,10 @@ async function saveProcessRecipeForm(ns) {
     processes: s.processes.map(proc => ({
       name: proc.name.trim(),
       method: collectTextListFieldValue(proc, makeProcessMethodCfg(proc)),
-      wastePercent: proc.wastePercent === '' || proc.wastePercent == null ? null : parseFloat(proc.wastePercent),
+      wastes: proc.wastes.map(w => {
+        const pct = parseFloat(w.percent);
+        return { wasteTypeId: w.wasteTypeId, percent: isNaN(pct) ? 0 : pct };
+      }),
       quantityProduced: (proc.quantityProduced || '').trim() || null,
       ingredients: proc.ingredientRows
         .filter(r => r.name.trim() !== '')
@@ -3263,10 +3483,14 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
     const multiplier = multiplierByProcessId.get(proc.id);
     const scaledIngredients = scaleIngredients(proc.ingredients, multiplier);
     const totalQuantity = sumIngredientQuantities(scaledIngredients);
-    // Waste % itself is never scaled -- it's a percentage, not a quantity, same reasoning
-    // export-scaled-recipe/renderScaledRecipeResult already apply to Book's waste_percent.
-    const wastePct = proc.waste_percent != null ? Math.min(Math.max(parseFloat(proc.waste_percent), 0), 100) : 0;
-    const netWeight = roundNice(totalQuantity * (1 - wastePct / 100));
+    // Waste percents themselves are never scaled -- each is a percentage, not a quantity, same
+    // reasoning export-scaled-recipe/renderScaledRecipeResult already apply elsewhere. Compounded
+    // sequentially against the already-scaled Total Quantity, same formula as
+    // updateProcessNetWeight/computeProcessTotals use live in the form/export.
+    const netWeight = roundNice((proc.wastes || []).reduce((acc, w) => {
+      const pct = w.percent != null ? Math.min(Math.max(parseFloat(w.percent), 0), 100) : 0;
+      return acc * (1 - pct / 100);
+    }, totalQuantity));
     // Each process's own Quantity Produced scales the same way the recipe-level one always has
     // -- it's a genuinely independent production figure (e.g. a sponge baked as "30 trays" has
     // nothing to do with the finished recipe's "10 cakes"), scaled and shown per process
@@ -3337,7 +3561,7 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
             </table>
             <div class="generate-controls" style="border:none; padding:0; margin:10px 0 4px;">
               <div class="field" style="max-width:180px;"><label>Quantity Produced (scaled)</label><div><strong>${proc.scaledQuantityProduced || '—'}</strong></div></div>
-              <div class="field" style="max-width:160px;"><label>Waste %</label><div>${proc.waste_percent != null ? proc.waste_percent + '%' : '—'}</div></div>
+              ${(proc.wastes || []).map(w => `<div class="field" style="max-width:160px;"><label>${w.name}</label><div>${w.percent}%</div></div>`).join('')}
               <div class="field" style="max-width:200px;"><label>Net Weight (scaled)</label><div><strong>${proc.netWeight} G</strong></div></div>
             </div>
             <div class="field" style="margin-top:8px;">
@@ -3390,7 +3614,7 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
         yield_notes: `${combinedNetWeight} G`,
       };
       const exportProcesses = scaledProcesses.map(p => ({
-        name: p.name, method: p.method, waste_percent: p.waste_percent,
+        name: p.name, method: p.method, wastes: p.wastes,
         quantity_produced: p.scaledQuantityProduced, ingredients: p.ingredients,
       }));
       const result = await ns.api.exportScaled({
@@ -3520,6 +3744,209 @@ async function renderIngredientsView(main) {
 
   searchInput.addEventListener('input', renderFiltered);
   renderFiltered();
+}
+
+// Generic small "pick one of N mutually exclusive options" modal -- reuses the exact same
+// overlay/.modal/.actions chrome every other modal in this app already uses (openIngredientModal,
+// openWasteTypesModal below), since a native confirm()/prompt() can't represent more than a
+// binary OK/Cancel and introducing a visually distinct dialog type would be a bigger break from
+// convention than reusing this one with radio options instead of a form. Resolves to the picked
+// option's `value`, or null on Cancel -- callers use `if (!choice) { ... }` the same way existing
+// code already does with `if (!confirm(...)) return;`.
+function openChoiceModal({ title, message, options, confirmLabel }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>${title}</h2>
+        <p style="margin:0 0 14px; color:var(--neutral); font-size:13px;">${message}</p>
+        ${options.map((opt, i) => `
+          <label style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px; cursor:pointer;">
+            <input type="radio" name="choice-modal-option" value="${opt.value}" ${opt.default ? 'checked' : ''} style="margin-top:3px;" />
+            <span>${opt.label}</span>
+          </label>
+        `).join('')}
+        <div class="actions">
+          <button class="secondary" id="cm-cancel">Cancel</button>
+          <button class="primary" id="cm-confirm">${confirmLabel || 'Apply'}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#cm-cancel').addEventListener('click', () => { overlay.remove(); resolve(null); });
+    overlay.querySelector('#cm-confirm').addEventListener('click', () => {
+      const picked = overlay.querySelector('input[name="choice-modal-option"]:checked');
+      overlay.remove();
+      resolve(picked ? picked.value : null);
+    });
+  });
+}
+
+// Waste Types catalog management -- a small, global, chef-managed list (name + default %)
+// shared by every Recipe Book/Extractor process card's "+ Add Waste" control (see
+// renderProcessWastes). Entry point lives only on Recipe Book's screen (see
+// renderRecipeListView), but the catalog itself isn't namespaced to either recipe type.
+// Every row is inline-editable; Delete is immediate (mirrors openIngredientModal's list-screen
+// delete convention, including the same FK-in-use guard). A default-% edit is ALSO immediate --
+// but only once she clicks that row's own "Update" button (see catalogRowIsChanged/
+// onCatalogDefaultPercentUpdateClicked below), never automatically off typing or the field
+// losing focus, so she can freely adjust the value with no prompt until she deliberately asks for
+// one. Name edits and brand-new rows are the only things still batched behind "Save" -- a rename
+// has no scoped-impact decision to make (the name is read live via join everywhere, never
+// snapshotted), so there's nothing to gain by making it immediate too.
+async function openWasteTypesModal() {
+  let types = await window.api.listWasteTypes();
+  let rows = types.map(t => ({ localId: ++_recipeRowLocalIdCounter, id: t.id, name: t.name, defaultPercent: t.default_percent }));
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  document.body.appendChild(overlay);
+
+  // A never-saved new row (no r.id yet) never counts as "changed" -- Save will simply create it
+  // at whatever % she leaves in the field, there's no existing catalog value to diff against yet.
+  function catalogRowIsChanged(r) {
+    if (!r.id) return false;
+    const original = types.find(t => t.id === r.id);
+    return !!original && parseFloat(r.defaultPercent) !== parseFloat(original.default_percent);
+  }
+
+  // Fires ONLY on the row's own "Update" button click -- never automatically off typing or blur.
+  async function onCatalogDefaultPercentUpdateClicked(r) {
+    const original = types.find(t => t.id === r.id);
+    if (!original) return;
+    const newPct = parseFloat(r.defaultPercent);
+    const oldPct = parseFloat(original.default_percent);
+    if (isNaN(newPct) || newPct === oldPct) return;
+
+    const choice = await openChoiceModal({
+      title: `Update "${r.name}"'s default %`,
+      message: `You changed the default % for "${r.name}" from ${oldPct}% to ${newPct}%.`,
+      options: [
+        { value: 'cascade', label: `Apply ${newPct}% to every recipe process already using this waste type, and update the catalog default` },
+        { value: 'default-only', label: 'Just update the catalog default going forward — leave already-saved recipes as they are', default: true },
+      ],
+    });
+
+    if (!choice) {
+      r.defaultPercent = original.default_percent; // revert this field in place
+      render();
+      return;
+    }
+    try {
+      // original.name, not r.name -- a rename in progress in the same row stays deferred to
+      // Save, so an unfinished edit there is never prematurely committed by this field's own
+      // immediate write.
+      await window.api.updateWasteType({ id: r.id, name: original.name, defaultPercent: newPct, cascadeToExisting: choice === 'cascade' });
+      original.default_percent = newPct; // new baseline -- also keeps Save's own diff from re-firing on this
+    } catch (err) {
+      alert(`Couldn't update "${r.name}": ${err.message}`);
+    }
+    render(); // either way the Update button must disappear again
+  }
+
+  function render() {
+    overlay.innerHTML = `
+      <div class="modal">
+        <h2>Waste Types</h2>
+        <table class="items-table">
+          <thead><tr><th>Name</th><th>Default %</th><th></th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr data-row="${r.localId}">
+                <td><input class="wt-name" value="${r.name}" dir="auto" style="width:100%;" /></td>
+                <td style="white-space:nowrap;">
+                  <input class="wt-default" type="number" min="0" max="100" step="0.1" value="${r.defaultPercent ?? ''}" style="width:90px;" />
+                  <button type="button" class="icon-btn" data-update-waste-type="${r.localId}" ${catalogRowIsChanged(r) ? '' : 'hidden'}>Update</button>
+                </td>
+                <td style="text-align:right"><button class="icon-btn danger" data-delete-waste-type="${r.localId}">Delete</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        <button type="button" class="secondary" id="wt-add-btn" style="margin:10px 0 16px;">+ Add Waste Type</button>
+        <div class="actions">
+          <button class="secondary" id="wt-close">Close</button>
+          <button class="primary" id="wt-save">Save</button>
+        </div>
+      </div>
+    `;
+
+    rows.forEach(r => {
+      const tr = overlay.querySelector(`tr[data-row="${r.localId}"]`);
+      tr.querySelector('.wt-name').addEventListener('input', (e) => { r.name = e.target.value; });
+      const defaultInput = tr.querySelector('.wt-default');
+      const updateBtn = tr.querySelector('[data-update-waste-type]');
+      defaultInput.addEventListener('input', (e) => {
+        r.defaultPercent = e.target.value;
+        updateBtn.hidden = !catalogRowIsChanged(r);
+      });
+      updateBtn.addEventListener('click', () => onCatalogDefaultPercentUpdateClicked(r));
+    });
+
+    overlay.querySelectorAll('[data-delete-waste-type]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const localId = parseInt(btn.dataset.deleteWasteType, 10);
+        const row = rows.find(r => r.localId === localId);
+        if (!row.id) {
+          // Never saved -- just drop it locally, nothing to delete server-side.
+          rows = rows.filter(r => r.localId !== localId);
+          render();
+          return;
+        }
+        if (!confirm(`Delete "${row.name}"? This cannot be undone.`)) return;
+        const result = await window.api.deleteWasteType(row.id);
+        if (!result.success) {
+          if (result.inUse) alert(`"${row.name}" is applied to one or more recipe processes and can't be deleted. Remove it from those processes first.`);
+          else alert('Delete failed.');
+          return;
+        }
+        rows = rows.filter(r => r.localId !== localId);
+        render();
+      });
+    });
+
+    overlay.querySelector('#wt-add-btn').addEventListener('click', () => {
+      rows.push({ localId: ++_recipeRowLocalIdCounter, id: null, name: '', defaultPercent: '' });
+      render();
+    });
+
+    overlay.querySelector('#wt-close').addEventListener('click', () => overlay.remove());
+
+    // Percent changes on existing rows are already fully resolved and written immediately (see
+    // onCatalogDefaultPercentUpdateClicked) by the time Save is ever clicked -- this is back to a
+    // plain "persist whatever's currently in the fields" pass, same as before the scoped-impact
+    // choice existed, for new rows and any still-pending name edits.
+    overlay.querySelector('#wt-save').addEventListener('click', async () => {
+      for (const r of rows) {
+        const name = (r.name || '').trim();
+        if (!name) return alert('Every waste type needs a name.');
+        const pct = parseFloat(r.defaultPercent);
+        if (isNaN(pct) || pct < 0 || pct > 100) return alert(`"${name}": please enter a default % between 0 and 100.`);
+      }
+      try {
+        for (const r of rows) {
+          const name = r.name.trim();
+          const defaultPercent = parseFloat(r.defaultPercent);
+          if (!r.id) {
+            await window.api.addWasteType({ name, defaultPercent });
+            continue;
+          }
+          const original = types.find(t => t.id === r.id);
+          if (!original || original.name !== name || original.default_percent !== defaultPercent) {
+            await window.api.updateWasteType({ id: r.id, name, defaultPercent });
+          }
+        }
+        overlay.remove();
+        renderView();
+      } catch (err) {
+        alert(`Save failed: ${err.message}`);
+      }
+    });
+  }
+
+  render();
 }
 
 async function openIngredientModal(existingIngredient) {

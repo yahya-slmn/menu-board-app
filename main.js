@@ -520,6 +520,63 @@ ipcMain.handle('delete-ingredient', async (e, id) => {
   return { success: true };
 });
 
+// Waste Types: a small, chef-managed global catalog (name + default %) shared by Recipe Book
+// and Recipe Extractor process cards alike -- unlike ingredients, a waste type carries no
+// extraction provenance, so there's no separate extracted_* table for it (see conversation
+// notes on the composable process-waste feature).
+ipcMain.handle('list-waste-types', async () => {
+  const { data, error } = await supabase.from('waste_types').select('*').order('sort_order');
+  if (error) throw supaFail('list-waste-types', error);
+  return data;
+});
+
+ipcMain.handle('add-waste-type', async (e, { name, defaultPercent }) => {
+  const { data, error } = await supabase
+    .from('waste_types')
+    .insert({ name: name.trim(), default_percent: defaultPercent })
+    .select('*')
+    .single();
+  if (error) throw supaFail('add-waste-type', error);
+  return data;
+});
+
+// cascadeToExisting mirrors update-item's removeInvalidSectionPortions flag -- never inferred or
+// defaulted true, only set after the renderer has shown the chef an explicit scoped-impact
+// choice and she's picked the option that reaches beyond the catalog default. When set, every
+// recipe_process_wastes/extracted_recipe_process_wastes row already snapshotting this waste type
+// is overwritten to the new percent too, not just waste_types.default_percent. Sequential
+// awaited calls, not a transaction -- same accepted tradeoff persistMenu() documents elsewhere in
+// this app; a failure partway through leaves a recoverable, visible inconsistency rather than a
+// silent one, since supaFail surfaces it immediately.
+ipcMain.handle('update-waste-type', async (e, { id, name, defaultPercent, cascadeToExisting }) => {
+  const { error } = await supabase
+    .from('waste_types')
+    .update({ name: name.trim(), default_percent: defaultPercent })
+    .eq('id', id);
+  if (error) throw supaFail('update-waste-type', error);
+
+  if (cascadeToExisting) {
+    const { error: rErr } = await supabase.from('recipe_process_wastes').update({ percent: defaultPercent }).eq('waste_type_id', id);
+    if (rErr) throw supaFail('update-waste-type: cascade recipe_process_wastes', rErr);
+    const { error: eErr } = await supabase.from('extracted_recipe_process_wastes').update({ percent: defaultPercent }).eq('waste_type_id', id);
+    if (eErr) throw supaFail('update-waste-type: cascade extracted_recipe_process_wastes', eErr);
+  }
+
+  return { success: true };
+});
+
+// recipe_process_wastes/extracted_recipe_process_wastes.waste_type_id is ON DELETE RESTRICT
+// (not CASCADE) -- a waste type still applied to any process can't be deleted out from under
+// that process's saved percentage, same 23503-catching convention as delete-ingredient above.
+ipcMain.handle('delete-waste-type', async (e, id) => {
+  const { error } = await supabase.from('waste_types').delete().eq('id', id);
+  if (error) {
+    if (error.code === '23503') return { success: false, inUse: true };
+    throw supaFail('delete-waste-type', error);
+  }
+  return { success: true };
+});
+
 ipcMain.handle('list-recipes', async () => {
   const { data, error } = await supabase
     .from('recipes')
@@ -557,13 +614,14 @@ async function fetchRecipeWithProcesses(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('recipe_processes')
-    .select('id, name, method, waste_percent, quantity_produced, sort_order')
+    .select('id, name, method, quantity_produced, sort_order')
     .eq('recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchRecipeWithProcesses: load recipe_processes', procErr);
 
   const processIds = processRows.map(p => p.id);
   let ingredientRows = [];
+  let wasteRows = [];
   if (processIds.length) {
     const { data, error: riErr } = await supabase
       .from('recipe_ingredients')
@@ -572,6 +630,14 @@ async function fetchRecipeWithProcesses(id) {
       .order('sort_order');
     if (riErr) throw supaFail('fetchRecipeWithProcesses: load recipe_ingredients', riErr);
     ingredientRows = data;
+
+    const { data: wasteData, error: wasteErr } = await supabase
+      .from('recipe_process_wastes')
+      .select('id, process_id, waste_type_id, percent, sort_order')
+      .in('process_id', processIds)
+      .order('sort_order');
+    if (wasteErr) throw supaFail('fetchRecipeWithProcesses: load recipe_process_wastes', wasteErr);
+    wasteRows = wasteData;
   }
 
   const ingredientIds = [...new Set(ingredientRows.map(r => r.ingredient_id))];
@@ -581,6 +647,18 @@ async function fetchRecipeWithProcesses(id) {
       .from('ingredients').select('id, name, default_unit').in('id', ingredientIds);
     if (ingErr) throw supaFail('fetchRecipeWithProcesses: load ingredients', ingErr);
     ingredientById = new Map(ingredientsData.map(i => [i.id, i]));
+  }
+
+  // Two-step join against waste_types (name only, never embedded via PostgREST) -- same
+  // manual-Map convention ingredientById above uses, not a relationship this file relies on
+  // Supabase to resolve for it.
+  const wasteTypeIds = [...new Set(wasteRows.map(r => r.waste_type_id))];
+  let wasteTypeById = new Map();
+  if (wasteTypeIds.length) {
+    const { data: wasteTypesData, error: wtErr } = await supabase
+      .from('waste_types').select('id, name').in('id', wasteTypeIds);
+    if (wtErr) throw supaFail('fetchRecipeWithProcesses: load waste_types', wtErr);
+    wasteTypeById = new Map(wasteTypesData.map(w => [w.id, w]));
   }
 
   const ingredientsByProcess = new Map();
@@ -599,14 +677,27 @@ async function fetchRecipeWithProcesses(id) {
     ingredientsByProcess.get(ri.process_id).push(ingredient);
   }
 
+  const wastesByProcess = new Map();
+  for (const rw of wasteRows) {
+    const waste = {
+      id: rw.id,
+      waste_type_id: rw.waste_type_id,
+      name: wasteTypeById.get(rw.waste_type_id)?.name,
+      percent: rw.percent,
+      sort_order: rw.sort_order,
+    };
+    if (!wastesByProcess.has(rw.process_id)) wastesByProcess.set(rw.process_id, []);
+    wastesByProcess.get(rw.process_id).push(waste);
+  }
+
   const processes = processRows.map(p => ({
     id: p.id,
     name: p.name,
     method: p.method,
-    waste_percent: p.waste_percent,
     quantity_produced: p.quantity_produced,
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
+    wastes: wastesByProcess.get(p.id) || [],
   }));
 
   return { ...recipe, processes };
@@ -756,7 +847,6 @@ ipcMain.handle('save-recipe', async (e, payload) => {
         recipe_id: recipeId,
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
-        waste_percent: proc.wastePercent ?? null,
         quantity_produced: proc.quantityProduced || null,
         sort_order: idx,
       })
@@ -767,6 +857,7 @@ ipcMain.handle('save-recipe', async (e, payload) => {
   }
 
   const ingredientRows = [];
+  const wasteRows = [];
   for (let pIdx = 0; pIdx < rawProcesses.length; pIdx++) {
     const procIngredients = rawProcesses[pIdx].ingredients || [];
     for (let idx = 0; idx < procIngredients.length; idx++) {
@@ -781,10 +872,25 @@ ipcMain.handle('save-recipe', async (e, payload) => {
         sort_order: idx,
       });
     }
+    const procWastes = rawProcesses[pIdx].wastes || [];
+    for (let idx = 0; idx < procWastes.length; idx++) {
+      const w = procWastes[idx];
+      if (!w.wasteTypeId) continue;
+      wasteRows.push({
+        process_id: insertedProcessIds[pIdx],
+        waste_type_id: w.wasteTypeId,
+        percent: w.percent ?? 0,
+        sort_order: idx,
+      });
+    }
   }
   if (ingredientRows.length) {
     const { error: insIngErr } = await supabase.from('recipe_ingredients').insert(ingredientRows);
     if (insIngErr) throw supaFail('save-recipe: insert recipe_ingredients', insIngErr);
+  }
+  if (wasteRows.length) {
+    const { error: insWasteErr } = await supabase.from('recipe_process_wastes').insert(wasteRows);
+    if (insWasteErr) throw supaFail('save-recipe: insert recipe_process_wastes', insWasteErr);
   }
 
   return { id: recipeId, code };
@@ -835,6 +941,10 @@ async function translateForRecipeExport(targetLanguage, recipe, processes) {
     ...processes.flatMap(proc => [
       proc.name || '', proc.method || '',
       ...(proc.ingredients || []).flatMap(ing => [ing.ingredient_name || '', ing.method || '']),
+      // Waste type names are chef-entered catalog labels (e.g. "Baking Waste"), same kind of
+      // free text as a process/ingredient name -- translated the same way, not treated as a
+      // fixed template label.
+      ...(proc.wastes || []).map(w => w.name || ''),
     ]),
   ];
   const translated = await translateTexts({ targetLanguage, texts });
@@ -852,6 +962,7 @@ async function translateForRecipeExport(targetLanguage, recipe, processes) {
     ingredients: (proc.ingredients || []).map(ing => ({
       ...ing, ingredient_name: translated[idx++], method: translated[idx++],
     })),
+    wastes: (proc.wastes || []).map(w => ({ ...w, name: translated[idx++] })),
   }));
   return { recipe: translatedRecipe, processes: translatedProcesses, labels, targetLanguage };
 }
@@ -1042,13 +1153,14 @@ async function fetchExtractedRecipeWithIngredients(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('extracted_recipe_processes')
-    .select('id, name, method, waste_percent, quantity_produced, sort_order')
+    .select('id, name, method, quantity_produced, sort_order')
     .eq('extracted_recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_processes', procErr);
 
   const processIds = processRows.map(p => p.id);
   let ingredientRows = [];
+  let wasteRows = [];
   if (processIds.length) {
     const { data, error: riErr } = await supabase
       .from('extracted_recipe_ingredients')
@@ -1057,6 +1169,14 @@ async function fetchExtractedRecipeWithIngredients(id) {
       .order('sort_order');
     if (riErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_ingredients', riErr);
     ingredientRows = data;
+
+    const { data: wasteData, error: wasteErr } = await supabase
+      .from('extracted_recipe_process_wastes')
+      .select('id, process_id, waste_type_id, percent, sort_order')
+      .in('process_id', processIds)
+      .order('sort_order');
+    if (wasteErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_process_wastes', wasteErr);
+    wasteRows = wasteData;
   }
 
   const ingredientIds = [...new Set(ingredientRows.map(r => r.extracted_ingredient_id))];
@@ -1066,6 +1186,15 @@ async function fetchExtractedRecipeWithIngredients(id) {
       .from('extracted_ingredients').select('id, name, default_unit').in('id', ingredientIds);
     if (ingErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_ingredients', ingErr);
     ingredientById = new Map(ingredientsData.map(i => [i.id, i]));
+  }
+
+  const wasteTypeIds = [...new Set(wasteRows.map(r => r.waste_type_id))];
+  let wasteTypeById = new Map();
+  if (wasteTypeIds.length) {
+    const { data: wasteTypesData, error: wtErr } = await supabase
+      .from('waste_types').select('id, name').in('id', wasteTypeIds);
+    if (wtErr) throw supaFail('fetchExtractedRecipeWithIngredients: load waste_types', wtErr);
+    wasteTypeById = new Map(wasteTypesData.map(w => [w.id, w]));
   }
 
   const ingredientsByProcess = new Map();
@@ -1084,14 +1213,27 @@ async function fetchExtractedRecipeWithIngredients(id) {
     ingredientsByProcess.get(ri.extracted_recipe_process_id).push(ingredient);
   }
 
+  const wastesByProcess = new Map();
+  for (const rw of wasteRows) {
+    const waste = {
+      id: rw.id,
+      waste_type_id: rw.waste_type_id,
+      name: wasteTypeById.get(rw.waste_type_id)?.name,
+      percent: rw.percent,
+      sort_order: rw.sort_order,
+    };
+    if (!wastesByProcess.has(rw.process_id)) wastesByProcess.set(rw.process_id, []);
+    wastesByProcess.get(rw.process_id).push(waste);
+  }
+
   const processes = processRows.map(p => ({
     id: p.id,
     name: p.name,
     method: p.method,
-    waste_percent: p.waste_percent,
     quantity_produced: p.quantity_produced,
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
+    wastes: wastesByProcess.get(p.id) || [],
   }));
 
   const { data: photoRows, error: photoErr } = await supabase
@@ -1264,7 +1406,6 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
         extracted_recipe_id: recipeId,
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
-        waste_percent: proc.wastePercent ?? null,
         quantity_produced: proc.quantityProduced || null,
         sort_order: idx,
       })
@@ -1275,6 +1416,7 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
   }
 
   const ingredientRows = [];
+  const wasteRows = [];
   for (let pIdx = 0; pIdx < rawProcesses.length; pIdx++) {
     const procIngredients = rawProcesses[pIdx].ingredients || [];
     for (let idx = 0; idx < procIngredients.length; idx++) {
@@ -1291,10 +1433,25 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
         sort_order: idx,
       });
     }
+    const procWastes = rawProcesses[pIdx].wastes || [];
+    for (let idx = 0; idx < procWastes.length; idx++) {
+      const w = procWastes[idx];
+      if (!w.wasteTypeId) continue;
+      wasteRows.push({
+        process_id: insertedProcessIds[pIdx],
+        waste_type_id: w.wasteTypeId,
+        percent: w.percent ?? 0,
+        sort_order: idx,
+      });
+    }
   }
   if (ingredientRows.length) {
     const { error: insIngErr } = await supabase.from('extracted_recipe_ingredients').insert(ingredientRows);
     if (insIngErr) throw supaFail('save-extracted-recipe: insert extracted_recipe_ingredients', insIngErr);
+  }
+  if (wasteRows.length) {
+    const { error: insWasteErr } = await supabase.from('extracted_recipe_process_wastes').insert(wasteRows);
+    if (insWasteErr) throw supaFail('save-extracted-recipe: insert extracted_recipe_process_wastes', insWasteErr);
   }
 
   // Photos: same clear-and-reinsert convention as processes above, except each row also has a
