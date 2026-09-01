@@ -1833,7 +1833,6 @@ function renderRecipePreviewBody(ns, model, photoDataUrls) {
         ${proc.ingredients.length ? `
           ${renderPreviewIngredientsTable(labels, proc.ingredients, proc.totalQuantity, false, labels.noteColumnHeader)}
           <div class="preview-fields-grid preview-fields-grid-inline">
-            ${proc.quantityProduced ? `<div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${proc.quantityProduced}</span></div>` : ''}
             <div class="preview-field"><span class="preview-field-label">${labels.totalQuantity}</span><span>${proc.totalQuantity}</span></div>
             ${(proc.wastes || []).map(w => `<div class="preview-field"><span class="preview-field-label">${w.name}</span><span>${w.percent}%</span></div>`).join('')}
             <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${proc.netWeight}</span></div>
@@ -2176,7 +2175,6 @@ function makeEmptyProcess() {
     name: '',
     ingredientRows: [makeEmptyIngredientRow()],
     wastes: [],
-    quantityProduced: '',
     methodMode: null, methodText: '', methodItems: [],
   };
   initTextListField(proc, makeProcessMethodCfg(proc), '');
@@ -2210,7 +2208,6 @@ function buildProcessFromSaved(proc) {
       // entirely: a brand-new row has no "existing usage elsewhere" to reach in the first place.
       originalPercent: w.percent,
     })),
-    quantityProduced: proc.quantity_produced || '',
     methodMode: null, methodText: '', methodItems: [],
   };
   initTextListField(built, makeProcessMethodCfg(built), proc.method);
@@ -2235,10 +2232,9 @@ function buildProcessFromImported(proc) {
           method: ing.method || '',
         }))
       : [makeEmptyIngredientRow()],
-    // Never extracted from the card, same reasoning as quantityProduced below -- a source
-    // recipe card wouldn't reliably show a decomposed waste breakdown; chef-entered only.
+    // Never extracted from the card -- a source recipe card wouldn't reliably show a
+    // decomposed waste breakdown; chef-entered only.
     wastes: [],
-    quantityProduced: '',
     methodMode: null, methodText: '', methodItems: [],
   };
   initTextListField(built, makeProcessMethodCfg(built), proc.method);
@@ -2772,15 +2768,7 @@ async function renderRecipeFormView(main, ns) {
         </table>
         <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
         <div class="process-calc-row" style="display:flex; gap:16px; align-items:flex-end; margin:0 0 16px; flex-wrap:wrap;">
-          <div class="field" style="max-width:160px;">
-            <label>Quantity Produced</label>
-            <input id="ep-qty-${proc.localId}" value="${proc.quantityProduced || ''}" dir="auto" />
-          </div>
           <div id="ep-total-${proc.localId}" class="total-qty-display"></div>
-          <div class="field" style="max-width:200px;">
-            <label>Net Weight (computed)</label>
-            <input id="ep-yield-${proc.localId}" readonly />
-          </div>
         </div>
         <div class="field" style="margin:0 0 16px;">
           <label>Wastes Applied</label>
@@ -2789,6 +2777,10 @@ async function renderRecipeFormView(main, ns) {
             <option value="">+ Add Waste…</option>
           </select>
           <div id="ep-new-waste-${proc.localId}"></div>
+        </div>
+        <div class="field" style="max-width:200px; margin:0 0 16px;">
+          <label>Net Weight (computed)</label>
+          <input id="ep-yield-${proc.localId}" readonly />
         </div>
         <div class="field" style="margin-bottom:8px;">
           <label>Method</label>
@@ -2838,9 +2830,6 @@ async function renderRecipeFormView(main, ns) {
       });
 
       renderProcessWastes(proc, wasteTypes, () => updateNetWeightSum(ns));
-
-      const qtyProducedInput = card.querySelector(`#ep-qty-${proc.localId}`);
-      qtyProducedInput.addEventListener('input', () => { proc.quantityProduced = qtyProducedInput.value; });
 
       renderTextListFieldBody(proc, makeProcessMethodCfg(proc));
     });
@@ -2904,7 +2893,6 @@ async function saveProcessRecipeForm(ns) {
         const pct = parseFloat(w.percent);
         return { wasteTypeId: w.wasteTypeId, percent: isNaN(pct) ? 0 : pct };
       }),
-      quantityProduced: (proc.quantityProduced || '').trim() || null,
       ingredients: proc.ingredientRows
         .filter(r => r.name.trim() !== '')
         .map(r => ({
@@ -3143,16 +3131,6 @@ function renderCalculatorView(main) {
     return procs.filter(p => String(p.id) === String(processSelection));
   }
 
-  // Quantity Produced's source: "All Processes", or a genuinely single-process recipe (nothing
-  // else to pick) uses the recipe-level field -- a specifically-selected process's own field
-  // otherwise, since it can describe a completely independent production context (see
-  // renderScaledRecipeResult, which detects this the same structural way).
-  function quantityProducedSource() {
-    const scaled = processesToScale();
-    if (scaled.length === 1 && allProcesses().length > 1) return scaled[0].quantity_produced || '';
-    return selectedFullRecipe?.quantity_produced || '';
-  }
-
   function populateProcessSelect() {
     const procs = allProcesses();
     if (procs.length <= 1) {
@@ -3184,20 +3162,17 @@ function renderCalculatorView(main) {
     perProcessControlsEl.innerHTML = '';
   }
 
-  // "Quantity Produced (original)" shows a free-text serving/container count in Multiply-by-
-  // factor mode (what it's always meant) -- source picked by quantityProducedSource() above
-  // (recipe-level, or a specifically-selected process's own). In Scale-to-target mode that field
-  // isn't what the target is measured against -- so it switches to showing the actual basis (the
+  // "Quantity Produced (original)" shows the recipe-level free-text serving/container count in
+  // Multiply-by-factor mode (what it's always meant). In Scale-to-target mode that field isn't
+  // what the target is measured against -- so it switches to showing the actual basis (the
   // current scaling pool's total ingredient quantity), with the label swapped to match. Only
   // meaningful for the single-control case -- see updateScalingControlsVisibility, which is what
   // actually decides whether this or the per-process cards show.
   function updateQtyOriginalDisplay() {
     if (!selectedFullRecipe) return;
     if (scalingMode === 'factor') {
-      const scaled = processesToScale();
-      const isProcessLevel = scaled.length === 1 && allProcesses().length > 1;
-      qtyOriginalLabel.textContent = isProcessLevel ? 'Quantity Produced (process, original)' : 'Quantity Produced (original)';
-      qtyOriginalInput.value = quantityProducedSource();
+      qtyOriginalLabel.textContent = 'Quantity Produced (original)';
+      qtyOriginalInput.value = selectedFullRecipe?.quantity_produced || '';
     } else {
       qtyOriginalLabel.textContent = 'Total Ingredient Quantity (original)';
       qtyOriginalInput.value = `${sumIngredientQuantities(selectedIngredients || [])}g`;
@@ -3233,10 +3208,6 @@ function renderCalculatorView(main) {
       <div class="process-card" data-scale-process="${proc.id}" style="margin-bottom:10px;">
         <div class="process-card-head"><strong>${proc.name}</strong></div>
         <div class="generate-controls" style="border:none; padding:0; margin:10px 0 0; gap:14px;">
-          <div class="field" style="max-width:200px;">
-            <label>Quantity Produced (original)</label>
-            <input value="${proc.quantity_produced || ''}" disabled />
-          </div>
           <div class="field" style="max-width:240px;">
             <label>Scaling Mode</label>
             <div class="mode-toggle">
@@ -3491,36 +3462,20 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
       const pct = w.percent != null ? Math.min(Math.max(parseFloat(w.percent), 0), 100) : 0;
       return acc * (1 - pct / 100);
     }, totalQuantity));
-    // Each process's own Quantity Produced scales the same way the recipe-level one always has
-    // -- it's a genuinely independent production figure (e.g. a sponge baked as "30 trays" has
-    // nothing to do with the finished recipe's "10 cakes"), scaled and shown per process
-    // regardless of which selection mode is active (see quantityProducedSource below for the
-    // *summary* row, which switches source instead of showing both).
-    const scaledQuantityProduced = scaleQuantityProducedText(proc.quantity_produced, multiplier);
-    return { ...proc, ingredients: scaledIngredients, totalQuantity, netWeight, scaledQuantityProduced, multiplier };
+    return { ...proc, ingredients: scaledIngredients, totalQuantity, netWeight, multiplier };
   });
 
   // Recipe-level Net Weight is the sum of every shown process's own scaled, waste-adjusted net
   // weight -- same convention updateNetWeightSum uses live in the form.
   const combinedNetWeight = roundNice(scaledProcesses.reduce((sum, p) => sum + p.netWeight, 0));
 
-  // "All Processes" (or a single-process recipe, where there's nothing else to pick) uses the
-  // recipe-level Quantity Produced -- the finished dish's overall yield. Scaling one specific
-  // process out of several uses THAT process's own instead, since they can describe unrelated
-  // production contexts. Detected structurally (exactly one process was handed in, out of a
-  // recipe that actually has more than one) rather than from separate UI state, so this can't
-  // drift out of sync with what processesToScale() actually resolved.
-  const isSingleProcessSelection = processes.length === 1 && (recipe.processes || []).length > 1;
   // 2+ processes scaled together with (possibly) different multipliers each -- there's no
   // longer one coherent scale factor for the recipe-level Quantity Produced to apply, so it's
-  // shown unscaled, for context only. Each process's own scaled Quantity Produced still shows on
-  // its own card below regardless.
+  // shown unscaled, for context only.
   const isMultiProcessScaling = processes.length > 1;
-  const quantityProducedLabel = isSingleProcessSelection ? 'process' : 'recipe';
-  const quantityProducedOriginal = isSingleProcessSelection ? processes[0].quantity_produced : recipe.quantity_produced;
   const quantityProducedScaled = isMultiProcessScaling
     ? null
-    : (isSingleProcessSelection ? scaledProcesses[0].scaledQuantityProduced : scaleQuantityProducedText(recipe.quantity_produced, scaledProcesses[0].multiplier));
+    : scaleQuantityProducedText(recipe.quantity_produced, scaledProcesses[0].multiplier);
 
   container.innerHTML = `
     <div class="day-card">
@@ -3529,8 +3484,8 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
       </div>
       <div style="padding:16px 18px;">
         <div class="generate-controls" style="border:none; padding:0; margin-bottom:18px;">
-          <div class="field"><label>Quantity Produced (${quantityProducedLabel}, original)</label><div>${quantityProducedOriginal || '—'}</div></div>
-          <div class="field"><label>Quantity Produced (${quantityProducedLabel}, scaled)</label><div><strong>${quantityProducedScaled || (isMultiProcessScaling ? 'Scaled independently per process' : '—')}</strong></div></div>
+          <div class="field"><label>Quantity Produced (original)</label><div>${recipe.quantity_produced || '—'}</div></div>
+          <div class="field"><label>Quantity Produced (scaled)</label><div><strong>${quantityProducedScaled || (isMultiProcessScaling ? 'Scaled independently per process' : '—')}</strong></div></div>
           <div class="field"><label>Prepared By</label><div>${recipe.prepared_by || '—'}</div></div>
           <div class="field"><label>Category</label><div>${recipe.category || '—'}</div></div>
           <div class="field"><label>Country/Origin</label><div>${recipe.country_origin || '—'}</div></div>
@@ -3560,7 +3515,6 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
               </tbody>
             </table>
             <div class="generate-controls" style="border:none; padding:0; margin:10px 0 4px;">
-              <div class="field" style="max-width:180px;"><label>Quantity Produced (scaled)</label><div><strong>${proc.scaledQuantityProduced || '—'}</strong></div></div>
               ${(proc.wastes || []).map(w => `<div class="field" style="max-width:160px;"><label>${w.name}</label><div>${w.percent}%</div></div>`).join('')}
               <div class="field" style="max-width:200px;"><label>Net Weight (scaled)</label><div><strong>${proc.netWeight} G</strong></div></div>
             </div>
@@ -3607,15 +3561,12 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
       const exportRecipe = {
         ...recipeFields,
         // Falls back to the original, unscaled recipe-level quantity when processes were scaled
-        // independently (quantityProducedScaled is null in that case, see above) -- each
-        // process's own scaled Quantity Produced is still exported correctly via exportProcesses
-        // below regardless.
+        // independently (quantityProducedScaled is null in that case, see above).
         quantity_produced: quantityProducedScaled || recipe.quantity_produced,
         yield_notes: `${combinedNetWeight} G`,
       };
       const exportProcesses = scaledProcesses.map(p => ({
-        name: p.name, method: p.method, wastes: p.wastes,
-        quantity_produced: p.scaledQuantityProduced, ingredients: p.ingredients,
+        name: p.name, method: p.method, wastes: p.wastes, ingredients: p.ingredients,
       }));
       const result = await ns.api.exportScaled({
         recipeId, recipe: exportRecipe, processes: exportProcesses, targetLanguage: getSelectedExportLanguage('calc'),

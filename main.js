@@ -614,7 +614,7 @@ async function fetchRecipeWithProcesses(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('recipe_processes')
-    .select('id, name, method, quantity_produced, sort_order')
+    .select('id, name, method, sort_order')
     .eq('recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchRecipeWithProcesses: load recipe_processes', procErr);
@@ -694,7 +694,6 @@ async function fetchRecipeWithProcesses(id) {
     id: p.id,
     name: p.name,
     method: p.method,
-    quantity_produced: p.quantity_produced,
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
     wastes: wastesByProcess.get(p.id) || [],
@@ -847,7 +846,6 @@ ipcMain.handle('save-recipe', async (e, payload) => {
         recipe_id: recipeId,
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
-        quantity_produced: proc.quantityProduced || null,
         sort_order: idx,
       })
       .select('id')
@@ -1153,7 +1151,7 @@ async function fetchExtractedRecipeWithIngredients(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('extracted_recipe_processes')
-    .select('id, name, method, quantity_produced, sort_order')
+    .select('id, name, method, sort_order')
     .eq('extracted_recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_processes', procErr);
@@ -1230,7 +1228,6 @@ async function fetchExtractedRecipeWithIngredients(id) {
     id: p.id,
     name: p.name,
     method: p.method,
-    quantity_produced: p.quantity_produced,
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
     wastes: wastesByProcess.get(p.id) || [],
@@ -1406,7 +1403,6 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
         extracted_recipe_id: recipeId,
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
-        quantity_produced: proc.quantityProduced || null,
         sort_order: idx,
       })
       .select('id')
