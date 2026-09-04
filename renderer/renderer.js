@@ -38,6 +38,14 @@ const state = {
     // cleared) the moment renderRecipeFormView reads it -- see its non-editing branch.
     importedRecipe: null,
   },
+  // Materials/Trays catalog -- same list<->form drill-down shape as recipes/extractor above
+  // (view/formId), single-photo model like Recipe Book (pendingPhoto/removePhoto). shapeType and
+  // the dimension fields aren't persisted here separately from the form's own inputs -- they're
+  // read directly off the form DOM at save time, same convention every other simple text field
+  // in the recipe form already uses (see renderMaterialFormView) -- this object only needs to
+  // exist at all for view/formId/pendingPhoto/removePhoto, the same three things every other
+  // list<->form screen's own state slice needs.
+  materials: { view: 'list', formId: null, pendingPhoto: null, removePhoto: false },
 };
 
 // Recipe Book and Recipe Extractor are two fully separate tables (see CLAUDE.md-equivalent
@@ -299,6 +307,7 @@ function wireNav() {
       } else if (btn.dataset.view === 'items') {
         state.itemCatalogExpanded = true;
       }
+      if (btn.dataset.view !== state.currentView) resetDrilldownScreens();
       state.currentView = btn.dataset.view;
       renderView();
     });
@@ -311,6 +320,7 @@ function wireNav() {
     if (MENU_GROUP_VIEWS.includes(state.currentView)) {
       state.menuGroupExpanded = !state.menuGroupExpanded;
     } else {
+      resetDrilldownScreens();
       state.menuGroupExpanded = true;
       state.currentView = 'generate';
     }
@@ -352,6 +362,7 @@ function renderView() {
   if (state.currentView === 'calculator') return renderCalculatorView(main);
   if (state.currentView === 'ingredients') return renderIngredientsView(main);
   if (state.currentView === 'extractedIngredients') return renderExtractedIngredientsView(main);
+  if (state.currentView === 'materials') return renderMaterialsView(main);
 }
 
 function currentSectionName() {
@@ -1435,6 +1446,28 @@ function resetRecipeFormState(ns) {
   }
 }
 
+// Recipe Book, Recipe Extractor, and Materials are the only screens with a persistent list<->form
+// sub-state (state.recipes.view/state.extractor.view/state.materials.view) -- every other screen
+// re-renders fresh from fetched data on each visit, so there's nothing to reset there. Called by
+// wireNav whenever she actually navigates to a DIFFERENT top-level view (never when re-clicking
+// the one she's already on), so an open form never silently resumes just because she clicked away
+// and back -- same "leave without saving discards it" behavior every other unsaved-edit screen in
+// this app already has, no separate warning. Loops over RECIPE_NS generically so a future fourth
+// screen with this same list/form pattern (built the RECIPE_NS way) is covered automatically;
+// Materials is reset separately below since it isn't RECIPE_NS-shaped (no ns.stateKey/api
+// namespace object -- just one plain catalog, like Ingredients).
+function resetDrilldownScreens() {
+  Object.values(RECIPE_NS).forEach(ns => {
+    state[ns.stateKey].view = 'list';
+    state[ns.stateKey].formId = null;
+    resetRecipeFormState(ns);
+  });
+  state.materials.view = 'list';
+  state.materials.formId = null;
+  state.materials.pendingPhoto = null;
+  state.materials.removePhoto = false;
+}
+
 function openNewRecipeForm(ns) {
   state[ns.stateKey].view = 'form';
   state[ns.stateKey].formId = null;
@@ -1637,9 +1670,9 @@ async function renderRecipeListView(main, ns) {
                 <td><input type="checkbox" class="recipe-row-check" data-select="${r.id}" data-month="${group.key}" ${selected.has(r.id) ? 'checked' : ''} /></td>
                 <td>${r.code}</td>
                 <td>${r.name}</td>
-                <td>${r.category || ''}</td>
-                <td>${r.prepared_by || ''}</td>
-                <td>${r.date_created || ''}</td>
+                <td>${r.category || '–'}</td>
+                <td>${r.prepared_by || '–'}</td>
+                <td>${r.date_created || '–'}</td>
                 <td style="text-align:right">
                   <button class="icon-btn" data-preview="${r.id}" title="Preview export" aria-label="Preview export">${EYE_OFF_ICON_SVG}</button>
                   <button class="icon-btn" data-edit="${r.id}">Edit</button>
@@ -1822,10 +1855,12 @@ function renderRecipePreviewBody(ns, model, photoDataUrls) {
     </div>
     <div class="preview-fields-grid">
       <div class="preview-field"><span class="preview-field-label">${labels.quantityProduced}</span><span>${header.quantityProduced}</span></div>
+      <div class="preview-field"><span class="preview-field-label">${labels.portionWeight}</span><span>${header.portionWeight}</span></div>
       <div class="preview-field"><span class="preview-field-label">${labels.preparedBy}</span><span>${header.preparedBy}</span></div>
       <div class="preview-field"><span class="preview-field-label">${labels.category}</span><span>${header.category}</span></div>
       <div class="preview-field"><span class="preview-field-label">${labels.countryOrigin}</span><span>${header.countryOrigin}</span></div>
       <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${header.netWeight}</span></div>
+      ${header.portionsProduced !== '' ? `<div class="preview-field"><span class="preview-field-label">${labels.portionsProduced}</span><span class="preview-field-strong">${header.portionsProduced}</span></div>` : ''}
     </div>
     ${model.processes.map(proc => `
       <div class="preview-process-card">
@@ -1833,9 +1868,11 @@ function renderRecipePreviewBody(ns, model, photoDataUrls) {
         ${proc.ingredients.length ? `
           ${renderPreviewIngredientsTable(labels, proc.ingredients, proc.totalQuantity, false, labels.noteColumnHeader)}
           <div class="preview-fields-grid preview-fields-grid-inline">
-            <div class="preview-field"><span class="preview-field-label">${labels.totalQuantity}</span><span>${proc.totalQuantity}</span></div>
+            <div class="preview-field"><span class="preview-field-label">${labels.totalQuantity}</span><span class="preview-field-strong">${proc.totalQuantity}</span></div>
             ${(proc.wastes || []).map(w => `<div class="preview-field"><span class="preview-field-label">${w.name}</span><span>${w.percent}%</span></div>`).join('')}
             <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${proc.netWeight}</span></div>
+            ${proc.materialName ? `<div class="preview-field"><span class="preview-field-label">${labels.materialLabel}</span><span>${proc.materialName}</span></div>` : ''}
+            ${proc.traysNeeded !== '' ? `<div class="preview-field"><span class="preview-field-label">${labels.traysNeeded}</span><span class="preview-field-strong">${proc.traysNeeded}</span></div>` : ''}
           </div>
         ` : ''}
         ${proc.method.lines.length ? `
@@ -1902,41 +1939,73 @@ function makeEmptyIngredientRow() {
   return { localId: ++_recipeRowLocalIdCounter, ingredientId: null, name: '', quantity: '', unit: '', method: '' };
 }
 
+// Compounds a base quantity through a sequence of waste percentages sequentially, not summed --
+// Qty x (1-w1%) x (1-w2%) x ... -- confirmed with the chef; mathematically order-independent
+// (multiplication commutes), so a wastes array's own order only matters for display. Shared by
+// updateProcessNetWeight (the recipe form, live) and the Recipe Calculator's own live recompute
+// (renderScaledRecipeResult) -- one formula, not two copies of the same math.
+function compoundWasteYield(baseQty, wastes) {
+  return roundNice((wastes || []).reduce((acc, w) => {
+    const raw = parseFloat(w.percent);
+    const pct = isNaN(raw) ? 0 : Math.min(Math.max(raw, 0), 100);
+    return acc * (1 - pct / 100);
+  }, baseQty));
+}
+
 // Each process's own Wastes Applied/Net Weight -- reads/writes that one process card's own
 // elements (ep-total-<id>/ep-yield-<id>). Returns the computed net weight (a Number) so callers
 // summing across every process don't need to re-read the DOM afterward. Shared by Recipe Book
-// and Recipe Extractor (both process-shaped since the multi-process migration). Every selected
-// waste type is compounded sequentially, not summed -- Qty x (1-w1%) x (1-w2%) x ... -- confirmed
-// with the chef; mathematically order-independent (multiplication commutes), so proc.wastes's
-// own order only matters for display. Reads proc.wastes directly (kept live by each waste row's
-// own 'input' listener, see renderProcessWastes) rather than re-querying every input here.
+// and Recipe Extractor (both process-shaped since the multi-process migration). Reads proc.wastes
+// directly (kept live by each waste row's own 'input' listener, see renderProcessWastes) rather
+// than re-querying every input here.
 function updateProcessNetWeight(proc) {
   const totalEl = document.getElementById(`ep-total-${proc.localId}`);
   const yieldEl = document.getElementById(`ep-yield-${proc.localId}`);
   if (!totalEl || !yieldEl) return 0;
 
   const totalQty = sumIngredientQuantities(proc.ingredientRows);
-  totalEl.textContent = `Total Quantity: ${roundNice(totalQty)} G`;
+  totalEl.value = `${roundNice(totalQty)} G`;
 
-  const netWeight = roundNice((proc.wastes || []).reduce((acc, w) => {
-    const raw = parseFloat(w.percent);
-    const pct = isNaN(raw) ? 0 : Math.min(Math.max(raw, 0), 100);
-    return acc * (1 - pct / 100);
-  }, totalQty));
+  const netWeight = compoundWasteYield(totalQty, proc.wastes);
   yieldEl.value = `${netWeight} G`;
+
+  // Trays Needed -- how many of this process's linked material (tray/pan/mold) are required to
+  // hold its full Net Weight, rounded UP (a partially-filled tray still counts as one you need to
+  // prepare). Blank/omitted (not "0" or a placeholder) whenever no material is linked or its fill
+  // weight isn't set yet, same convention every other optional computed field in this app uses.
+  const traysEl = document.getElementById(`ep-trays-${proc.localId}`);
+  if (traysEl) {
+    const fill = parseFloat(proc.materialFillWeightGrams);
+    traysEl.textContent = (proc.materialId && !isNaN(fill) && fill > 0)
+      ? String(Math.ceil(netWeight / fill))
+      : '–';
+  }
+
   return netWeight;
 }
 
 // Recomputes every process's own Total Quantity/Net Weight (via updateProcessNetWeight above)
 // and writes the recipe-level Net Weight (rf-yield) as their plain sum -- no recipe-level waste
 // is applied on top, matching how neither recipes nor extracted_recipes has its own waste field
-// any more (waste lives per-process only, since the multi-process migration).
+// any more (waste lives per-process only, since the multi-process migration). Also drives the
+// recipe-level Portions Produced box off that same combined sum -- floored, not rounded or
+// ceiling'd, since it answers "how many whole portions does this actually cut into" (any leftover
+// under one portion's weight isn't a portion; unlike Trays Needed, there's no reason to round up
+// a *capacity requirement* here).
 function updateNetWeightSum(ns) {
   const s = state[ns.stateKey];
   const yieldEl = document.getElementById('rf-yield');
   if (!yieldEl) return;
   const sum = s.processes.reduce((acc, proc) => acc + updateProcessNetWeight(proc), 0);
-  yieldEl.value = `${roundNice(sum)} G`;
+  const roundedSum = roundNice(sum);
+  yieldEl.value = `${roundedSum} G`;
+
+  const portionsEl = document.getElementById('rf-portions-produced');
+  if (portionsEl) {
+    const portionWeightInput = document.getElementById('rf-portion-weight');
+    const pw = portionWeightInput ? parseFloat(portionWeightInput.value) : NaN;
+    portionsEl.textContent = (!isNaN(pw) && pw > 0) ? String(Math.floor(roundedSum / pw)) : '–';
+  }
 }
 
 // ------------------------------------------------------------------
@@ -1953,6 +2022,15 @@ const TEXT_LIST_FIELDS = {
   presentation: {
     modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
     textareaId: 'rf-presentation', mountId: 'rf-presentation-field', rows: 4,
+  },
+  // Same modeKey/textKey/itemsKey as `presentation` above (the field it edits is conceptually
+  // identical) -- just pointed at different DOM ids, since the Calculator's own Presentation
+  // mount lives in a different view than the recipe form's. Read/written against the Calculator's
+  // own fetched recipe object (never the form's), so there's no risk of the two colliding despite
+  // sharing state-key names.
+  calcPresentation: {
+    modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
+    textareaId: 'calc-presentation', mountId: 'calc-presentation-field', rows: 4,
   },
 };
 
@@ -1989,6 +2067,7 @@ function renderTextListFieldBody(target, cfg) {
       <div class="text-list">
         ${items.map((item, idx) => `
           <div class="text-list-row" data-item="${item.localId}">
+            <span class="text-list-drag-handle" data-drag-handle="${item.localId}" draggable="true" title="Drag to reorder">⠿</span>
             <span class="text-list-index">${idx + 1}.</span>
             <input class="text-list-input" value="${item.value}" ${cfg.dirAuto ? 'dir="auto"' : ''} />
             <button type="button" class="icon-btn danger" data-remove="${item.localId}" ${items.length <= 1 ? 'disabled' : ''}>✕</button>
@@ -2042,6 +2121,63 @@ function renderTextListFieldBody(target, cfg) {
       target[cfg.itemsKey] = items.filter(it => it.localId !== id);
       if (target[cfg.itemsKey].length === 0) target[cfg.itemsKey].push({ localId: ++_recipeRowLocalIdCounter, value: '' });
       renderTextListFieldBody(target, cfg);
+    });
+  });
+
+  wireTextListRowDrag(target, cfg, mount.querySelector('.text-list'), () => renderTextListFieldBody(target, cfg));
+}
+
+// Drag-and-drop reordering for List-mode rows, same mechanism as wireProcessIngredientRowDrag
+// (ingredient rows) -- draggable="true" lives only on the ⠿ handle, never the row or the input,
+// so dragging never fights with editing the item's text.
+function wireTextListRowDrag(target, cfg, containerEl, rerender) {
+  if (!containerEl) return;
+  let draggedId = null;
+
+  containerEl.querySelectorAll('[data-drag-handle]').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      draggedId = parseInt(handle.dataset.dragHandle, 10);
+      const row = handle.closest('.text-list-row');
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(draggedId));
+      e.dataTransfer.setDragImage(row, 20, row.offsetHeight / 2);
+    });
+    handle.addEventListener('dragend', () => {
+      containerEl.querySelectorAll('.text-list-row').forEach(r => r.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom'));
+      draggedId = null;
+    });
+  });
+
+  containerEl.querySelectorAll('.text-list-row').forEach(row => {
+    row.addEventListener('dragover', (e) => {
+      if (draggedId === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const targetId = parseInt(row.dataset.item, 10);
+      containerEl.querySelectorAll('.text-list-row').forEach(r => r.classList.remove('drag-over-top', 'drag-over-bottom'));
+      if (targetId === draggedId) return;
+      const rect = row.getBoundingClientRect();
+      const before = e.clientY - rect.top < rect.height / 2;
+      row.classList.add(before ? 'drag-over-top' : 'drag-over-bottom');
+    });
+
+    row.addEventListener('drop', (e) => {
+      if (draggedId === null) return;
+      e.preventDefault();
+      const targetId = parseInt(row.dataset.item, 10);
+      const items = target[cfg.itemsKey];
+      const fromIdx = items.findIndex(it => it.localId === draggedId);
+      let toIdx = items.findIndex(it => it.localId === targetId);
+      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+      const rect = row.getBoundingClientRect();
+      const before = e.clientY - rect.top < rect.height / 2;
+      const [moved] = items.splice(fromIdx, 1);
+      if (!before) toIdx += 1;
+      if (fromIdx < toIdx) toIdx -= 1;
+      items.splice(toIdx, 0, moved);
+      draggedId = null;
+      rerender();
     });
   });
 }
@@ -2175,6 +2311,8 @@ function makeEmptyProcess() {
     name: '',
     ingredientRows: [makeEmptyIngredientRow()],
     wastes: [],
+    materialId: null,
+    materialFillWeightGrams: null,
     methodMode: null, methodText: '', methodItems: [],
   };
   initTextListField(proc, makeProcessMethodCfg(proc), '');
@@ -2208,6 +2346,8 @@ function buildProcessFromSaved(proc) {
       // entirely: a brand-new row has no "existing usage elsewhere" to reach in the first place.
       originalPercent: w.percent,
     })),
+    materialId: proc.material_id ?? null,
+    materialFillWeightGrams: proc.material_fill_weight_grams ?? null,
     methodMode: null, methodText: '', methodItems: [],
   };
   initTextListField(built, makeProcessMethodCfg(built), proc.method);
@@ -2367,10 +2507,10 @@ function wasteRowIsChanged(w) {
 
 function renderProcessWasteRow(proc, w) {
   return `
-    <div class="process-waste-row" data-waste="${w.localId}" style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-      <span style="min-width:150px;" dir="auto">${w.name}</span>
-      <input type="number" min="0" max="100" step="0.1" id="ew-waste-${proc.localId}-${w.localId}" value="${w.percent ?? ''}" style="width:80px;" />
-      <span>%</span>
+    <div class="process-waste-row" data-waste="${w.localId}">
+      <span class="process-waste-name" dir="auto">${w.name}</span>
+      <input type="number" min="0" max="100" step="0.1" id="ew-waste-${proc.localId}-${w.localId}" class="process-waste-percent" value="${w.percent ?? ''}" />
+      <span class="process-waste-percent-sign">%</span>
       <button type="button" class="icon-btn" data-update-waste="${w.localId}" ${wasteRowIsChanged(w) ? '' : 'hidden'}>Update</button>
       <button type="button" class="icon-btn danger" data-remove-waste="${w.localId}">Remove</button>
     </div>
@@ -2384,7 +2524,7 @@ function renderProcessWastes(proc, wasteTypes, onChange) {
 
   rowsEl.innerHTML = proc.wastes.length > 0
     ? proc.wastes.map(w => renderProcessWasteRow(proc, w)).join('')
-    : `<div style="color:var(--neutral); font-size:12.5px;">No wastes applied.</div>`;
+    : `<div class="process-waste-empty">No wastes applied.</div>`;
 
   proc.wastes.forEach(w => {
     const input = document.getElementById(`ew-waste-${proc.localId}-${w.localId}`);
@@ -2547,6 +2687,8 @@ async function renderRecipeFormView(main, ns) {
   // Fetched once per form open (not per process) -- the same global catalog backs every
   // process card's "+ Add Waste" control on this form, Book and Extractor alike.
   const wasteTypes = await window.api.listWasteTypes();
+  // Same one-fetch-per-form-open convention, backing every process card's Material/Tray picker.
+  const materials = await window.api.listMaterials();
 
   if (editing) {
     recipe = await ns.api.get(s.formId);
@@ -2597,10 +2739,12 @@ async function renderRecipeFormView(main, ns) {
     <div class="generate-controls">
       <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" dir="auto" /></div>
       <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" dir="auto" /></div>
+      <div class="field"><label>Portion Weight (g)</label><input id="rf-portion-weight" type="number" min="0" step="0.1" value="${recipe?.portion_weight_grams ?? ''}" /></div>
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" dir="auto" /></div>
       <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" dir="auto" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" dir="auto" /></div>
-      <div class="field"><label>Net Weight (computed, sum of processes)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
+      <div class="field"><label>Net Weight (sum of processes)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
+      <div class="field"><label>Portions Produced</label><div class="computed-value-box" id="rf-portions-produced">–</div></div>
       <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
     </div>
 
@@ -2767,10 +2911,11 @@ async function renderRecipeFormView(main, ns) {
           <tbody class="process-ing-rows"></tbody>
         </table>
         <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
-        <div class="process-calc-row" style="display:flex; gap:16px; align-items:flex-end; margin:0 0 16px; flex-wrap:wrap;">
-          <div id="ep-total-${proc.localId}" class="total-qty-display"></div>
+        <div class="field" style="max-width:220px; margin-bottom:14px;">
+          <label>Total Quantity</label>
+          <input id="ep-total-${proc.localId}" readonly />
         </div>
-        <div class="field" style="margin:0 0 16px;">
+        <div class="field" style="margin-bottom:14px;">
           <label>Wastes Applied</label>
           <div class="process-waste-rows" id="ep-wastes-${proc.localId}"></div>
           <select class="builder-select process-add-waste-select" data-add-waste="${proc.localId}" style="margin-top:6px; max-width:240px;">
@@ -2778,9 +2923,24 @@ async function renderRecipeFormView(main, ns) {
           </select>
           <div id="ep-new-waste-${proc.localId}"></div>
         </div>
-        <div class="field" style="max-width:200px; margin:0 0 16px;">
-          <label>Net Weight (computed)</label>
+        <div class="field" style="max-width:220px; margin-bottom:14px;">
+          <label>Net Weight</label>
           <input id="ep-yield-${proc.localId}" readonly />
+        </div>
+        <div class="field" style="max-width:280px; margin-bottom:14px;">
+          <label>Material / Tray</label>
+          <select class="builder-select" id="ep-material-${proc.localId}">
+            <option value="">— None —</option>
+            ${materials.map(m => `<option value="${m.id}" ${proc.materialId === m.id ? 'selected' : ''}>${m.code} — ${m.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="max-width:220px; margin-bottom:14px; display:${proc.materialId ? 'flex' : 'none'};" id="ep-material-fill-wrap-${proc.localId}">
+          <label>Fill Weight (g)</label>
+          <input type="number" min="0" step="0.1" id="ep-material-fill-${proc.localId}" value="${proc.materialFillWeightGrams ?? ''}" />
+        </div>
+        <div class="field" style="max-width:220px; margin-bottom:14px; display:${proc.materialId ? 'flex' : 'none'};" id="ep-trays-wrap-${proc.localId}">
+          <label>Trays Needed</label>
+          <div class="computed-value-box" id="ep-trays-${proc.localId}">–</div>
         </div>
         <div class="field" style="margin-bottom:8px;">
           <label>Method</label>
@@ -2831,6 +2991,31 @@ async function renderRecipeFormView(main, ns) {
 
       renderProcessWastes(proc, wasteTypes, () => updateNetWeightSum(ns));
 
+      // Material/Tray link -- 1:1 per process (see Phase C design notes), not a multi-add list
+      // like Wastes Applied above, so a plain <select> is enough. Fill Weight always resets to
+      // the newly-picked material's own catalog weight_grams when the material changes (never
+      // silently keeps a stale value from a previously-selected, differently-sized tray); it's
+      // then freely editable per this one process without ever writing back to `materials`.
+      const materialSelect = card.querySelector(`#ep-material-${proc.localId}`);
+      const fillInput = card.querySelector(`#ep-material-fill-${proc.localId}`);
+      const fillWrap = card.querySelector(`#ep-material-fill-wrap-${proc.localId}`);
+      const traysWrap = card.querySelector(`#ep-trays-wrap-${proc.localId}`);
+      materialSelect.addEventListener('change', () => {
+        const id = materialSelect.value ? parseInt(materialSelect.value, 10) : null;
+        proc.materialId = id;
+        const mat = materials.find(m => m.id === id);
+        proc.materialFillWeightGrams = mat ? materialCapacityGrams(mat) : null;
+        fillInput.value = proc.materialFillWeightGrams ?? '';
+        fillWrap.style.display = id ? 'flex' : 'none';
+        traysWrap.style.display = id ? 'flex' : 'none';
+        updateProcessNetWeight(proc);
+      });
+      fillInput.addEventListener('input', () => {
+        const v = parseFloat(fillInput.value);
+        proc.materialFillWeightGrams = isNaN(v) ? null : v;
+        updateProcessNetWeight(proc);
+      });
+
       renderTextListFieldBody(proc, makeProcessMethodCfg(proc));
     });
 
@@ -2843,6 +3028,10 @@ async function renderRecipeFormView(main, ns) {
     renderProcessCards();
   });
   document.getElementById('rf-save-btn').addEventListener('click', () => saveProcessRecipeForm(ns));
+  // Portions Produced depends on this field but isn't stored on the process rows themselves, so
+  // it needs its own listener rather than piggybacking on renderProcessCards' ingredient/waste
+  // change handlers.
+  document.getElementById('rf-portion-weight').addEventListener('input', () => updateNetWeightSum(ns));
 
   renderProcessCards();
   // Overrides dirAuto per-call rather than setting it on TEXT_LIST_FIELDS.presentation itself,
@@ -2878,6 +3067,13 @@ async function saveProcessRecipeForm(ns) {
     id: s.formId || undefined,
     name,
     quantityProduced: document.getElementById('rf-qty').value.trim(),
+    // Numeric (unlike the rest of this payload's free-text fields) -- parsed here rather than
+    // left as a string, since main.js writes it straight into a numeric column with no parsing
+    // of its own. Blank stays null, never NaN or 0.
+    portionWeightGrams: (() => {
+      const raw = document.getElementById('rf-portion-weight').value.trim();
+      return raw === '' ? null : parseFloat(raw);
+    })(),
     preparedBy: document.getElementById('rf-prepared-by').value.trim(),
     category: document.getElementById('rf-category').value.trim(),
     countryOrigin: document.getElementById('rf-country').value.trim(),
@@ -2889,6 +3085,8 @@ async function saveProcessRecipeForm(ns) {
     processes: s.processes.map(proc => ({
       name: proc.name.trim(),
       method: collectTextListFieldValue(proc, makeProcessMethodCfg(proc)),
+      materialId: proc.materialId || null,
+      materialFillWeightGrams: proc.materialId ? (proc.materialFillWeightGrams ?? null) : null,
       wastes: proc.wastes.map(w => {
         const pct = parseFloat(w.percent);
         return { wasteTypeId: w.wasteTypeId, percent: isNaN(pct) ? 0 : pct };
@@ -2993,7 +3191,7 @@ function scaleIngredients(ingredients, multiplier) {
 // Sums every ingredient's raw quantity number regardless of unit (120 GR + 5 PC = 125) --
 // ingredients are recorded in grams today (see lib/export.js), so a plain sum is meaningful
 // without any unit conversion. Shared by the "scale to target quantity" multiplier calc below
-// and the "Total Quantity" row in renderScaledRecipeResult, so the two stay in sync.
+// and the Total Quantity field in renderScaledRecipeResult, so the two stay in sync.
 function sumIngredientQuantities(ingredients) {
   return roundNice(ingredients.reduce((sum, ing) => {
     const q = typeof ing.quantity === 'number' ? ing.quantity : parseFloat(ing.quantity);
@@ -3068,11 +3266,6 @@ function renderCalculatorView(main) {
     </div>
     <div id="calc-mode-error" style="display:none; color:var(--danger, #c0392b); font-size:12.5px; margin:-10px 0 14px;"></div>
 
-    <!-- Shown instead of #calc-single-scale-fields when "All Processes" resolves to 2+
-         processes -- one scaling control per process (own Mode/Multiplier/Target), so each can
-         be scaled independently in the same Calculate step. See renderPerProcessScalingControls. -->
-    <div id="calc-per-process-controls" style="display:none; margin-bottom:14px;"></div>
-
     <div id="calc-result"></div>
   `;
 
@@ -3089,26 +3282,62 @@ function renderCalculatorView(main) {
   const targetField = document.getElementById('calc-target-field');
   const targetInput = document.getElementById('calc-target-qty');
   const modeErrorEl = document.getElementById('calc-mode-error');
-  const perProcessControlsEl = document.getElementById('calc-per-process-controls');
   const calculateBtn = document.getElementById('calc-calculate-btn');
   const resultEl = document.getElementById('calc-result');
+
+  // Fetched once per Calculator view open, not per Calculate click -- same global catalog the
+  // recipe form fetches once per form open, needed only to populate each process's own "+ Add
+  // Waste" select in the editable result below (see renderCalcProcessWastes). Awaited at Calculate
+  // time rather than blocking this view's initial render.
+  const wasteTypesPromise = window.api.listWasteTypes();
+  // Same one-fetch-per-view-open convention, backing each process card's Material/Tray picker.
+  const materialsPromise = window.api.listMaterials();
 
   let source = 'book'; // 'book' | 'extractor'
   let scalingMode = 'factor';
   let selectedRecipe = null;
-  // Full recipe is fetched once per selection (below) and cached here -- keeps its own
-  // `processes` (each carrying its own ingredients) and, for Extractor, `photos` array intact.
-  // Both namespaces are process-shaped since the Recipe Book multi-process migration.
+  // Full recipe is fetched once per selection (below) and cached here -- recipe-LEVEL fields only
+  // (name/quantity_produced/prepared_by/category/country_origin/comment/presentation_serving) are
+  // read/edited directly off this object; its own `.processes` (the pristine, as-saved array) is
+  // never read again after workingProcesses is built from it below -- editing happens entirely on
+  // the working copy, never on this or the DB. Comment is a plain string, edited in place by the
+  // Comment textarea's own input listener (see renderScaledRecipeResult); Presentation goes
+  // through the same Text/List toggle mechanism the recipe form uses (initTextListField below,
+  // TEXT_LIST_FIELDS.calcPresentation), reusing that machinery unmodified since it has no
+  // catalog-writing side effects of its own.
   let selectedFullRecipe = null;
-  // The CURRENT scaling pool: the flattened ingredients of whichever process(es)
+  // The fully-editable, PERSISTENT working copy of every process on the selected recipe -- built
+  // once per recipe selection via buildProcessFromSaved (the recipe form's own process-shaping
+  // function, reused unmodified: it already produces exactly the {localId, id, name,
+  // ingredientRows, wastes, methodMode/Text/Items} shape this needs, with zero DB/catalog calls of
+  // its own). Structural edits (add/remove/reorder process or ingredient row, name/unit/method
+  // edits, waste add/remove/percent, Method text) mutate this array/its objects directly and
+  // PERSIST across Calculate/mode-switch/process-filter-change -- unlike each process's own
+  // `multiplier`-derived `scaledIngredients`/`totalQuantity`/`netWeight`, which are recomputed
+  // fresh (and freely hand-overridable) every render, exactly matching the original quantity-edit
+  // design: scaling must always be relative to a stable, never-mutated-by-scaling 1x basis
+  // (`ingredientRows[].quantity`), or repeated Calculate clicks would compound instead of always
+  // scaling from the same original numbers.
+  let workingProcesses = [];
+  // The CURRENT scaling pool: the flattened 1x-basis ingredient rows of whichever process(es)
   // processSelection currently resolves to -- used for the "original" display and the
   // scale-to-target multiplier calc. Actual per-process scaling for export/display still reads
   // the real process objects via processesToScale(), not this flat view -- see
   // renderScaledRecipeResult.
   let selectedIngredients = null;
-  // '__all__' or a specific process id string. Irrelevant (and the picker stays hidden) when
-  // the recipe has 1 process or fewer.
+  // '__all__' or a specific process's localId (as a string). Irrelevant (and the picker stays
+  // hidden) when the recipe has 1 process or fewer. Keyed by localId, not the DB `id` -- a
+  // manually-added process has no DB id (null), so id-keying would collide the instant she adds a
+  // second one; localId is always unique and always present, original or new alike.
   let processSelection = null;
+  // Per-process scaling control state (own Mode/Multiplier/Target) when "All Processes" resolves
+  // to 2+ processes -- processLocalId -> { mode, multiplier, target }. Lives here, not just in the
+  // DOM, because renderScaledRecipeResult rebuilds its markup from scratch on every Calculate/
+  // preview call (same "state object -> declarative render" convention the rest of this file
+  // uses for ingredient/waste rows); this is what lets a typed multiplier survive a Calculate
+  // click instead of visually resetting to "1". Reset fresh only when the process SET itself
+  // changes -- see updateScalingControlsVisibility.
+  let perProcessScaling = new Map();
   // Tracks whether the currently-open list is the "browse all" list specifically, so a second
   // click on the browse button closes it instead of just re-opening the same full list -- but
   // starting to type (which hands the list over to wireRecipeAutocomplete's own search results)
@@ -3120,15 +3349,15 @@ function renderCalculatorView(main) {
   }
 
   function allProcesses() {
-    return (selectedFullRecipe && selectedFullRecipe.processes) || [];
+    return workingProcesses;
   }
 
-  // Which process objects actually get scaled -- every process when there's only 1 (nothing to
-  // choose) or when "All Processes" is picked, just the one matching processSelection otherwise.
+  // Which process objects actually get scaled/shown -- every process when there's only 1 (nothing
+  // to choose) or when "All Processes" is picked, just the one matching processSelection otherwise.
   function processesToScale() {
     const procs = allProcesses();
     if (procs.length <= 1 || processSelection === '__all__' || !processSelection) return procs;
-    return procs.filter(p => String(p.id) === String(processSelection));
+    return procs.filter(p => String(p.localId) === String(processSelection));
   }
 
   function populateProcessSelect() {
@@ -3141,7 +3370,7 @@ function renderCalculatorView(main) {
     processField.style.display = 'flex';
     processSelect.innerHTML = [
       `<option value="__all__">All Processes</option>`,
-      ...procs.map(p => `<option value="${p.id}">${p.name}</option>`),
+      ...procs.map(p => `<option value="${p.localId}">${p.name || '(untitled process)'}</option>`),
     ].join('');
     processSelect.value = processSelection || '__all__';
   }
@@ -3149,6 +3378,7 @@ function renderCalculatorView(main) {
   function clearSelection() {
     selectedRecipe = null;
     selectedFullRecipe = null;
+    workingProcesses = [];
     selectedIngredients = null;
     processSelection = null;
     processField.style.display = 'none';
@@ -3158,8 +3388,7 @@ function renderCalculatorView(main) {
     resultEl.innerHTML = '';
     modeErrorEl.style.display = 'none';
     singleScaleFields.style.display = 'contents';
-    perProcessControlsEl.style.display = 'none';
-    perProcessControlsEl.innerHTML = '';
+    perProcessScaling = new Map();
   }
 
   // "Quantity Produced (original)" shows the recipe-level free-text serving/container count in
@@ -3179,66 +3408,29 @@ function renderCalculatorView(main) {
     }
   }
 
-  // Decides which scaling UI applies: the single shared Mode/Multiplier/Target block (a specific
-  // process is selected, or the recipe has only one process to begin with -- unchanged from
-  // before this feature) vs. one independent scaling control per process ("All Processes"
-  // resolves to 2+ processes) -- see renderPerProcessScalingControls.
+  // Decides which scaling UI applies: the single shared Mode/Multiplier/Target block at the top
+  // (a specific process is selected, or the recipe has only one process to begin with --
+  // unchanged from before the per-process feature) vs. one independent scaling control per
+  // process ("All Processes" resolves to 2+ processes), rendered inline above each process's own
+  // section by renderCalcProcessCards -- see perProcessScaling. Rebuilds the Map's KEY SET to
+  // match whichever processes are currently shown, but PRESERVES each still-present process's own
+  // existing entry (mode/multiplier/target she's already typed) rather than resetting it --
+  // called after Add/Remove/Reorder Process (via onProcessStructureChanged) as well as recipe
+  // pick/process-filter change, and only the newly-shown-for-the-first-time processes should ever
+  // get fresh defaults; a process that already existed shouldn't lose what she typed just because
+  // she added or removed some OTHER process.
   function updateScalingControlsVisibility() {
     const scaled = processesToScale();
     if (scaled.length > 1) {
       singleScaleFields.style.display = 'none';
-      perProcessControlsEl.style.display = '';
-      renderPerProcessScalingControls(scaled);
+      const next = new Map();
+      scaled.forEach(p => next.set(p.localId, perProcessScaling.get(p.localId) || { mode: 'factor', multiplier: '1', target: '' }));
+      perProcessScaling = next;
     } else {
       singleScaleFields.style.display = 'contents';
-      perProcessControlsEl.style.display = 'none';
-      perProcessControlsEl.innerHTML = '';
+      perProcessScaling = new Map();
       updateQtyOriginalDisplay();
     }
-  }
-
-  // One process's own Scaling Mode/Multiplier/Target, in a process-card styled block -- same
-  // visual language as the recipe form's own process cards. Built fresh each time "All
-  // Processes" resolves to a different process set (a different recipe picked, or a process
-  // added/removed from the underlying recipe since -- not expected mid-session, but cheap to
-  // just rebuild). Mode toggling/error display is scoped per-card via [data-scale-process],
-  // read back at Calculate time -- see the button handler below.
-  function renderPerProcessScalingControls(procs) {
-    perProcessControlsEl.innerHTML = procs.map(proc => `
-      <div class="process-card" data-scale-process="${proc.id}" style="margin-bottom:10px;">
-        <div class="process-card-head"><strong>${proc.name}</strong></div>
-        <div class="generate-controls" style="border:none; padding:0; margin:10px 0 0; gap:14px;">
-          <div class="field" style="max-width:240px;">
-            <label>Scaling Mode</label>
-            <div class="mode-toggle">
-              <button type="button" class="mode-toggle-btn active" data-proc-mode-btn="factor">Multiply by factor</button>
-              <button type="button" class="mode-toggle-btn" data-proc-mode-btn="target">Scale to target quantity</button>
-            </div>
-          </div>
-          <div class="field" style="max-width:120px;" data-proc-multiplier-field>
-            <label>Multiplier</label>
-            <input type="number" step="0.1" min="0" value="1" data-proc-multiplier />
-          </div>
-          <div class="field" style="max-width:160px; display:none;" data-proc-target-field>
-            <label>Target Total Quantity (g)</label>
-            <input type="number" step="1" min="0" data-proc-target />
-          </div>
-        </div>
-        <div data-proc-error style="display:none; color:var(--danger, #c0392b); font-size:12px; margin-top:8px;"></div>
-      </div>
-    `).join('');
-
-    perProcessControlsEl.querySelectorAll('[data-scale-process]').forEach(card => {
-      card.querySelectorAll('[data-proc-mode-btn]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const mode = btn.dataset.procModeBtn;
-          card.querySelectorAll('[data-proc-mode-btn]').forEach(b => b.classList.toggle('active', b.dataset.procModeBtn === mode));
-          card.querySelector('[data-proc-multiplier-field]').style.display = mode === 'factor' ? 'flex' : 'none';
-          card.querySelector('[data-proc-target-field]').style.display = mode === 'target' ? 'flex' : 'none';
-          card.querySelector('[data-proc-error]').style.display = 'none';
-        });
-      });
-    });
   }
 
   document.querySelectorAll('.generate-controls [data-source]').forEach(btn => {
@@ -3261,20 +3453,70 @@ function renderCalculatorView(main) {
       document.querySelectorAll('.generate-controls [data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === scalingMode));
       multiplierField.style.display = scalingMode === 'factor' ? 'flex' : 'none';
       targetField.style.display = scalingMode === 'target' ? 'flex' : 'none';
+      // Clears whichever field she's leaving AND the one she's arriving at -- regardless of
+      // direction -- so a value typed under the previous mode (e.g. Multiplier "20") never
+      // silently carries over and reappears if she switches back later.
+      multiplierInput.value = '';
+      targetInput.value = '';
       modeErrorEl.style.display = 'none';
       updateQtyOriginalDisplay();
+      // Whatever's currently shown was computed under the PREVIOUS mode (either a stale
+      // Calculate result or the initial 1x preview) -- no multiplier/target has been entered yet
+      // for the mode she just switched to, so the display resets back to unscaled/1x, same as
+      // right after picking the recipe, rather than keep showing numbers that no longer match
+      // what's selected.
+      renderResultView(true);
     });
   });
 
+  // Renders the currently-selected recipe/process(es) into #calc-result. `forceUnscaled` resets
+  // every shown process's own `multiplier` to 1 first -- used by recipe pick, Scaling Mode switch,
+  // and process-filter change, exactly the three moments that should visibly discard whatever was
+  // previously calculated. A structural edit (add/remove/reorder a process or ingredient row) or a
+  // successful Calculate instead passes false, preserving each process's own already-set
+  // `multiplier` (Calculate sets it itself just before calling this) so unrelated processes/edits
+  // aren't wiped out by an edit or Calculate elsewhere. previewToken guards against a slow
+  // currentNs().api.get() or wasteTypesPromise resolving after she's already picked a different
+  // recipe or process filter in the meantime -- same "superseded by a later pick" convention
+  // onRecipePicked already uses below.
+  let previewToken = 0;
+  async function renderResultView(forceUnscaled) {
+    const myToken = ++previewToken;
+    if (!selectedFullRecipe) { resultEl.innerHTML = ''; return; }
+    const scaled = processesToScale();
+    scaled.forEach(p => { if (forceUnscaled || p.multiplier == null) p.multiplier = 1; });
+    const wasteTypes = await wasteTypesPromise;
+    const materials = await materialsPromise;
+    if (myToken !== previewToken) return; // superseded by a later selection/process-filter change
+    renderScaledRecipeResult(resultEl, currentNs(), selectedRecipe.id, selectedFullRecipe, workingProcesses, scaled, wasteTypes, materials, perProcessScaling, onProcessStructureChanged);
+  }
+
+  // Called after Add/Remove/Reorder Process (see renderCalcProcessCards) -- the process SET may
+  // have changed, so the filter dropdown and its scaling-control state need to resync; the
+  // process-filter selection itself falls back to "All Processes" if whatever was selected no
+  // longer exists (e.g. she removed the one process the filter was scoped to). Passes false to
+  // renderResultView -- a structural edit elsewhere shouldn't discard an already-Calculated scale.
+  function onProcessStructureChanged() {
+    if (processSelection !== '__all__' && !allProcesses().some(p => String(p.localId) === String(processSelection))) {
+      processSelection = '__all__';
+    }
+    populateProcessSelect();
+    selectedIngredients = processesToScale().flatMap(p => p.ingredientRows);
+    updateScalingControlsVisibility();
+    renderResultView(false);
+  }
+
   processSelect.addEventListener('change', () => {
     processSelection = processSelect.value;
-    selectedIngredients = processesToScale().flatMap(p => p.ingredients);
+    selectedIngredients = processesToScale().flatMap(p => p.ingredientRows);
     updateScalingControlsVisibility();
+    renderResultView(true);
   });
 
   async function onRecipePicked(recipe) {
     selectedRecipe = recipe;
     selectedFullRecipe = null;
+    workingProcesses = [];
     selectedIngredients = null;
     processSelection = null;
     processField.style.display = 'none';
@@ -3282,16 +3524,28 @@ function renderCalculatorView(main) {
     qtyOriginalInput.value = '…';
     calculateBtn.disabled = true;
     browseListShowing = false;
+    previewToken++; // invalidate any preview still pending for a previously-picked recipe
+    resultEl.innerHTML = '';
 
     const full = await currentNs().api.get(recipe.id);
     if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
 
-    selectedFullRecipe = full; // keeps .processes (and, for Extractor, .photos) intact
+    selectedFullRecipe = full; // recipe-level fields (comment, presentation, etc.) edited directly on this
+    // Reuses the recipe form's own process-shaping function unmodified -- see the comment on
+    // workingProcesses above. Guarantees at least one (empty) process to edit, matching the form's
+    // own "always at least 1 process" convention, in the unlikely case a saved recipe has none.
+    workingProcesses = (full.processes || []).map(proc => buildProcessFromSaved(proc));
+    if (workingProcesses.length === 0) workingProcesses.push(makeEmptyProcess());
+    // Presentation's Text/List state lives directly on `full` (== selectedFullRecipe), reusing
+    // TEXT_LIST_FIELDS.calcPresentation -- idempotent (only initializes once), so it's safe to
+    // leave this call here even though renderScaledRecipeResult calls it again on every render.
+    initTextListField(full, TEXT_LIST_FIELDS.calcPresentation, full.presentation_serving);
     processSelection = '__all__';
     populateProcessSelect();
-    selectedIngredients = processesToScale().flatMap(p => p.ingredients);
+    selectedIngredients = processesToScale().flatMap(p => p.ingredientRows);
     calculateBtn.disabled = false;
     updateScalingControlsVisibility();
+    renderResultView(true);
   }
 
   nameInput.addEventListener('input', () => {
@@ -3321,45 +3575,47 @@ function renderCalculatorView(main) {
     nameInput.focus();
   });
 
-  calculateBtn.addEventListener('click', () => {
+  calculateBtn.addEventListener('click', async () => {
     if (!selectedFullRecipe || !selectedIngredients) return;
     modeErrorEl.style.display = 'none';
 
     const scaled = processesToScale();
-    const multiplierByProcessId = new Map();
 
     if (scaled.length > 1) {
-      // Independent per-process scaling -- validate every process's own control and collect
-      // every error at once (unlike the single-control path below, more than one process can be
-      // invalid at the same time), rather than stopping at the first.
+      // Independent per-process scaling -- validate every process's own control (read from
+      // perProcessScaling, kept live by the inline controls renderScaledRecipeResult renders
+      // above each process's own section) and collect every error at once (unlike the
+      // single-control path below, more than one process can be invalid at the same time),
+      // rather than stopping at the first. Error divs are queried directly off the currently
+      // rendered result -- rendered fresh only on success below, so an error stays visible right
+      // where she's looking rather than triggering a rebuild that would hide it. On success, each
+      // process's own `multiplier` is set directly on it (not collected into a separate Map) --
+      // renderResultView/renderScaledRecipeResult read it straight off the object.
       let hasError = false;
       for (const proc of scaled) {
-        const card = perProcessControlsEl.querySelector(`[data-scale-process="${proc.id}"]`);
-        const errorEl = card.querySelector('[data-proc-error]');
-        errorEl.style.display = 'none';
+        const st = perProcessScaling.get(proc.localId);
+        const errorEl = resultEl.querySelector(`[data-proc-error="${proc.localId}"]`);
+        if (errorEl) { errorEl.style.display = 'none'; errorEl.textContent = ''; }
 
-        const isTarget = card.querySelector('[data-proc-mode-btn="target"]').classList.contains('active');
-        if (!isTarget) {
-          const val = parseFloat(card.querySelector('[data-proc-multiplier]').value);
+        if (st.mode !== 'target') {
+          const val = parseFloat(st.multiplier);
           if (!val || val <= 0) {
-            errorEl.textContent = 'Please enter a multiplier greater than 0.';
-            errorEl.style.display = 'block';
+            if (errorEl) { errorEl.textContent = 'Please enter a multiplier greater than 0.'; errorEl.style.display = 'block'; }
             hasError = true;
             continue;
           }
-          multiplierByProcessId.set(proc.id, val);
+          proc.multiplier = val;
         } else {
           // Scoped to this process's OWN ingredients only -- scaling Dough to 5kg shouldn't be
           // measured against Poolish's ingredients too, unlike the single-control path's target
           // mode, which is deliberately measured against whatever pool is currently selected.
-          const result = computeMultiplierFromTarget(proc.ingredients, card.querySelector('[data-proc-target]').value);
+          const result = computeMultiplierFromTarget(proc.ingredientRows, st.target);
           if (result.error) {
-            errorEl.textContent = result.error;
-            errorEl.style.display = 'block';
+            if (errorEl) { errorEl.textContent = result.error; errorEl.style.display = 'block'; }
             hasError = true;
             continue;
           }
-          multiplierByProcessId.set(proc.id, result.multiplier);
+          proc.multiplier = result.multiplier;
         }
       }
       if (hasError) return;
@@ -3377,10 +3633,10 @@ function renderCalculatorView(main) {
         }
         multiplier = result.multiplier;
       }
-      multiplierByProcessId.set(scaled[0].id, multiplier);
+      scaled[0].multiplier = multiplier;
     }
 
-    renderScaledRecipeResult(resultEl, currentNs(), selectedRecipe.id, selectedFullRecipe, scaled, multiplierByProcessId);
+    renderResultView(false);
   });
 }
 
@@ -3435,47 +3691,374 @@ function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick, emptyMes
   });
 }
 
-// Shared by Recipe Book and Recipe Extractor (both process-shaped since the multi-process
-// migration). `processes` is either every process on the recipe ("All Processes") or just the
-// one the chef picked -- either way each is scaled independently (own ingredients, own waste%,
-// and now its own multiplier -- see multiplierByProcessId) and shown as its own section, same
-// visual pattern as the form's own process cards and the export sheet's per-process sections,
-// rather than merged into one flat list (preserves per-component meaning, and lets the export
-// payload below match buildRecipeSheet's shape exactly).
+function renderCalcProcessWasteRow(proc, w) {
+  return `
+    <div class="process-waste-row" data-waste="${w.localId}">
+      <span class="process-waste-name" dir="auto">${w.name}</span>
+      <input type="number" min="0" max="100" step="0.1" id="calc-waste-${proc.localId}-${w.localId}" class="process-waste-percent" value="${w.percent ?? ''}" />
+      <span class="process-waste-percent-sign">%</span>
+      <button type="button" class="icon-btn danger" data-calc-remove-waste="${w.localId}">Remove</button>
+    </div>
+  `;
+}
+
+// The Calculator's own stripped-down sibling of renderProcessWastes -- percent-edit and add/
+// remove only, scoped strictly to this in-memory calculation. Deliberately has NO "Update" button
+// and no "+ Create new waste type..." option: both of those write back to the shared waste_types
+// catalog on the form's version (onWastePercentUpdateClicked / showCreateWasteTypeForm), which
+// would break the Calculator's export-only/nothing-saved guarantee. A percent edit here never
+// prompts anything -- it just updates the in-memory value and calls onChange to recompute. Keyed
+// by proc.localId (not proc.id) throughout -- a manually-added process has no DB id.
+function renderCalcProcessWastes(proc, wasteTypes, onChange) {
+  const rowsEl = document.getElementById(`calc-wastes-${proc.localId}`);
+  const selectEl = document.querySelector(`[data-calc-add-waste="${proc.localId}"]`);
+  if (!rowsEl || !selectEl) return;
+
+  rowsEl.innerHTML = proc.wastes.length > 0
+    ? proc.wastes.map(w => renderCalcProcessWasteRow(proc, w)).join('')
+    : `<div class="process-waste-empty">No wastes applied.</div>`;
+
+  proc.wastes.forEach(w => {
+    const input = document.getElementById(`calc-waste-${proc.localId}-${w.localId}`);
+    input.addEventListener('input', () => { w.percent = input.value; onChange(); });
+  });
+  rowsEl.querySelectorAll('[data-calc-remove-waste]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const localId = parseInt(btn.dataset.calcRemoveWaste, 10);
+      proc.wastes = proc.wastes.filter(w => w.localId !== localId);
+      renderCalcProcessWastes(proc, wasteTypes, onChange);
+      onChange();
+    });
+  });
+
+  // Reassigned (not addEventListener) every render, same convention renderProcessWastes uses --
+  // selectEl persists across a rows-only refresh, so this avoids stacking duplicate handlers.
+  const availableTypes = wasteTypes.filter(wt => !proc.wastes.some(w => w.wasteTypeId === wt.id));
+  selectEl.innerHTML = `<option value="">+ Add Waste…</option>` +
+    availableTypes.map(wt => `<option value="${wt.id}">${wt.name} (${wt.default_percent}%)</option>`).join('');
+  selectEl.value = '';
+  selectEl.onchange = () => {
+    const rawValue = selectEl.value;
+    selectEl.value = '';
+    if (!rawValue) return;
+    const wasteTypeId = parseInt(rawValue, 10);
+    const wt = wasteTypes.find(w => w.id === wasteTypeId);
+    if (!wt) return;
+    proc.wastes.push({ localId: ++_recipeRowLocalIdCounter, wasteTypeId: wt.id, name: wt.name, percent: wt.default_percent });
+    renderCalcProcessWastes(proc, wasteTypes, onChange);
+    onChange();
+  };
+}
+
+// One process's own Scaling Mode/Multiplier/Target, rendered inline above that process's own
+// section (see perProcessScaling on renderCalcProcessCards below) -- same visual language as
+// the single-control block at the top of the Calculator. Values are pre-filled from `state`
+// (renderCalculatorView's perProcessScaling entry for this process) so a value she's already
+// typed survives a Calculate/preview rebuild instead of resetting. Keyed by proc.localId, same
+// reason as the waste rows above.
+function renderInlineProcessScalingControls(proc, state) {
+  return `
+    <div class="process-scaling-inline" data-scale-process="${proc.localId}">
+      <div class="field" style="max-width:240px;">
+        <label>Scaling Mode</label>
+        <div class="mode-toggle">
+          <button type="button" class="mode-toggle-btn ${state.mode === 'factor' ? 'active' : ''}" data-proc-mode-btn="factor">Multiply by factor</button>
+          <button type="button" class="mode-toggle-btn ${state.mode === 'target' ? 'active' : ''}" data-proc-mode-btn="target">Scale to target quantity</button>
+        </div>
+      </div>
+      <div class="field" style="max-width:120px; ${state.mode === 'factor' ? '' : 'display:none;'}" data-proc-multiplier-field>
+        <label>Multiplier</label>
+        <input type="number" step="0.1" min="0" value="${state.multiplier}" data-proc-multiplier />
+      </div>
+      <div class="field" style="max-width:160px; ${state.mode === 'target' ? '' : 'display:none;'}" data-proc-target-field>
+        <label>Target Total Quantity (g)</label>
+        <input type="number" step="1" min="0" value="${state.target}" data-proc-target />
+      </div>
+    </div>
+    <div data-proc-error="${proc.localId}" style="display:none; color:var(--danger, #c0392b); font-size:12px; margin:0 0 10px;"></div>
+  `;
+}
+
+// The Calculator's own lightweight sibling of renderProcessIngredientRows -- plain text inputs
+// only, no autocomplete/catalog matching at all: a row added here is pure free text, never linked
+// to the real ingredients/extracted_ingredients table, per the Calculator's export-only nature
+// (genuinely simpler than the form's version, not a stripped-down copy of it). Reuses
+// wireProcessIngredientRowDrag UNCHANGED for drag-and-drop reordering -- it only ever splices
+// process.ingredientRows by localId, no catalog coupling to strip out.
 //
-// `multiplierByProcessId` is a Map<processId, multiplier> -- always one entry per process in
-// `processes`, whether that's a single shared multiplier (the calculator's single-control path,
-// which still just puts one entry in the map keyed by that one process's id) or genuinely
-// different multipliers per process (the "All Processes" independent-scaling path). This
-// function itself never distinguishes the two cases beyond that lookup -- the UI decision of
-// "one control or many" lives entirely in renderCalculatorView.
-function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, multiplierByProcessId) {
-  const scaledProcesses = processes.map(proc => {
-    const multiplier = multiplierByProcessId.get(proc.id);
-    const scaledIngredients = scaleIngredients(proc.ingredients, multiplier);
-    const totalQuantity = sumIngredientQuantities(scaledIngredients);
-    // Waste percents themselves are never scaled -- each is a percentage, not a quantity, same
-    // reasoning export-scaled-recipe/renderScaledRecipeResult already apply elsewhere. Compounded
-    // sequentially against the already-scaled Total Quantity, same formula as
-    // updateProcessNetWeight/computeProcessTotals use live in the form/export.
-    const netWeight = roundNice((proc.wastes || []).reduce((acc, w) => {
-      const pct = w.percent != null ? Math.min(Math.max(parseFloat(w.percent), 0), 100) : 0;
-      return acc * (1 - pct / 100);
-    }, totalQuantity));
-    return { ...proc, ingredients: scaledIngredients, totalQuantity, netWeight, multiplier };
+// Quantity is the one column NOT bound to the persistent row: process.ingredientRows[].quantity
+// is the immutable 1x basis (set once, at working-copy build time, and never touched by scaling),
+// so process.scaledIngredients is (re)computed fresh here on every call -- from ingredientRows x
+// process.multiplier -- and the Quantity input is bound to THAT instead, preserving the original
+// quantity-edit contract: freely hand-overridable for this one calculation, reset back to
+// multiplier x original on the next Calculate. Name/Unit/Method bind directly to the persistent
+// row, so those edits (and row add/remove/reorder) survive future Calculate clicks.
+function renderCalcIngredientRows(process, tbodyEl, onChange) {
+  process.scaledIngredients = scaleIngredients(process.ingredientRows, process.multiplier ?? 1);
+
+  tbodyEl.innerHTML = process.ingredientRows.map((row, i) => `
+    <tr data-row="${row.localId}">
+      <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
+      <td><input class="calc-ing-name" value="${row.name}" dir="auto" /></td>
+      <td><input class="calc-ing-qty" value="${process.scaledIngredients[i].quantity ?? ''}" /></td>
+      <td><input class="calc-ing-unit" value="${row.unit}" /></td>
+      <td><input class="calc-ing-method" value="${row.method}" dir="auto" /></td>
+      <td style="text-align:right"><button type="button" class="icon-btn danger" data-row-remove="${row.localId}">Remove</button></td>
+    </tr>
+  `).join('');
+
+  process.ingredientRows.forEach((row, i) => {
+    const tr = tbodyEl.querySelector(`tr[data-row="${row.localId}"]`);
+    tr.querySelector('.calc-ing-name').addEventListener('input', (e) => { row.name = e.target.value; });
+    tr.querySelector('.calc-ing-unit').addEventListener('input', (e) => { row.unit = e.target.value; });
+    tr.querySelector('.calc-ing-method').addEventListener('input', (e) => { row.method = e.target.value; });
+    tr.querySelector('.calc-ing-qty').addEventListener('input', (e) => {
+      process.scaledIngredients[i].quantity = e.target.value;
+      onChange();
+    });
+  });
+
+  tbodyEl.querySelectorAll('[data-row-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.rowRemove, 10);
+      process.ingredientRows = process.ingredientRows.filter(r => r.localId !== id);
+      if (process.ingredientRows.length === 0) process.ingredientRows.push(makeEmptyIngredientRow());
+      renderCalcIngredientRows(process, tbodyEl, onChange);
+    });
+  });
+
+  wireProcessIngredientRowDrag(process, tbodyEl, () => renderCalcIngredientRows(process, tbodyEl, onChange));
+  onChange();
+}
+
+// Calculator's own sibling of the recipe form's renderProcessCards -- builds/wires every process
+// card currently in view: name, ingredient rows (renderCalcIngredientRows), waste rows
+// (renderCalcProcessWastes), Method (the recipe form's own Text/List toggle, reused unmodified --
+// see buildProcessFromSaved/makeEmptyProcess, which already initialize each process's
+// methodMode/Text/Items), inline scaling control, and Total Quantity/Net Weight. Add/Remove/
+// Reorder Process mutate `workingProcesses` (the FULL persistent list, not just whatever's
+// currently filtered/shown) and then hand off to `onStructureChanged` for a full outer re-render
+// -- simplest way to keep the process-filter dropdown, perProcessScaling, and the shown set all
+// back in sync after membership changes, rather than re-deriving all of that locally too.
+function renderCalcProcessCards(ns, workingProcesses, processesShown, wasteTypes, materials, mountEl, perProcessScaling, onStructureChanged, recomputeCombined) {
+  mountEl.innerHTML = processesShown.map((proc, idx) => `
+    <div class="process-card" data-process="${proc.localId}">
+      <div class="process-card-head">
+        <input class="process-name-input" value="${proc.name}" dir="auto" placeholder="Process name" />
+        <span style="font-size:12px; color:var(--neutral); font-weight:400;">×${roundNice(proc.multiplier ?? 1)}</span>
+        <button type="button" class="icon-btn" data-move-process-up="${proc.localId}" title="Move process up" aria-label="Move process up" ${idx === 0 ? 'disabled' : ''}>▲</button>
+        <button type="button" class="icon-btn" data-move-process-down="${proc.localId}" title="Move process down" aria-label="Move process down" ${idx === processesShown.length - 1 ? 'disabled' : ''}>▼</button>
+        <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${workingProcesses.length <= 1 ? 'disabled' : ''}>Remove Process</button>
+      </div>
+      ${perProcessScaling && perProcessScaling.has(proc.localId) ? renderInlineProcessScalingControls(proc, perProcessScaling.get(proc.localId)) : ''}
+      <table class="recipe-ingredients-table">
+        <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th><th></th></tr></thead>
+        <tbody class="calc-ing-rows"></tbody>
+      </table>
+      <button type="button" class="secondary calc-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
+      <div class="field" style="max-width:220px; margin-bottom:14px;">
+        <label>Total Quantity</label>
+        <div id="calc-total-${proc.localId}" class="computed-value-box">0 G</div>
+      </div>
+      <div class="field" style="margin-bottom:14px;">
+        <label>Wastes Applied</label>
+        <div class="process-waste-rows" id="calc-wastes-${proc.localId}"></div>
+        <select data-calc-add-waste="${proc.localId}" style="margin-top:6px; max-width:240px;"></select>
+      </div>
+      <div class="field" style="max-width:220px; margin-bottom:14px;">
+        <label>Net Weight (scaled)</label>
+        <div id="calc-netweight-${proc.localId}" class="computed-value-box">0 G</div>
+      </div>
+      <div class="field" style="max-width:280px; margin-bottom:14px;">
+        <label>Material / Tray</label>
+        <select class="builder-select" id="calc-material-${proc.localId}">
+          <option value="">— None —</option>
+          ${materials.map(m => `<option value="${m.id}" ${proc.materialId === m.id ? 'selected' : ''}>${m.code} — ${m.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" style="max-width:220px; margin-bottom:14px; display:${proc.materialId ? 'flex' : 'none'};" id="calc-material-fill-wrap-${proc.localId}">
+        <label>Fill Weight (g)</label>
+        <input type="number" min="0" step="0.1" id="calc-material-fill-${proc.localId}" value="${proc.materialFillWeightGrams ?? ''}" />
+      </div>
+      <div class="field" style="max-width:220px; margin-bottom:14px; display:${proc.materialId ? 'flex' : 'none'};" id="calc-trays-wrap-${proc.localId}">
+        <label>Trays Needed</label>
+        <div class="computed-value-box" id="calc-trays-${proc.localId}">–</div>
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <label>Method</label>
+        <div id="${makeProcessMethodCfg(proc).mountId}"></div>
+      </div>
+    </div>
+  `).join('');
+
+  // Recomputes one process's Total Quantity/Net Weight from its current (possibly edited)
+  // scaledIngredients/wastes, writes both back to the DOM, then rolls the recipe-level combined
+  // Net Weight forward too -- same "mutate the object, recompute, write the DOM" pattern
+  // updateProcessNetWeight/updateNetWeightSum use live in the recipe form.
+  function refreshProcessCalc(proc) {
+    proc.totalQuantity = sumIngredientQuantities(proc.scaledIngredients || []);
+    proc.netWeight = compoundWasteYield(proc.totalQuantity, proc.wastes);
+    const totalEl = document.getElementById(`calc-total-${proc.localId}`);
+    const yieldEl = document.getElementById(`calc-netweight-${proc.localId}`);
+    if (totalEl) totalEl.textContent = `${proc.totalQuantity} G`;
+    if (yieldEl) yieldEl.textContent = `${proc.netWeight} G`;
+
+    // Trays Needed -- same ceil-not-round reasoning as updateProcessNetWeight's ep-trays-<id> in
+    // the recipe form, just against this process's SCALED Net Weight instead of the unscaled one.
+    const traysEl = document.getElementById(`calc-trays-${proc.localId}`);
+    if (traysEl) {
+      const fill = parseFloat(proc.materialFillWeightGrams);
+      traysEl.textContent = (proc.materialId && !isNaN(fill) && fill > 0)
+        ? String(Math.ceil(proc.netWeight / fill))
+        : '–';
+    }
+
+    recomputeCombined();
+  }
+
+  processesShown.forEach(proc => {
+    const card = mountEl.querySelector(`[data-process="${proc.localId}"]`);
+
+    card.querySelector('.process-name-input').addEventListener('input', (e) => { proc.name = e.target.value; });
+
+    card.querySelector('[data-remove-process]').addEventListener('click', () => {
+      const i = workingProcesses.findIndex(p => p.localId === proc.localId);
+      if (i === -1) return;
+      workingProcesses.splice(i, 1);
+      if (workingProcesses.length === 0) workingProcesses.push(makeEmptyProcess());
+      onStructureChanged();
+    });
+
+    // Same "swap in the array, then re-render" reorder technique the recipe form's own
+    // renderProcessCards uses (no separate function to import -- it's a 3-line inline pattern
+    // there too), just operating on the Calculator's own workingProcesses.
+    card.querySelector('[data-move-process-up]').addEventListener('click', () => {
+      const i = workingProcesses.findIndex(p => p.localId === proc.localId);
+      if (i <= 0) return;
+      [workingProcesses[i - 1], workingProcesses[i]] = [workingProcesses[i], workingProcesses[i - 1]];
+      onStructureChanged();
+    });
+    card.querySelector('[data-move-process-down]').addEventListener('click', () => {
+      const i = workingProcesses.findIndex(p => p.localId === proc.localId);
+      if (i === -1 || i >= workingProcesses.length - 1) return;
+      [workingProcesses[i], workingProcesses[i + 1]] = [workingProcesses[i + 1], workingProcesses[i]];
+      onStructureChanged();
+    });
+
+    const tbody = card.querySelector('.calc-ing-rows');
+    const onIngredientChange = () => refreshProcessCalc(proc);
+    renderCalcIngredientRows(proc, tbody, onIngredientChange);
+
+    card.querySelector('.calc-add-row-btn').addEventListener('click', () => {
+      proc.ingredientRows.push(makeEmptyIngredientRow());
+      renderCalcIngredientRows(proc, tbody, onIngredientChange);
+    });
+
+    renderCalcProcessWastes(proc, wasteTypes, () => refreshProcessCalc(proc));
+
+    // Material/Tray link -- same behavior as the recipe form's own ep-material-<id> control (Fill
+    // Weight resets to the newly-picked material's catalog default, editable per this working copy
+    // only; never written back to `materials` or the saved recipe -- export-only, like everything
+    // else here).
+    const materialSelect = card.querySelector(`#calc-material-${proc.localId}`);
+    const fillInput = card.querySelector(`#calc-material-fill-${proc.localId}`);
+    const fillWrap = card.querySelector(`#calc-material-fill-wrap-${proc.localId}`);
+    const traysWrap = card.querySelector(`#calc-trays-wrap-${proc.localId}`);
+    materialSelect.addEventListener('change', () => {
+      const id = materialSelect.value ? parseInt(materialSelect.value, 10) : null;
+      proc.materialId = id;
+      const mat = materials.find(m => m.id === id);
+      proc.materialFillWeightGrams = mat ? materialCapacityGrams(mat) : null;
+      fillInput.value = proc.materialFillWeightGrams ?? '';
+      fillWrap.style.display = id ? 'flex' : 'none';
+      traysWrap.style.display = id ? 'flex' : 'none';
+      refreshProcessCalc(proc);
+    });
+    fillInput.addEventListener('input', () => {
+      const v = parseFloat(fillInput.value);
+      proc.materialFillWeightGrams = isNaN(v) ? null : v;
+      refreshProcessCalc(proc);
+    });
+
+    renderTextListFieldBody(proc, makeProcessMethodCfg(proc));
+
+    // Wire this process's own inline scaling control, if it has one (empty perProcessScaling in
+    // single-process mode means nothing to find here). Mutates the shared perProcessScaling entry
+    // directly -- read back by calculateBtn's click handler in renderCalculatorView -- and never
+    // triggers a recompute/rerender itself: the multiplier only takes effect on the next Calculate.
+    const scalingState = perProcessScaling && perProcessScaling.get(proc.localId);
+    if (scalingState) {
+      const controlEl = card.querySelector(`[data-scale-process="${proc.localId}"]`);
+      controlEl.querySelectorAll('[data-proc-mode-btn]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          scalingState.mode = btn.dataset.procModeBtn;
+          controlEl.querySelectorAll('[data-proc-mode-btn]').forEach(b => b.classList.toggle('active', b.dataset.procModeBtn === scalingState.mode));
+          controlEl.querySelector('[data-proc-multiplier-field]').style.display = scalingState.mode === 'factor' ? 'flex' : 'none';
+          controlEl.querySelector('[data-proc-target-field]').style.display = scalingState.mode === 'target' ? 'flex' : 'none';
+          const errEl = card.querySelector(`[data-proc-error="${proc.localId}"]`);
+          if (errEl) errEl.style.display = 'none';
+        });
+      });
+      controlEl.querySelector('[data-proc-multiplier]')?.addEventListener('input', (e) => { scalingState.multiplier = e.target.value; });
+      controlEl.querySelector('[data-proc-target]')?.addEventListener('input', (e) => { scalingState.target = e.target.value; });
+    }
+    // No explicit initial refreshProcessCalc call needed here -- renderCalcIngredientRows above
+    // already calls its own onChange (== refreshProcessCalc) once at the end of every render,
+    // including this first one, and the Total Quantity/Net Weight elements it writes into already
+    // exist by then (mountEl.innerHTML was set before this loop started).
+  });
+}
+
+// `workingProcesses` is the FULL persistent list (see renderCalculatorView) -- needed here only
+// so "+ Add Process" and renderCalcProcessCards' own remove/reorder handlers can mutate it;
+// `processesShown` is whichever subset processesToScale() currently resolves to, and is what
+// actually gets rendered/scaled/exported. `perProcessScaling` non-empty only in "All Processes" /
+// 2+ processes mode -- see renderInlineProcessScalingControls.
+//
+// `wasteTypes` is the global waste-type catalog (fetched once per Calculator view open, see
+// renderCalculatorView), needed only to populate each process's own "+ Add Waste" select here --
+// same catalog the recipe form uses, but nothing added/edited through it ever writes back to that
+// catalog or to the saved recipe: everything below (ingredient rows, waste rows, Method,
+// Presentation, Comment, process add/remove/reorder) is editable purely in-memory, on
+// workingProcesses/`recipe`, matching the Calculator's "export only, nothing is saved" tagline.
+// Export (the button wired at the bottom of this function) reads straight off these same mutated
+// objects at click time, so whatever she's edited is exactly what gets sent.
+function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProcesses, processesShown, wasteTypes, materials, perProcessScaling, onStructureChanged) {
+  // Each shown process's own scaled view, derived fresh from its persistent 1x-basis
+  // ingredientRows and its own `multiplier` (set directly on the object by Calculate, or forced
+  // to 1 by renderResultView(true) -- see renderCalculatorView). Recomputed here up front so the
+  // header's combined Net Weight/Quantity Produced figures below have something to read; each
+  // process's own numbers are re-derived the same way by refreshProcessCalc as she edits.
+  processesShown.forEach(proc => {
+    proc.scaledIngredients = scaleIngredients(proc.ingredientRows, proc.multiplier ?? 1);
+    proc.totalQuantity = sumIngredientQuantities(proc.scaledIngredients);
+    proc.netWeight = compoundWasteYield(proc.totalQuantity, proc.wastes);
   });
 
   // Recipe-level Net Weight is the sum of every shown process's own scaled, waste-adjusted net
-  // weight -- same convention updateNetWeightSum uses live in the form.
-  const combinedNetWeight = roundNice(scaledProcesses.reduce((sum, p) => sum + p.netWeight, 0));
+  // weight -- same convention updateNetWeightSum uses live in the form. Reassigned (not const) --
+  // recomputeCombined below keeps it live as she edits quantities/wastes/rows/processes.
+  let combinedNetWeight = roundNice(processesShown.reduce((sum, p) => sum + p.netWeight, 0));
+  // Same floor-not-round-or-ceil reasoning as updateNetWeightSum's rf-portions-produced in the
+  // recipe form -- a yield count of whole, actually-cuttable portions, not a capacity requirement.
+  function computePortionsProducedLive() {
+    const pw = parseFloat(recipe.portion_weight_grams);
+    return (!isNaN(pw) && pw > 0) ? Math.floor(combinedNetWeight / pw) : null;
+  }
+  let portionsProduced = computePortionsProducedLive();
 
   // 2+ processes scaled together with (possibly) different multipliers each -- there's no
   // longer one coherent scale factor for the recipe-level Quantity Produced to apply, so it's
   // shown unscaled, for context only.
-  const isMultiProcessScaling = processes.length > 1;
+  const isMultiProcessScaling = processesShown.length > 1;
   const quantityProducedScaled = isMultiProcessScaling
     ? null
-    : scaleQuantityProducedText(recipe.quantity_produced, scaledProcesses[0].multiplier);
+    : scaleQuantityProducedText(recipe.quantity_produced, processesShown[0]?.multiplier ?? 1);
+
+  // Idempotent (only initializes once per recipe selection -- see the guard at the top of
+  // initTextListField) -- also called once up front in onRecipePicked, but harmless/necessary to
+  // repeat here since this is what renderTextListFieldBody below actually reads.
+  initTextListField(recipe, TEXT_LIST_FIELDS.calcPresentation, recipe.presentation_serving);
 
   container.innerHTML = `
     <div class="day-card">
@@ -3484,54 +4067,26 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
       </div>
       <div style="padding:16px 18px;">
         <div class="generate-controls" style="border:none; padding:0; margin-bottom:18px;">
-          <div class="field"><label>Quantity Produced (original)</label><div>${recipe.quantity_produced || '—'}</div></div>
-          <div class="field"><label>Quantity Produced (scaled)</label><div><strong>${quantityProducedScaled || (isMultiProcessScaling ? 'Scaled independently per process' : '—')}</strong></div></div>
-          <div class="field"><label>Prepared By</label><div>${recipe.prepared_by || '—'}</div></div>
-          <div class="field"><label>Category</label><div>${recipe.category || '—'}</div></div>
-          <div class="field"><label>Country/Origin</label><div>${recipe.country_origin || '—'}</div></div>
-          <div class="field"><label>Net Weight (scaled, combined)</label><div><strong>${combinedNetWeight} G</strong></div></div>
+          <div class="field"><label>Quantity Produced (original)</label><input id="calc-qty-produced" value="${recipe.quantity_produced || ''}" dir="auto" /></div>
+          <div class="field"><label>Quantity Produced (scaled)</label><div class="computed-value-box">${quantityProducedScaled || (isMultiProcessScaling ? 'Scaled independently per process' : '—')}</div></div>
+          <div class="field"><label>Portion Weight (g)</label><input id="calc-portion-weight" type="number" min="0" step="0.1" value="${recipe.portion_weight_grams ?? ''}" /></div>
+          <div class="field"><label>Prepared By</label><input id="calc-prepared-by" value="${recipe.prepared_by || ''}" dir="auto" /></div>
+          <div class="field"><label>Category</label><input id="calc-category" value="${recipe.category || ''}" dir="auto" /></div>
+          <div class="field"><label>Country/Origin</label><input id="calc-country" value="${recipe.country_origin || ''}" dir="auto" /></div>
+          <div class="field"><label>Net Weight (scaled, combined)</label><div id="calc-combined-netweight" class="computed-value-box">${combinedNetWeight} G</div></div>
+          <div class="field"><label>Portions Produced</label><div id="calc-portions-produced" class="computed-value-box">${portionsProduced ?? '–'}</div></div>
         </div>
 
-        ${scaledProcesses.map(proc => `
-          <div class="process-card">
-            <div class="process-card-head"><strong>${proc.name}</strong> <span style="font-size:12px; color:var(--neutral); font-weight:400;">×${roundNice(proc.multiplier)}</span></div>
-            <table class="recipe-ingredients-table">
-              <thead><tr><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th></tr></thead>
-              <tbody>
-                ${proc.ingredients.map(ing => `
-                  <tr>
-                    <td>${ing.ingredient_name}</td>
-                    <td>${ing.quantity ?? ''}</td>
-                    <td>${ing.unit || ''}</td>
-                    <td>${ing.method || ''}</td>
-                  </tr>
-                `).join('')}
-                <tr style="font-weight:600;">
-                  <td>Total Quantity</td>
-                  <td>${proc.totalQuantity}</td>
-                  <td></td>
-                  <td></td>
-                </tr>
-              </tbody>
-            </table>
-            <div class="generate-controls" style="border:none; padding:0; margin:10px 0 4px;">
-              ${(proc.wastes || []).map(w => `<div class="field" style="max-width:160px;"><label>${w.name}</label><div>${w.percent}%</div></div>`).join('')}
-              <div class="field" style="max-width:200px;"><label>Net Weight (scaled)</label><div><strong>${proc.netWeight} G</strong></div></div>
-            </div>
-            <div class="field" style="margin-top:8px;">
-              <label>Method</label>
-              <div style="white-space:pre-wrap;">${proc.method || '—'}</div>
-            </div>
-          </div>
-        `).join('')}
+        <div id="calc-process-cards"></div>
+        <button type="button" class="secondary" id="calc-add-process-btn" style="margin:10px 0 20px;">+ Add Process</button>
 
         <div class="field" style="margin:16px 0;">
           <label>Presentation / Decoration / Serving</label>
-          <div style="white-space:pre-wrap;">${recipe.presentation_serving || '—'}</div>
+          <div id="calc-presentation-field"></div>
         </div>
         <div class="field" style="margin-bottom:16px;">
           <label>Comment</label>
-          <div style="white-space:pre-wrap;">${recipe.comment || '—'}</div>
+          <textarea id="calc-comment" rows="3" dir="auto">${recipe.comment || ''}</textarea>
         </div>
 
         <div style="display:flex; align-items:center; gap:10px;">
@@ -3543,6 +4098,44 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
     </div>
   `;
   wireExportLanguagePicker('calc');
+  renderTextListFieldBody(recipe, TEXT_LIST_FIELDS.calcPresentation);
+  document.getElementById('calc-comment').addEventListener('input', (e) => { recipe.comment = e.target.value; });
+  // Recipe-level header fields -- plain in-place edits on the same persistent `recipe` object
+  // Comment uses, so they survive Calculate/mode-switch/structural edits exactly like it does.
+  // Quantity Produced (scaled), just above, is deliberately left read-only/derived -- it's
+  // regenerated from calc-qty-produced's value the next time this view re-renders, rather than
+  // being a second, independently-editable field that could drift out of sync with it.
+  document.getElementById('calc-qty-produced').addEventListener('input', (e) => { recipe.quantity_produced = e.target.value; });
+  // Numeric (unlike the rest of these header fields) -- parsed on input so whatever ends up on
+  // recipe.portion_weight_grams is already the right type for export, same as the recipe form's
+  // own payload construction; export reads this straight off `recipe` via the plain object
+  // spread below (no separate export-payload field for it), so nothing else needs to change for
+  // it to reach the .xlsx -- exactly the same "no extra plumbing" pattern every other header
+  // field here already relies on.
+  document.getElementById('calc-portion-weight').addEventListener('input', (e) => {
+    const raw = e.target.value.trim();
+    recipe.portion_weight_grams = raw === '' ? null : parseFloat(raw);
+    recomputeCombined();
+  });
+  document.getElementById('calc-prepared-by').addEventListener('input', (e) => { recipe.prepared_by = e.target.value; });
+  document.getElementById('calc-category').addEventListener('input', (e) => { recipe.category = e.target.value; });
+  document.getElementById('calc-country').addEventListener('input', (e) => { recipe.country_origin = e.target.value; });
+
+  function recomputeCombined() {
+    combinedNetWeight = roundNice(processesShown.reduce((sum, p) => sum + p.netWeight, 0));
+    const combinedEl = document.getElementById('calc-combined-netweight');
+    if (combinedEl) combinedEl.textContent = `${combinedNetWeight} G`;
+    portionsProduced = computePortionsProducedLive();
+    const portionsEl = document.getElementById('calc-portions-produced');
+    if (portionsEl) portionsEl.textContent = portionsProduced ?? '–';
+  }
+
+  renderCalcProcessCards(ns, workingProcesses, processesShown, wasteTypes, materials, document.getElementById('calc-process-cards'), perProcessScaling, onStructureChanged, recomputeCombined);
+
+  document.getElementById('calc-add-process-btn').addEventListener('click', () => {
+    workingProcesses.push(makeEmptyProcess());
+    onStructureChanged();
+  });
 
   document.getElementById('calc-export-btn').addEventListener('click', async () => {
     const btn = document.getElementById('calc-export-btn');
@@ -3555,18 +4148,38 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, processes, mu
       // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending --
       // export-scaled-extracted-recipe re-fetches Extractor photos fresh by recipeId itself (a
       // no-op for Recipe Book, whose export-scaled-recipe handler ignores recipeId and reads
-      // photo_path off `recipe` directly instead), and the scaled processes below are the ones
-      // that actually belong in the export, not the original full set.
+      // photo_path off `recipe` directly instead), and the shown processes below are the ones
+      // that actually belong in the export, not the full working-copy set.
       const { processes: _origProcesses, photos: _origPhotos, ...recipeFields } = recipe;
       const exportRecipe = {
         ...recipeFields,
         // Falls back to the original, unscaled recipe-level quantity when processes were scaled
-        // independently (quantityProducedScaled is null in that case, see above).
+        // independently (quantityProducedScaled is null in that case, see above). `comment` is
+        // already live in recipeFields (the Comment textarea mutates recipe.comment directly);
+        // presentation_serving needs an explicit collect since its edited value lives in
+        // recipe.presentationText/Items (the Text/List toggle's own state), not this field.
         quantity_produced: quantityProducedScaled || recipe.quantity_produced,
         yield_notes: `${combinedNetWeight} G`,
+        presentation_serving: collectTextListFieldValue(recipe, TEXT_LIST_FIELDS.calcPresentation),
       };
-      const exportProcesses = scaledProcesses.map(p => ({
-        name: p.name, method: p.method, wastes: p.wastes, ingredients: p.ingredients,
+      // ingredient_name (not `name`) is what lib/export.js/the translate step actually read --
+      // scaledIngredients rows carry `name` (the working copy's own field, from
+      // buildProcessFromSaved) since this payload is the one place that distinction matters.
+      const exportProcesses = processesShown.map(p => ({
+        name: p.name,
+        method: collectTextListFieldValue(p, makeProcessMethodCfg(p)),
+        wastes: p.wastes,
+        ingredients: (p.scaledIngredients || []).map(ing => ({
+          ingredient_name: ing.name, quantity: ing.quantity, unit: ing.unit, method: ing.method,
+        })),
+        // material_id/material_code/material_name/material_fill_weight_grams -- the snake_case,
+        // DB-shaped names lib/export.js's computeTraysNeeded actually reads (same convention as
+        // ingredient_name above), not the working copy's own camelCase materialId/
+        // materialFillWeightGrams.
+        material_id: p.materialId || null,
+        material_code: materials.find(m => m.id === p.materialId)?.code,
+        material_name: materials.find(m => m.id === p.materialId)?.name,
+        material_fill_weight_grams: p.materialId ? (p.materialFillWeightGrams ?? null) : null,
       }));
       const result = await ns.api.exportScaled({
         recipeId, recipe: exportRecipe, processes: exportProcesses, targetLanguage: getSelectedExportLanguage('calc'),
@@ -4082,6 +4695,786 @@ async function openExtractedIngredientModal(existingIngredient) {
       overlay.remove();
       renderView();
     } catch (err) {
+      alert(`Save failed: ${err.message}`);
+    }
+  });
+}
+
+// ============================================================
+// MATERIALS / TRAYS CATALOG -- catalog-only phase (see conversation notes): a chef-managed list
+// of baking equipment, list<->form drill-down like Recipe Book (state.materials.view/formId,
+// single-photo model), plus a parametric 3D shape preview built live from whatever dimensions
+// are currently entered. Not yet linked to recipes anywhere -- that's a separate later phase.
+// ============================================================
+
+// Per-shape dimension field sets -- drives both the form's dimension inputs (label/step) and,
+// via readMaterialDims, the 3D preview + save payload. Only three shapes for now (see
+// conversation notes): most of the requested starter equipment (sheet pans, cake pans,
+// springform, loaf, pizza, focaccia trays) collapses into just Round or Rectangular -- the
+// muffin tray is the one genuinely different, multi-cavity shape that needs its own field set.
+const MATERIAL_SHAPE_PRESETS = {
+  round: {
+    label: 'Round',
+    fields: [
+      { key: 'diameterCm', label: 'Diameter (cm)', step: '0.1' },
+      { key: 'heightCm', label: 'Height (cm)', step: '0.1' },
+    ],
+  },
+  rectangular: {
+    label: 'Rectangular / Tray',
+    fields: [
+      { key: 'lengthCm', label: 'Length (cm)', step: '0.1' },
+      { key: 'widthCm', label: 'Width (cm)', step: '0.1' },
+      { key: 'heightCm', label: 'Height (cm)', step: '0.1' },
+    ],
+  },
+  muffin_tray: {
+    label: 'Muffin / Multi-Cavity Tray',
+    fields: [
+      { key: 'lengthCm', label: 'Tray Length (cm)', step: '0.1' },
+      { key: 'widthCm', label: 'Tray Width (cm)', step: '0.1' },
+      { key: 'heightCm', label: 'Tray Height (cm)', step: '0.1' },
+      { key: 'cupDiameterCm', label: 'Cup Diameter (cm)', step: '0.1' },
+      { key: 'cupDepthCm', label: 'Cup Depth (cm)', step: '0.1' },
+      { key: 'cupRows', label: 'Rows', step: '1' },
+      { key: 'cupColumns', label: 'Columns', step: '1' },
+    ],
+  },
+};
+
+// Every possible dimension column, camelCase form key -> snake_case DB column -- shared by
+// materialDimsFromRow (loading) and buildMaterialDimensionPayload (saving) so the two can never
+// drift out of sync with main.js's own save-material `fields` object.
+const MATERIAL_DIMENSION_DB_KEYS = {
+  diameterCm: 'diameter_cm', lengthCm: 'length_cm', widthCm: 'width_cm', heightCm: 'height_cm',
+  cupDiameterCm: 'cup_diameter_cm', cupDepthCm: 'cup_depth_cm', cupRows: 'cup_rows', cupColumns: 'cup_columns',
+};
+
+function materialDimsFromRow(material) {
+  const dims = {};
+  if (!material) return dims;
+  Object.entries(MATERIAL_DIMENSION_DB_KEYS).forEach(([key, dbKey]) => { dims[key] = material[dbKey]; });
+  return dims;
+}
+
+function formatMaterialDimensions(m) {
+  if (m.shape_type === 'round') return `⌀${m.diameter_cm ?? '?'}cm × H${m.height_cm ?? '?'}cm`;
+  if (m.shape_type === 'rectangular') return `${m.length_cm ?? '?'}×${m.width_cm ?? '?'}×H${m.height_cm ?? '?'}cm`;
+  if (m.shape_type === 'muffin_tray') return `${m.length_cm ?? '?'}×${m.width_cm ?? '?'}cm tray, ${m.cup_rows ?? '?'}×${m.cup_columns ?? '?'} cups ⌀${m.cup_diameter_cm ?? '?'}cm`;
+  return '';
+}
+
+// A material's catalog weight_grams means different things depending on shape: for round/
+// rectangular it's the whole item's weight, but for muffin_tray it's WEIGHT PER CUP (see the
+// Materials form's own conditional label below) -- every place that needs "how much can the
+// whole thing hold/weigh" (the recipe form/Calculator's Fill Weight pre-fill, the Materials list
+// display) must go through this rather than reading weight_grams directly, or a muffin tray's
+// per-cup number silently gets treated as if it were the whole tray's capacity -- wrong by a
+// factor of rows x columns. Only muffin_tray is multi-cavity right now (the only shape with its
+// own cup_rows/cup_columns fields at all -- see MATERIAL_SHAPE_PRESETS), so it's the only shape
+// this branches on; a future multi-cavity shape would need the same treatment.
+function materialCapacityGrams(m) {
+  if (!m || m.weight_grams == null) return null;
+  if (m.shape_type === 'muffin_tray') {
+    if (!(m.cup_rows > 0) || !(m.cup_columns > 0)) return null;
+    return m.cup_rows * m.cup_columns * m.weight_grams;
+  }
+  return m.weight_grams;
+}
+
+// Materials list column display -- muffin trays show the raw catalog value with its actual unit
+// (per cup, matching the form's own relabeled field) alongside the computed tray total, so
+// neither number is shown bare and mistakable for the other.
+function formatMaterialWeight(m) {
+  if (m.weight_grams == null) return '–';
+  if (m.shape_type === 'muffin_tray') {
+    const total = materialCapacityGrams(m);
+    return total != null ? `${m.weight_grams} g/cup (${total} g total)` : `${m.weight_grams} g/cup`;
+  }
+  return `${m.weight_grams}`;
+}
+
+function renderMaterialDimensionFields(container, shapeType, existingValues) {
+  const preset = MATERIAL_SHAPE_PRESETS[shapeType];
+  container.innerHTML = preset.fields.map(f => `
+    <div class="field" style="max-width:150px;">
+      <label>${f.label}</label>
+      <input id="mf-dim-${f.key}" type="number" min="0" step="${f.step}" value="${existingValues?.[f.key] ?? ''}" />
+    </div>
+  `).join('');
+}
+
+function readMaterialDims(shapeType) {
+  const preset = MATERIAL_SHAPE_PRESETS[shapeType];
+  const dims = {};
+  preset.fields.forEach(f => {
+    const el = document.getElementById(`mf-dim-${f.key}`);
+    const raw = el ? el.value.trim() : '';
+    dims[f.key] = raw === '' ? null : parseFloat(raw);
+  });
+  return dims;
+}
+
+// Always sends every possible dimension column, nulling out whichever ones don't belong to the
+// CURRENT shape -- so switching a material from e.g. Muffin Tray to Round before saving doesn't
+// leave stale cup_* values behind in the row.
+function buildMaterialDimensionPayload(shapeType) {
+  const current = readMaterialDims(shapeType);
+  const payload = {};
+  Object.keys(MATERIAL_DIMENSION_DB_KEYS).forEach(key => { payload[key] = current[key] ?? null; });
+  return payload;
+}
+
+// ------------------------------------------------------------------
+// Parametric 3D shape preview (three.js, pinned to 0.160.0's classic global build -- see
+// index.html's own comment on why). Render-on-demand, not a continuous animation loop -- this
+// only ever needs to redraw right after a drag/zoom/shape-change, never on its own, so there's
+// no requestAnimationFrame loop to manage or leak. Camera orbit/zoom is hand-rolled (drag to
+// orbit, wheel to zoom) since three.js dropped its own classic-script OrbitControls before
+// 0.160.0 -- this only needs to spin/zoom around one object, not OrbitControls' full
+// pan/damping/keyboard feature set.
+//
+// Shadow-mapped lighting (not just an ambient/fill pair) is deliberate, not decoration: each
+// built shape is a genuinely hollow, open-top container (see buildMaterialGroup) whose own outer
+// wall casts a real shadow onto its own inner floor -- that self-shadowing is what makes the
+// inside read as darker/recessed than the sunlit outer rim, exactly the "this is a container, not
+// a slab" cue asked for. A ground plane (THREE.ShadowMaterial -- invisible except where a shadow
+// actually falls on it) grounds the object against the canvas's own background instead of leaving
+// it looking like it's floating.
+// ------------------------------------------------------------------
+function createMaterialPreview3D(canvasEl) {
+  const renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000);
+
+  // Hemisphere light gives the steel a believable soft top/bottom tonal gradient with no
+  // environment map to load (a full PBR reflection map would need an extra asset/RoomEnvironment
+  // import -- this is the lightweight equivalent, tuned for a brushed-metal rather than mirror
+  // look together with the material's own roughness below).
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.55));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.15);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(1024, 1024);
+  keyLight.shadow.bias = -0.0015;
+  scene.add(keyLight);
+  scene.add(keyLight.target);
+  const fillLight = new THREE.DirectionalLight(0xdce8ff, 0.3);
+  scene.add(fillLight);
+
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.ShadowMaterial({ opacity: 0.22 }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  let group = null;
+  // Orbit target -- the built shape's own bounding-box center, not a hardcoded (0,0,0). The
+  // hollow shapes below aren't built symmetric around the origin (each sits with its floor at
+  // y=0, same convention a real tray "resting on a surface" would use), so orbiting around a
+  // fixed world origin would spin the camera around the tray's base/corner instead of its middle.
+  let target = new THREE.Vector3(0, 0, 0);
+  let radius = 40, theta = Math.PI / 4, phi = Math.PI / 3;
+
+  function positionCamera() {
+    camera.position.set(
+      target.x + radius * Math.sin(phi) * Math.sin(theta),
+      target.y + radius * Math.cos(phi),
+      target.z + radius * Math.sin(phi) * Math.cos(theta)
+    );
+    camera.lookAt(target);
+  }
+
+  function render() { renderer.render(scene, camera); }
+
+  let dragging = false, lastX = 0, lastY = 0;
+  function onPointerDown(e) { dragging = true; lastX = e.clientX; lastY = e.clientY; canvasEl.setPointerCapture(e.pointerId); }
+  function onPointerUp(e) { dragging = false; canvasEl.releasePointerCapture(e.pointerId); }
+  function onPointerMove(e) {
+    if (!dragging) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    theta -= dx * 0.008;
+    phi = Math.min(Math.max(phi - dy * 0.008, 0.15), Math.PI - 0.15);
+    positionCamera();
+    render();
+  }
+  function onWheel(e) {
+    e.preventDefault();
+    radius = Math.min(Math.max(radius * (1 + e.deltaY * 0.001), 8), 300);
+    positionCamera();
+    render();
+  }
+  canvasEl.addEventListener('pointerdown', onPointerDown);
+  canvasEl.addEventListener('pointerup', onPointerUp);
+  canvasEl.addEventListener('pointermove', onPointerMove);
+  canvasEl.addEventListener('wheel', onWheel, { passive: false });
+
+  // Geometry only, deliberately -- every mesh's material is one of the two module-level,
+  // permanently-shared MATERIAL_STEEL/MATERIAL_STEEL_DARK instances (reused across every shape
+  // rebuild and every open preview, not created fresh per group), so disposing it here on every
+  // dimension keystroke would kill a material still in use the moment the very next shape is
+  // built. Geometry, by contrast, genuinely is rebuilt fresh every call and needs disposing.
+  function disposeGroup(g) {
+    g.traverse(obj => {
+      if (obj.geometry) obj.geometry.dispose();
+    });
+  }
+
+  function setShape(shapeType, dims) {
+    if (group) { scene.remove(group); disposeGroup(group); group = null; }
+    const built = buildMaterialGroup(shapeType, dims);
+    if (!built) { render(); return; }
+    group = built;
+    scene.add(group);
+
+    // Frames the camera (and the key light + its shadow frustum, below) to the built shape's own
+    // size, so a tiny loaf pan and a huge sheet tray both fill the preview reasonably and both
+    // get a correctly-scaled shadow -- rather than one fixed setup tuned for a single size.
+    const box = new THREE.Box3().setFromObject(group);
+    const size = box.getSize(new THREE.Vector3());
+    box.getCenter(target);
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    radius = maxDim * 2.2;
+
+    ground.position.y = box.min.y;
+
+    keyLight.position.set(target.x + maxDim * 1.4, target.y + maxDim * 2.2, target.z + maxDim * 1.6);
+    keyLight.target.position.copy(target);
+    keyLight.target.updateMatrixWorld();
+    const shadowCam = keyLight.shadow.camera;
+    const half = maxDim * 1.6;
+    shadowCam.left = -half; shadowCam.right = half; shadowCam.top = half; shadowCam.bottom = -half;
+    shadowCam.near = 0.1; shadowCam.far = maxDim * 8;
+    shadowCam.updateProjectionMatrix();
+    fillLight.position.set(target.x - maxDim * 1.2, target.y + maxDim * 0.8, target.z - maxDim * 1.4);
+
+    positionCamera();
+    render();
+  }
+
+  function resize() {
+    const w = canvasEl.clientWidth || 1, h = canvasEl.clientHeight || 1;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    render();
+  }
+
+  positionCamera();
+
+  return {
+    setShape,
+    resize,
+    dispose() {
+      canvasEl.removeEventListener('pointerdown', onPointerDown);
+      canvasEl.removeEventListener('pointerup', onPointerUp);
+      canvasEl.removeEventListener('pointermove', onPointerMove);
+      canvasEl.removeEventListener('wheel', onWheel);
+      if (group) disposeGroup(group);
+      ground.geometry.dispose();
+      ground.material.dispose();
+      renderer.dispose();
+    },
+  };
+}
+
+// Stainless-steel PBR look (high metalness, moderate roughness for a brushed/satin sheen rather
+// than a mirror) -- shared by every shape below. steelDarkMat is used only for the muffin tray's
+// cup indentations, slightly darker/duller to read as recessed even before shadow is factored in.
+const MATERIAL_STEEL = new THREE.MeshStandardMaterial({ color: 0xC9CDD1, metalness: 0.85, roughness: 0.38, side: THREE.DoubleSide });
+const MATERIAL_STEEL_DARK = new THREE.MeshStandardMaterial({ color: 0x9BA1A6, metalness: 0.8, roughness: 0.5, side: THREE.DoubleSide });
+
+// Builds a genuinely hollow, open-top rectangular container (floor + 4 walls, five separate box
+// meshes) rather than one solid block -- plain box primitives instead of an extruded/holed shape
+// or a CSG subtraction, so normals/UVs behave predictably with no exotic-geometry edge cases.
+// Every mesh gets its own real inner faces (visible when looking down into it) and casts/receives
+// shadow, which is what actually makes the inside read as recessed -- see createMaterialPreview3D.
+function addHollowBox(group, l, w, h, mat) {
+  const wallT = Math.min(Math.max(Math.min(l, w) * 0.045, 0.3), 2, Math.min(l, w) * 0.4);
+  const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+  const innerH = Math.max(h - floorT, 0.1);
+  const sideDepth = Math.max(w - 2 * wallT, 0.1);
+
+  function addMesh(geo, x, y, z) {
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  }
+
+  addMesh(new THREE.BoxGeometry(l, floorT, w), 0, floorT / 2, 0); // floor
+  addMesh(new THREE.BoxGeometry(l, innerH, wallT), 0, floorT + innerH / 2, -w / 2 + wallT / 2); // back wall
+  addMesh(new THREE.BoxGeometry(l, innerH, wallT), 0, floorT + innerH / 2, w / 2 - wallT / 2); // front wall
+  addMesh(new THREE.BoxGeometry(wallT, innerH, sideDepth), -l / 2 + wallT / 2, floorT + innerH / 2, 0); // left wall
+  addMesh(new THREE.BoxGeometry(wallT, innerH, sideDepth), l / 2 - wallT / 2, floorT + innerH / 2, 0); // right wall
+}
+
+// Approximates each shape with plain geometry -- no CSG/boolean-subtraction library involved
+// (three.js has none built in, and adding one would be a second, heavier dependency just for a
+// cosmetic refinement). Round uses a single revolved (LatheGeometry) profile -- the natural way
+// to build a hollow vessel of revolution, tracing outer wall up, across the rim, down the inner
+// wall, and across the interior floor in one continuous path. Rectangular uses addHollowBox (a
+// box has no rotational symmetry for Lathe to exploit). The muffin tray is its own case again --
+// a solid base slab plus a thin extruded "rim plate" with one hole per cup (THREE.Shape + holes
+// via ExtrudeGeometry), each hole continued below by its own small rounded/tapered LatheGeometry
+// well -- see the muffin_tray branch below for the full reasoning. All shapes sit with their
+// floor's underside at y=0 (like a real tray resting on a surface), not centered on the origin --
+// see the preview's own orbit-target comment for why that matters here. Returns null when the
+// current shape's required dimensions aren't all filled in yet (a blank/partial New Material form).
+function buildMaterialGroup(shapeType, dims) {
+  const group = new THREE.Group();
+
+  if (shapeType === 'round') {
+    const { diameterCm: d, heightCm: h } = dims;
+    if (!(d > 0) || !(h > 0)) return null;
+    const outerR = d / 2;
+    const wallT = Math.min(Math.max(outerR * 0.07, 0.3), 1.8, outerR * 0.4);
+    const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+    const innerR = Math.max(outerR - wallT, 0.05);
+    const profile = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(outerR, 0),
+      new THREE.Vector2(outerR, h),
+      new THREE.Vector2(innerR, h),
+      new THREE.Vector2(innerR, floorT),
+      new THREE.Vector2(0, floorT),
+    ];
+    const mesh = new THREE.Mesh(new THREE.LatheGeometry(profile, 48), MATERIAL_STEEL);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  } else if (shapeType === 'rectangular') {
+    const { lengthCm: l, widthCm: w, heightCm: h } = dims;
+    if (!(l > 0) || !(w > 0) || !(h > 0)) return null;
+    addHollowBox(group, l, w, h, MATERIAL_STEEL);
+  } else if (shapeType === 'muffin_tray') {
+    const { lengthCm: l, widthCm: w, heightCm: h, cupDiameterCm: cd, cupDepthCm: cdepth, cupRows: rows, cupColumns: cols } = dims;
+    if (!(l > 0) || !(w > 0) || !(h > 0) || !(cd > 0) || !(cdepth > 0) || !(rows > 0) || !(cols > 0)) return null;
+
+    // A real muffin tray is a solid, flat-rimmed slab with round wells punched into it -- NOT an
+    // open hollow box (addHollowBox, right for round/rectangular pans) with separate cup meshes
+    // just dropped inside it, which is what this used to build: the gaps between/around cups
+    // exposed the box's own large, much-lower open floor, reading as a deep surrounding pit
+    // instead of a flat bordered tray. Rebuilt in two solid layers instead -- no CSG needed:
+    //  1) a plain solid BoxGeometry filling the tray's full footprint/height (nothing hollow to
+    //     see through), and
+    //  2) a thin flat "rim plate" on top -- a THREE.Shape (the tray's outer rectangle) with one
+    //     circular hole per cup, extruded via ExtrudeGeometry. Extruding a shape-with-holes is a
+    //     genuine three.js feature (used for things like punched text/plate CAD demos): it
+    //     triangulates correctly-wound walls around every hole for free, which is exactly "a flat
+    //     bordered plate with round openings" -- no boolean subtraction required.
+    // Each cup then continues below the rim plate's hole as its own small LatheGeometry well --
+    // same profile family as the round vessel's hollow interior and the previous cup fix, just
+    // with more points so the wall eases into a gentle curve (not a straight-sided cone) and a
+    // quarter-circle fillet rounds the wall into the floor, instead of meeting it at a sharp
+    // corner -- matching a real muffin cup's tapered, rounded-bottom shape.
+    const cupX = (c) => -l / 2 + (l / (cols + 1)) * (c + 1);
+    const cupZ = (r) => -w / 2 + (w / (rows + 1)) * (r + 1);
+    const holeR = cd / 2;
+
+    // Rim plate thickness -- thin relative to the tray (just enough to read as a real bordered
+    // plate), but also capped by a fraction of cup depth so there's always meaningful well depth
+    // left below it for the tapered/rounded portion.
+    const rimT = Math.min(Math.max(h * 0.2, 0.15), 0.8, h * 0.4, cdepth * 0.35);
+    const baseH = Math.max(h - rimT, 0.05);
+
+    const base = new THREE.Mesh(new THREE.BoxGeometry(l, baseH, w), MATERIAL_STEEL);
+    base.position.set(0, baseH / 2, 0);
+    base.castShadow = true;
+    base.receiveShadow = true;
+    group.add(base);
+
+    // Shape is built in local XY and extruded along local Z, then rotated so Z becomes world Y
+    // (up) -- the standard "floor plan extruded vertically" three.js pattern. That rotation
+    // (rotateX(-90deg)) maps local Y to -world Z, which is why hole/outline Y coordinates below
+    // are the NEGATED world Z they need to end up at.
+    const outline = new THREE.Shape();
+    outline.moveTo(-l / 2, w / 2);
+    outline.lineTo(l / 2, w / 2);
+    outline.lineTo(l / 2, -w / 2);
+    outline.lineTo(-l / 2, -w / 2);
+    outline.closePath();
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const hole = new THREE.Path();
+        hole.absarc(cupX(c), -cupZ(r), holeR, 0, Math.PI * 2, false);
+        outline.holes.push(hole);
+      }
+    }
+    const rimGeo = new THREE.ExtrudeGeometry(outline, { depth: rimT, bevelEnabled: false, curveSegments: 24 });
+    const rimPlate = new THREE.Mesh(rimGeo, MATERIAL_STEEL);
+    rimPlate.rotateX(-Math.PI / 2);
+    rimPlate.position.y = baseH;
+    rimPlate.castShadow = true;
+    rimPlate.receiveShadow = true;
+    group.add(rimPlate);
+
+    // Each cup's well picks up exactly where the rim plate's hole wall ends (same radius holeR,
+    // at y = baseH) and continues down to a rounded bottom: an eased taper from holeR to a
+    // smaller bottomR, then a quarter-circle fillet from bottomR down to the center floor. Same
+    // "down, then inward toward the axis" point direction as the round vessel's own hollow
+    // interior and the previous cup fix -- that's what keeps the surface facing up/inward
+    // (concave, visible from above) rather than flipping convex.
+    const wellTopY = baseH;
+    const floorY = Math.max(h - cdepth, 0.05);
+    const wellDepth = Math.max(wellTopY - floorY, 0.05);
+    const bottomR = Math.min(holeR * 0.55, wellDepth * 0.9);
+    const wallBottomY = floorY + bottomR;
+    const wallSegs = 6;
+    const filletSegs = 6;
+    const cupProfile = [];
+    for (let i = 0; i <= wallSegs; i++) {
+      const t = i / wallSegs;
+      const ease = 0.5 - 0.5 * Math.cos(t * Math.PI); // smooth 0..1, curves the wall instead of a straight cone
+      cupProfile.push(new THREE.Vector2(
+        holeR + (bottomR - holeR) * ease,
+        wellTopY + (wallBottomY - wellTopY) * ease
+      ));
+    }
+    for (let j = 1; j <= filletSegs; j++) {
+      const t = j / filletSegs;
+      const a = t * Math.PI / 2;
+      cupProfile.push(new THREE.Vector2(bottomR * Math.cos(a), floorY + bottomR * (1 - Math.sin(a))));
+    }
+    const cupGeo = new THREE.LatheGeometry(cupProfile, 24);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const cup = new THREE.Mesh(cupGeo, MATERIAL_STEEL_DARK);
+        cup.castShadow = true;
+        cup.receiveShadow = true;
+        cup.position.set(cupX(c), 0, cupZ(r));
+        group.add(cup);
+      }
+    }
+  } else {
+    return null;
+  }
+
+  return group;
+}
+
+function renderMaterialsView(main) {
+  const s = state.materials;
+  if (s.view === 'form') return renderMaterialFormView(main);
+  return renderMaterialsListView(main);
+}
+
+function openNewMaterialForm() {
+  state.materials.view = 'form';
+  state.materials.formId = null;
+  state.materials.pendingPhoto = null;
+  state.materials.removePhoto = false;
+  renderView();
+}
+
+function openEditMaterialForm(id) {
+  state.materials.view = 'form';
+  state.materials.formId = id;
+  state.materials.pendingPhoto = null;
+  state.materials.removePhoto = false;
+  renderView();
+}
+
+function goBackToMaterialsList() {
+  state.materials.view = 'list';
+  state.materials.formId = null;
+  state.materials.pendingPhoto = null;
+  state.materials.removePhoto = false;
+  renderView();
+}
+
+async function renderMaterialsListView(main) {
+  const materials = await window.api.listMaterials();
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Materials</h1><span class="section-pill">Trays, molds &amp; pans</span></div>
+      <button class="primary" id="add-material-btn">+ Add Material</button>
+    </div>
+    <div class="search-bar">
+      <label for="material-search">Search by name or code</label>
+      <input id="material-search" type="search" />
+    </div>
+    <div id="materials-content">Loading…</div>
+  `;
+  document.getElementById('add-material-btn').addEventListener('click', () => openNewMaterialForm());
+
+  const searchInput = document.getElementById('material-search');
+  const content = document.getElementById('materials-content');
+
+  if (materials.length === 0) {
+    content.innerHTML = `<div class="empty-state"><div class="display">No materials yet</div>Click "+ Add Material" to create the first one.</div>`;
+    return;
+  }
+
+  function renderFiltered() {
+    const query = searchInput.value.trim().toLowerCase();
+    const filtered = query
+      ? materials.filter(m => m.name.toLowerCase().includes(query) || m.code.toLowerCase().includes(query))
+      : materials;
+
+    if (filtered.length === 0) {
+      content.innerHTML = `<div class="empty-state">No materials match "${searchInput.value}".</div>`;
+      return;
+    }
+
+    content.innerHTML = `
+      <table class="materials-table">
+        <thead><tr><th>Code</th><th>Name</th><th>Shape</th><th>Dimensions</th><th>Weight (g)</th><th></th></tr></thead>
+        <tbody>
+          ${filtered.map(m => `
+            <tr>
+              <td>${m.code}</td>
+              <td>${m.name}</td>
+              <td>${MATERIAL_SHAPE_PRESETS[m.shape_type]?.label || m.shape_type}</td>
+              <td>${formatMaterialDimensions(m)}</td>
+              <td>${formatMaterialWeight(m)}</td>
+              <td style="text-align:right">
+                <button class="icon-btn" data-edit="${m.id}">Edit</button>
+                <button class="icon-btn danger" data-delete="${m.id}">Delete</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      btn.addEventListener('click', () => openEditMaterialForm(parseInt(btn.dataset.edit, 10)));
+    });
+    content.querySelectorAll('[data-delete]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.delete, 10);
+        const m = materials.find(x => x.id === id);
+        if (!confirm(`Delete "${m.name}"? This cannot be undone.`)) return;
+        const result = await window.api.deleteMaterial(id);
+        if (!result.success) {
+          if (result.inUse) alert(`"${m.name}" is used elsewhere and can't be deleted.`);
+          else alert('Delete failed.');
+          return;
+        }
+        renderMaterialsListView(main);
+      });
+    });
+  }
+
+  searchInput.addEventListener('input', renderFiltered);
+  renderFiltered();
+}
+
+async function renderMaterialFormView(main) {
+  const s = state.materials;
+  const editing = !!s.formId;
+  let material = null;
+  let existingPhotoDataUrl = null;
+
+  if (editing) {
+    material = await window.api.getMaterial(s.formId);
+    if (material.photo_path) existingPhotoDataUrl = await window.api.getMaterialPhoto(material.photo_path);
+  }
+
+  const currentPhotoSrc = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+  const initialShape = material?.shape_type || 'round';
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>${editing ? 'Edit Material' : 'New Material'}</h1>
+        <span class="section-pill">${editing ? material.code : 'MS code assigned after saving'}</span>
+      </div>
+      <button class="secondary" id="mf-back-btn">← Back to Materials</button>
+    </div>
+
+    <div class="generate-controls">
+      <div class="field"><label>Name</label><input id="mf-name" value="${material?.name || ''}" dir="auto" /></div>
+      <div class="field" style="max-width:240px;">
+        <label>Shape Type</label>
+        <select id="mf-shape">
+          ${Object.entries(MATERIAL_SHAPE_PRESETS).map(([key, p]) => `<option value="${key}" ${initialShape === key ? 'selected' : ''}>${p.label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" style="max-width:200px;">
+        <label id="mf-weight-label">Weight (g)</label>
+        <input id="mf-weight" type="number" min="0" step="1" value="${material?.weight_grams ?? ''}" />
+        <span id="mf-weight-hint" style="font-size:11px; color:var(--neutral);"></span>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:8px;">
+      <div style="flex:1 1 280px; min-width:260px;">
+        <h3 style="margin-bottom:10px;">Dimensions</h3>
+        <div id="mf-dimension-fields" class="generate-controls" style="margin-bottom:0;"></div>
+      </div>
+      <div style="flex:1 1 340px; min-width:300px;">
+        <h3 style="margin-bottom:10px;">3D Preview</h3>
+        <div class="material-preview-wrap">
+          <canvas id="mf-preview-canvas"></canvas>
+          <div class="material-preview-empty" id="mf-preview-empty">Enter dimensions to see a live 3D preview.</div>
+          <div class="material-preview-hint">Drag to rotate · Scroll to zoom</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="field" style="margin:16px 0; max-width:320px;">
+      <label>Photo (optional)</label>
+      <input type="file" id="mf-photo-input" accept="image/jpeg,image/png" />
+      <div id="mf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
+        <img id="mf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <button type="button" class="secondary" id="mf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
+      </div>
+    </div>
+
+    <button class="primary" id="mf-save-btn">${editing ? 'Save Changes' : 'Save Material'}</button>
+    <span id="mf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
+  `;
+
+  // Photo -- single-photo model, same pattern as Recipe Book's own (see renderRecipeFormView).
+  function updatePhotoPreview() {
+    const src = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+    document.getElementById('mf-photo-preview-wrap').style.display = src ? '' : 'none';
+    document.getElementById('mf-photo-preview').src = src || '';
+  }
+  document.getElementById('mf-photo-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png'].includes(file.type)) {
+      alert('Please choose a JPG or PNG image.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Photo must be 5MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(',')[1];
+      const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+      s.pendingPhoto = { dataUrl, base64, ext };
+      s.removePhoto = false;
+      updatePhotoPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+  document.getElementById('mf-photo-remove-btn').addEventListener('click', () => {
+    s.pendingPhoto = null;
+    s.removePhoto = true;
+    document.getElementById('mf-photo-input').value = '';
+    updatePhotoPreview();
+  });
+
+  // Dimensions + live 3D preview -- rebuilt whenever the shape type changes (a different field
+  // set entirely), refreshed on every dimension keystroke otherwise.
+  const preview3D = createMaterialPreview3D(document.getElementById('mf-preview-canvas'));
+  const dimensionFieldsEl = document.getElementById('mf-dimension-fields');
+
+  function currentShape() { return document.getElementById('mf-shape').value; }
+
+  function updatePreview() {
+    const shape = currentShape();
+    const dims = readMaterialDims(shape);
+    const hasAllDims = MATERIAL_SHAPE_PRESETS[shape].fields.every(f => dims[f.key] > 0);
+    document.getElementById('mf-preview-empty').style.display = hasAllDims ? 'none' : '';
+    preview3D.setShape(shape, dims);
+  }
+
+  // For muffin_tray, the Weight field means weight PER CUP, not the whole tray -- see
+  // materialCapacityGrams's own comment for why every consumer of this catalog value needs to
+  // multiply by rows x columns rather than reading weight_grams as a total. Relabels the field
+  // and shows the computed total live so it's unambiguous while she's actually entering it, not
+  // just after saving.
+  function updateWeightLabel() {
+    const shape = currentShape();
+    const labelEl = document.getElementById('mf-weight-label');
+    const hintEl = document.getElementById('mf-weight-hint');
+    if (shape !== 'muffin_tray') {
+      labelEl.textContent = 'Weight (g)';
+      hintEl.textContent = '';
+      return;
+    }
+    labelEl.textContent = 'Weight per Cup (g)';
+    const dims = readMaterialDims(shape);
+    const weightRaw = document.getElementById('mf-weight').value.trim();
+    const weight = weightRaw === '' ? null : parseFloat(weightRaw);
+    const total = materialCapacityGrams({ shape_type: shape, weight_grams: weight, cup_rows: dims.cupRows, cup_columns: dims.cupColumns });
+    hintEl.textContent = total != null ? `Tray total: ${total} g (${dims.cupRows}×${dims.cupColumns} cups)` : '';
+  }
+
+  function renderDimensionsForShape(shape, existingValues) {
+    renderMaterialDimensionFields(dimensionFieldsEl, shape, existingValues);
+    dimensionFieldsEl.querySelectorAll('input').forEach(input => {
+      input.addEventListener('input', () => { updatePreview(); updateWeightLabel(); });
+    });
+    updatePreview();
+    updateWeightLabel();
+  }
+
+  document.getElementById('mf-weight').addEventListener('input', updateWeightLabel);
+
+  renderDimensionsForShape(initialShape, materialDimsFromRow(material));
+
+  document.getElementById('mf-shape').addEventListener('change', () => {
+    renderDimensionsForShape(currentShape(), {});
+  });
+
+  // The preview canvas has no pixel size of its own (CSS gives its wrapper height:300px, width
+  // 100%) -- resize once layout has settled, and again if the window itself resizes while this
+  // form stays open.
+  requestAnimationFrame(() => preview3D.resize());
+  const onWindowResize = () => preview3D.resize();
+  window.addEventListener('resize', onWindowResize);
+
+  // This view is torn down and rebuilt fresh on every navigation (same as every other screen in
+  // this app), never re-rendered in place -- so the running WebGL context needs an explicit
+  // teardown, or every visit to this form leaks another one. Both ways out of this form (Back,
+  // successful Save) go through here.
+  function leaveForm() {
+    window.removeEventListener('resize', onWindowResize);
+    preview3D.dispose();
+  }
+
+  document.getElementById('mf-back-btn').addEventListener('click', () => {
+    leaveForm();
+    goBackToMaterialsList();
+  });
+
+  document.getElementById('mf-save-btn').addEventListener('click', async () => {
+    const name = document.getElementById('mf-name').value.trim();
+    if (!name) return alert('Please enter a material name.');
+
+    const statusEl = document.getElementById('mf-status');
+    const saveBtn = document.getElementById('mf-save-btn');
+    saveBtn.disabled = true;
+    statusEl.textContent = 'Saving…';
+
+    const shape = currentShape();
+    const weightRaw = document.getElementById('mf-weight').value.trim();
+
+    const payload = {
+      id: s.formId || undefined,
+      name,
+      shapeType: shape,
+      ...buildMaterialDimensionPayload(shape),
+      weightGrams: weightRaw === '' ? null : parseFloat(weightRaw),
+      removePhoto: s.removePhoto,
+    };
+    if (s.pendingPhoto) {
+      payload.photoBase64 = s.pendingPhoto.base64;
+      payload.photoExt = s.pendingPhoto.ext;
+    }
+
+    try {
+      await window.api.saveMaterial(payload);
+      leaveForm();
+      goBackToMaterialsList();
+    } catch (err) {
+      statusEl.textContent = '';
+      saveBtn.disabled = false;
       alert(`Save failed: ${err.message}`);
     }
   });

@@ -29,6 +29,13 @@ contextBridge.exposeInMainWorld('api', {
   addWasteType: (payload) => ipcRenderer.invoke('add-waste-type', payload),
   updateWasteType: (payload) => ipcRenderer.invoke('update-waste-type', payload),
   deleteWasteType: (id) => ipcRenderer.invoke('delete-waste-type', id),
+
+  listMaterials: () => ipcRenderer.invoke('list-materials'),
+  searchMaterials: (query) => ipcRenderer.invoke('search-materials', query),
+  getMaterial: (id) => ipcRenderer.invoke('get-material', id),
+  saveMaterial: (payload) => ipcRenderer.invoke('save-material', payload),
+  deleteMaterial: (id) => ipcRenderer.invoke('delete-material', id),
+  getMaterialPhoto: (photoPath) => ipcRenderer.invoke('get-material-photo', photoPath),
   listRecipes: () => ipcRenderer.invoke('list-recipes'),
   searchRecipes: (query) => ipcRenderer.invoke('search-recipes', query),
   getRecipe: (id) => ipcRenderer.invoke('get-recipe', id),

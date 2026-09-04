@@ -30,9 +30,10 @@
       <div class="section-label">Recipes</div>
       <button class="nav-btn" data-view="recipes">Recipe Book</button>
       <button class="nav-btn" data-view="extractor">Recipe Extractor</button>
-      <button class="nav-btn" data-view="extractedIngredients">Extracted Ingredients</button>
       <button class="nav-btn" data-view="calculator">Recipe Calculator</button>
+      <button class="nav-btn" data-view="extractedIngredients">Extracted Ingredients</button>
       <button class="nav-btn" data-view="ingredients">Ingredients</button>
+      <button class="nav-btn" data-view="materials">Materials</button>
 
       <div class="sidebar-footer">Developed by Yahya Sleiman</div>
     </nav>
@@ -40,6 +41,13 @@
     <main class="main" id="main"></main>
   </div>
 
+  <!-- Materials catalog's 3D shape preview. Pinned to 0.160.0 -- the last three.js release with
+       a classic global build (defines window.THREE) rather than an ES module; every other script
+       in this app is a plain classic <script> with no bundler, so this keeps that convention
+       instead of introducing the app's first ES module import. See renderer.js's Materials
+       section for the (hand-rolled, since three.js dropped its own classic-script OrbitControls
+       before 0.160.0) drag-to-orbit/scroll-to-zoom camera controls. -->
+  <script src="../node_modules/three/build/three.min.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

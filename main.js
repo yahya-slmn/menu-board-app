@@ -577,6 +577,143 @@ ipcMain.handle('delete-waste-type', async (e, id) => {
   return { success: true };
 });
 
+// ============================================================
+// Materials / Trays -- a chef-managed catalog of baking equipment (trays, molds, pans), each
+// with an auto-generated MS-##### code (mirrors nextRecipeCode below), a parametric shape +
+// dimensions (rendered as a live 3D preview in the renderer -- nothing 3D-related is stored
+// here, just the raw numbers the renderer builds a THREE.js geometry from), an optional single
+// photo (same pattern as Recipe Book's photo_path below), and a chef-defined "weight" (the
+// practical product weight this material typically holds -- e.g. how much batter/dough a given
+// tray takes in practice, not a rigid physical capacity, so it's plain editable input, never
+// computed from the dimensions). Catalog-only for now -- nothing else in the schema references
+// materials yet; linking a material to a recipe is a separate later phase.
+// ============================================================
+
+async function nextMaterialCode() {
+  const { data, error } = await supabase.from('materials').select('code').like('code', 'MS-%');
+  if (error) throw supaFail('nextMaterialCode', error);
+  let max = 0;
+  for (const row of data) {
+    const n = parseInt(row.code.slice(3), 10);
+    if (!isNaN(n) && n > max) max = n;
+  }
+  return `MS-${String(max + 1).padStart(5, '0')}`;
+}
+
+// Same private-bucket, session-authenticated, single-photo pattern as RECIPE_PHOTOS_BUCKET above.
+const MATERIAL_PHOTOS_BUCKET = 'material-photos';
+
+async function uploadMaterialPhoto(base64, ext) {
+  const path = `${crypto.randomUUID()}.${ext}`;
+  const buffer = Buffer.from(base64, 'base64');
+  const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+  const { error } = await supabase.storage.from(MATERIAL_PHOTOS_BUCKET).upload(path, buffer, { contentType });
+  if (error) throw supaFail('uploadMaterialPhoto', error);
+  return path;
+}
+
+async function deleteMaterialPhoto(path) {
+  if (!path) return;
+  const { error } = await supabase.storage.from(MATERIAL_PHOTOS_BUCKET).remove([path]);
+  if (error) console.error('[supabase] deleteMaterialPhoto failed (non-fatal):', error.message);
+}
+
+ipcMain.handle('get-material-photo', async (e, photoPath) => {
+  if (!photoPath) return null;
+  const { data, error } = await supabase.storage.from(MATERIAL_PHOTOS_BUCKET).download(photoPath);
+  if (error) throw supaFail('get-material-photo', error);
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const ext = photoPath.split('.').pop().toLowerCase();
+  const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+  return `data:${mime};base64,${buffer.toString('base64')}`;
+});
+
+ipcMain.handle('list-materials', async () => {
+  const { data, error } = await supabase.from('materials').select('*').order('name');
+  if (error) throw supaFail('list-materials', error);
+  return data;
+});
+
+ipcMain.handle('search-materials', async (e, query) => {
+  const q = (query || '').trim();
+  if (!q) return [];
+  const { data, error } = await supabase
+    .from('materials')
+    .select('id, code, name, shape_type')
+    .ilike('name', `%${q}%`)
+    .order('name')
+    .limit(25);
+  if (error) throw supaFail('search-materials', error);
+  return data;
+});
+
+ipcMain.handle('get-material', async (e, id) => {
+  const { data, error } = await supabase.from('materials').select('*').eq('id', id).single();
+  if (error) throw supaFail('get-material', error);
+  return data;
+});
+
+ipcMain.handle('save-material', async (e, payload) => {
+  const fields = {
+    name: payload.name,
+    shape_type: payload.shapeType,
+    diameter_cm: payload.diameterCm ?? null,
+    length_cm: payload.lengthCm ?? null,
+    width_cm: payload.widthCm ?? null,
+    height_cm: payload.heightCm ?? null,
+    cup_diameter_cm: payload.cupDiameterCm ?? null,
+    cup_depth_cm: payload.cupDepthCm ?? null,
+    cup_rows: payload.cupRows ?? null,
+    cup_columns: payload.cupColumns ?? null,
+    weight_grams: payload.weightGrams ?? null,
+  };
+
+  // photo_path is only ever touched when she actually picked a new file or hit "Remove Photo" --
+  // omitted from `fields` entirely otherwise, same convention save-recipe uses.
+  if (payload.photoBase64) {
+    fields.photo_path = await uploadMaterialPhoto(payload.photoBase64, payload.photoExt);
+  } else if (payload.removePhoto) {
+    fields.photo_path = null;
+  }
+
+  let materialId = payload.id;
+  if (materialId) {
+    const MATERIAL_GONE_MESSAGE = 'This material was deleted or changed elsewhere. Please refresh the Materials catalog and try again.';
+    const { data: existing, error: getErr } = await supabase.from('materials').select('photo_path').eq('id', materialId).maybeSingle();
+    if (getErr) throw supaFail('save-material: load existing', getErr);
+    if (!existing) throw new Error(MATERIAL_GONE_MESSAGE);
+
+    const { data: updated, error: updErr } = await supabase.from('materials').update(fields).eq('id', materialId).select('id');
+    if (updErr) throw supaFail('save-material: update materials', updErr);
+    if (!updated || updated.length === 0) throw new Error(MATERIAL_GONE_MESSAGE);
+
+    if ((payload.photoBase64 || payload.removePhoto) && existing.photo_path) {
+      await deleteMaterialPhoto(existing.photo_path);
+    }
+  } else {
+    const code = await nextMaterialCode();
+    const { data: inserted, error: insErr } = await supabase.from('materials').insert({ code, ...fields }).select('id').single();
+    if (insErr) throw supaFail('save-material: insert materials', insErr);
+    materialId = inserted.id;
+  }
+
+  return { id: materialId };
+});
+
+// materials has no FK dependents yet (catalog-only phase), so the 23503 catch here is purely
+// defensive/future-proofing for whenever a later phase links a material to a recipe -- same
+// convention as delete-waste-type/delete-ingredient above.
+ipcMain.handle('delete-material', async (e, id) => {
+  const { data: existing } = await supabase.from('materials').select('photo_path').eq('id', id).single();
+  const { error } = await supabase.from('materials').delete().eq('id', id);
+  if (error) {
+    if (error.code === '23503') return { success: false, inUse: true };
+    throw supaFail('delete-material', error);
+  }
+  if (existing?.photo_path) await deleteMaterialPhoto(existing.photo_path);
+  return { success: true };
+});
+
 ipcMain.handle('list-recipes', async () => {
   const { data, error } = await supabase
     .from('recipes')
@@ -614,7 +751,7 @@ async function fetchRecipeWithProcesses(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('recipe_processes')
-    .select('id, name, method, sort_order')
+    .select('id, name, method, sort_order, material_id, material_fill_weight_grams')
     .eq('recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchRecipeWithProcesses: load recipe_processes', procErr);
@@ -690,6 +827,19 @@ async function fetchRecipeWithProcesses(id) {
     wastesByProcess.get(rw.process_id).push(waste);
   }
 
+  // Same manual-Map join convention as ingredientById/wasteTypeById above -- material_id is a
+  // plain FK column on recipe_processes (see Phase C design notes: 1:1 per process, not a
+  // junction table), so this is just resolving it to a display name/code, not a real relationship
+  // this file leans on Supabase to embed.
+  const materialIds = [...new Set(processRows.map(p => p.material_id).filter(id => id != null))];
+  let materialById = new Map();
+  if (materialIds.length) {
+    const { data: materialsData, error: matErr } = await supabase
+      .from('materials').select('id, code, name').in('id', materialIds);
+    if (matErr) throw supaFail('fetchRecipeWithProcesses: load materials', matErr);
+    materialById = new Map(materialsData.map(m => [m.id, m]));
+  }
+
   const processes = processRows.map(p => ({
     id: p.id,
     name: p.name,
@@ -697,6 +847,10 @@ async function fetchRecipeWithProcesses(id) {
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
     wastes: wastesByProcess.get(p.id) || [],
+    material_id: p.material_id,
+    material_name: materialById.get(p.material_id)?.name,
+    material_code: materialById.get(p.material_id)?.code,
+    material_fill_weight_grams: p.material_fill_weight_grams,
   }));
 
   return { ...recipe, processes };
@@ -782,6 +936,10 @@ ipcMain.handle('save-recipe', async (e, payload) => {
     presentation_serving: payload.presentationServing || null,
     comment: payload.comment || null,
     checked_by: payload.checkedBy || null,
+    // Grams per portion/piece of the finished product -- optional, numeric (not free text like
+    // the rest of this object), already parsed client-side or null; ?? rather than || so a
+    // genuine 0 isn't silently coerced to null.
+    portion_weight_grams: payload.portionWeightGrams ?? null,
   };
 
   // photo_path is only ever touched when the chef actually picked a new file or hit "Remove
@@ -847,6 +1005,8 @@ ipcMain.handle('save-recipe', async (e, payload) => {
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
         sort_order: idx,
+        material_id: proc.materialId || null,
+        material_fill_weight_grams: proc.materialFillWeightGrams ?? null,
       })
       .select('id')
       .single();
@@ -1151,7 +1311,7 @@ async function fetchExtractedRecipeWithIngredients(id) {
 
   const { data: processRows, error: procErr } = await supabase
     .from('extracted_recipe_processes')
-    .select('id, name, method, sort_order')
+    .select('id, name, method, sort_order, material_id, material_fill_weight_grams')
     .eq('extracted_recipe_id', id)
     .order('sort_order');
   if (procErr) throw supaFail('fetchExtractedRecipeWithIngredients: load extracted_recipe_processes', procErr);
@@ -1224,6 +1384,15 @@ async function fetchExtractedRecipeWithIngredients(id) {
     wastesByProcess.get(rw.process_id).push(waste);
   }
 
+  const materialIds = [...new Set(processRows.map(p => p.material_id).filter(id => id != null))];
+  let materialById = new Map();
+  if (materialIds.length) {
+    const { data: materialsData, error: matErr } = await supabase
+      .from('materials').select('id, code, name').in('id', materialIds);
+    if (matErr) throw supaFail('fetchExtractedRecipeWithIngredients: load materials', matErr);
+    materialById = new Map(materialsData.map(m => [m.id, m]));
+  }
+
   const processes = processRows.map(p => ({
     id: p.id,
     name: p.name,
@@ -1231,6 +1400,10 @@ async function fetchExtractedRecipeWithIngredients(id) {
     sort_order: p.sort_order,
     ingredients: ingredientsByProcess.get(p.id) || [],
     wastes: wastesByProcess.get(p.id) || [],
+    material_id: p.material_id,
+    material_name: materialById.get(p.material_id)?.name,
+    material_code: materialById.get(p.material_id)?.code,
+    material_fill_weight_grams: p.material_fill_weight_grams,
   }));
 
   const { data: photoRows, error: photoErr } = await supabase
@@ -1335,6 +1508,10 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
     presentation_serving: payload.presentationServing || null,
     comment: payload.comment || null,
     checked_by: payload.checkedBy || null,
+    // Grams per portion/piece of the finished product -- optional, numeric (not free text like
+    // the rest of this object), already parsed client-side or null; ?? rather than || so a
+    // genuine 0 isn't silently coerced to null.
+    portion_weight_grams: payload.portionWeightGrams ?? null,
   };
 
   if (recipeId) {
@@ -1404,6 +1581,8 @@ ipcMain.handle('save-extracted-recipe', async (e, payload) => {
         name: (proc.name || '').trim() || `Process ${idx + 1}`,
         method: proc.method || null,
         sort_order: idx,
+        material_id: proc.materialId || null,
+        material_fill_weight_grams: proc.materialFillWeightGrams ?? null,
       })
       .select('id')
       .single();

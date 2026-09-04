@@ -347,10 +347,6 @@ table.items-table td.cat-cell {
 .field textarea { width: 100%; resize: vertical; }
 .field input[readonly] { background: var(--paper-dim); color: var(--sage-dark); font-weight: 600; }
 
-.total-qty-display {
-  font-size: 13px; color: var(--sage-dark); font-weight: 600; margin: 10px 0 2px;
-}
-
 /* ---------------- Recipe Extractor: saved-recipe photo gallery ---------------- */
 .photo-gallery {
   display: flex;
@@ -398,18 +394,28 @@ table.items-table td.cat-cell {
 }
 
 /* ---------------- Recipe Extractor: named process cards ---------------- */
+/* Shared by the recipe form (Recipe Book/Extractor) and the Recipe Calculator's own editable
+   process cards -- one visual language for "a process" everywhere it appears. The head is a
+   tinted band bled to the card's own edges (same treatment .day-head uses for a menu day),
+   giving each process a clear title bar instead of just a thin border separating it from the
+   next one -- important once 3-4 process cards stack in sequence (Extractor imports, multi-
+   process Calculator scaling). */
 .process-card {
   background: white;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 16px 18px;
-  margin-bottom: 16px;
+  padding: 0 18px 20px;
+  margin-bottom: 24px;
 }
 .process-card-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
+  margin: 0 -18px 16px;
+  padding: 13px 18px;
+  background: var(--paper-dim);
+  border-bottom: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
 }
 .process-card-head .process-name-input {
   flex: 1 1 auto;
@@ -420,8 +426,64 @@ table.items-table td.cat-cell {
   font-size: 14.5px;
   font-weight: 600;
   color: var(--ink);
+  background: white;
 }
 .process-card-head .process-name-input:focus { outline: none; border-color: var(--sage); }
+
+/* The Recipe Calculator's own per-process Scaling Mode/Multiplier/Target control, rendered
+   inline above that process's own ingredients (see renderInlineProcessScalingControls) -- a
+   plain divider rather than a second tinted band, so it doesn't visually compete with the
+   process-card-head band directly above it. */
+.process-scaling-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Computed, read-only figures (Total Quantity, Net Weight) -- the same box treatment regardless
+   of whether the underlying element is a readonly <input> (recipe form, via .field
+   input[readonly] below) or a plain <div> (Recipe Calculator's own live-recomputed figures), so
+   both contexts read as the same kind of value at a glance. */
+.computed-value-box {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-dim);
+  color: var(--sage-dark);
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+/* Wastes Applied -- same bordered, row-divided structure as the ingredient table above it (not
+   looser floating text), so the two read as equally "structured" parts of a process. */
+.process-waste-rows {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: white;
+}
+.process-waste-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.process-waste-row:last-child { border-bottom: none; }
+.process-waste-row:hover { background: var(--paper-dim); }
+.process-waste-name { flex: 1 1 auto; min-width: 0; font-size: 13px; }
+.process-waste-percent {
+  width: 70px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  font-family: inherit; font-size: 12.5px;
+}
+.process-waste-percent:focus { outline: none; border-color: var(--sage); }
+.process-waste-percent-sign { font-size: 12.5px; color: var(--neutral); }
+.process-waste-empty { padding: 8px 10px; color: var(--neutral); font-size: 12.5px; }
 
 .warning-banner {
   background: #FBF0DD; border: 1px solid var(--gold); border-radius: 8px;
@@ -454,16 +516,37 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 .history-toolbar label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--neutral); cursor: pointer; }
 
 /* ---------------- Recipe Book ---------------- */
-.recipes-table, .recipe-ingredients-table, .history-table { width: 100%; border-collapse: collapse; background: white; }
+/* materials-table shares this same base (clean auto-sizing, no table-layout:fixed/column-width
+   baggage -- that's scoped only to .recipes-table below, tailored to its own 7-column layout,
+   which wouldn't fit Materials' different columns) -- see renderMaterialsListView. */
+.recipes-table, .recipe-ingredients-table, .history-table, .materials-table { width: 100%; border-collapse: collapse; background: white; }
 .recipes-table td, .recipes-table th, .recipe-ingredients-table td, .recipe-ingredients-table th,
-.history-table td, .history-table th {
+.history-table td, .history-table th, .materials-table td, .materials-table th {
   padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px;
 }
-.recipes-table th, .recipe-ingredients-table th, .history-table th {
+.recipes-table th, .recipe-ingredients-table th, .history-table th, .materials-table th {
   color: var(--neutral); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
 }
 .history-table tbody tr { cursor: pointer; }
 .history-table tbody tr:hover { background: var(--paper-dim); }
+
+/* Recipe Book/Extractor's own list table -- fixed column widths (checkbox, Code, Category,
+   Prepared By, Date, actions) so rows stay aligned across month groups regardless of content
+   length; Name is the only column left unsized, so table-layout:fixed hands it all the
+   remaining width. Long names wrap within that width instead of overflowing/truncating, and the
+   row grows to fit (default table row behavior -- nothing extra needed for that part).
+   min-width on the table (rather than on the Name column alone, which table-layout:fixed would
+   just ignore) keeps every fixed column at its real size and Name at a usable minimum even in a
+   narrower window -- .recipe-month-group scrolls horizontally past that point instead of
+   squeezing Name to nothing, which would otherwise break every character onto its own line. */
+.recipes-table { table-layout: fixed; min-width: 850px; }
+.recipes-table th:nth-child(1), .recipes-table td:nth-child(1) { width: 32px; }
+.recipes-table th:nth-child(2), .recipes-table td:nth-child(2) { width: 90px; }
+.recipes-table th:nth-child(3), .recipes-table td:nth-child(3) { word-break: break-word; }
+.recipes-table th:nth-child(4), .recipes-table td:nth-child(4) { width: 130px; }
+.recipes-table th:nth-child(5), .recipes-table td:nth-child(5) { width: 130px; }
+.recipes-table th:nth-child(6), .recipes-table td:nth-child(6) { width: 100px; }
+.recipes-table th:nth-child(7), .recipes-table td:nth-child(7) { width: 150px; }
 .recipe-ingredients-table input {
   width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 12.5px;
 }
@@ -486,6 +569,14 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 }
 .text-list-input:focus { outline: none; border-color: var(--sage); }
 
+/* List-mode item drag-and-drop reordering -- same mechanism as ingredient-row drag below
+   (see wireTextListRowDrag), draggable lives only on the handle glyph, never the row or input. */
+.text-list-drag-handle { cursor: grab; color: var(--neutral); font-size: 15px; user-select: none; }
+.text-list-drag-handle:active { cursor: grabbing; }
+.text-list-row.dragging { opacity: 0.4; }
+.text-list-row.drag-over-top { box-shadow: inset 0 2px 0 var(--sage-dark); }
+.text-list-row.drag-over-bottom { box-shadow: inset 0 -2px 0 var(--sage-dark); }
+
 /* Ingredient row drag-and-drop reordering -- draggable lives only on the handle glyph
    (see wireIngredientRowDrag), never the row or its inputs, so this is purely visual. */
 .row-drag-handle-cell { width: 28px; padding-left: 4px !important; padding-right: 0 !important; }
@@ -495,7 +586,10 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 .recipe-ingredients-table tr.drag-over-top td { box-shadow: inset 0 2px 0 var(--sage-dark); }
 .recipe-ingredients-table tr.drag-over-bottom td { box-shadow: inset 0 -2px 0 var(--sage-dark); }
 
-.recipe-month-group { background: white; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; }
+.recipe-month-group {
+  background: white; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px;
+  overflow-y: hidden; overflow-x: auto;
+}
 .recipe-month-head { background: var(--paper-dim); padding: 10px 16px; font-family: 'Fraunces', serif; font-size: 15px; }
 .recipe-month-head label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .recipe-month-group .recipes-table { margin: 0; }
@@ -526,6 +620,23 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
   font-size: 11px; line-height: 1; padding: 5px 6px; border-radius: 4px;
 }
 .autocomplete-browse-btn:hover { color: var(--sage-dark); background: var(--paper-dim); }
+
+/* ---------------- Materials/Trays catalog: 3D shape preview ---------------- */
+.material-preview-wrap {
+  position: relative; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--paper-dim); overflow: hidden; height: 300px;
+}
+.material-preview-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.material-preview-wrap canvas:active { cursor: grabbing; }
+.material-preview-hint {
+  position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+  font-size: 11px; color: var(--neutral); background: rgba(251,248,242,0.85);
+  padding: 3px 10px; border-radius: 20px; pointer-events: none;
+}
+.material-preview-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--neutral); font-size: 12.5px; text-align: center; padding: 0 20px;
+}
 
 /* ---------------- Modal ---------------- */
 .modal-overlay {

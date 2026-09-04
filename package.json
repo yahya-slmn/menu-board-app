@@ -54,6 +54,7 @@
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
     "jimp": "^0.22.12",
+    "three": "0.160.0",
     "ws": "^8.21.2"
   },
   "devDependencies": {
