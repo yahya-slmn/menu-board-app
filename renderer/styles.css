@@ -530,6 +530,14 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 .history-table tbody tr { cursor: pointer; }
 .history-table tbody tr:hover { background: var(--paper-dim); }
 
+/* Materials list's own rowspan-merged category column -- same declarations as .items-table's own
+   td.cat-cell (Dish Catalog) and .day-table's (Menu), re-declared per table per that existing
+   convention rather than a shared global class. */
+table.materials-table td.cat-cell {
+  background: var(--paper-dim); font-weight: 600; font-size: 12px; color: var(--sage-dark);
+  vertical-align: top; border-right: 1px solid var(--line);
+}
+
 /* Recipe Book/Extractor's own list table -- fixed column widths (checkbox, Code, Category,
    Prepared By, Date, actions) so rows stay aligned across month groups regardless of content
    length; Name is the only column left unsized, so table-layout:fixed hands it all the
@@ -651,10 +659,11 @@ select.swap-select { font-size: 11px; padding: 2px 4px; border-radius: 4px; bord
 .modal .field input, .modal .field select { width: 100%; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 .portion-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.portion-cell { display: flex; flex-direction: column; gap: 3px; }
-.portion-cell-label {
-  font-size: 10.5px; color: var(--neutral); text-transform: uppercase; letter-spacing: 0.03em;
-}
+/* A checkbox + age-group name now (section/age-group membership only, no per-item quantity to
+   enter -- see openItemModal's own comment), not a stacked label-above-input like the rest of
+   .modal .field -- row layout, not .field's column one. */
+.portion-cell { display: flex; flex-direction: row; align-items: center; gap: 7px; font-size: 13px; }
+.portion-cell input[type="checkbox"] { width: auto; }
 
 /* ---------------- Export preview modal ---------------- */
 /* Reuses .modal's own scroll behavior (max-height: 84vh; overflow-y: auto) unchanged -- a long

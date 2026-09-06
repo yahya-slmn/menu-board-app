@@ -19,6 +19,7 @@ const {
 } = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 const { translateTexts } = require('./lib/translateRecipe');
+const { estimateCalories } = require('./lib/estimateCalories');
 
 let mainWindow;
 let loginWindow;
@@ -247,7 +248,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id')
+    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g')
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
 
@@ -265,6 +266,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         category_name: cat?.name,
         protein_code: pt?.code ?? null,
         protein_name: pt?.name ?? null,
+        calories_per_100g: mi.calories_per_100g,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };
@@ -294,7 +296,7 @@ ipcMain.handle('suggest-classification', (e, { name, mealPeriod, sectionCode }) 
 // below) and reported back as { success: false, duplicate: true } instead of throwing, since
 // the same dish name legitimately recurs across many categories in this catalog and the
 // renderer needs to tell the user why the save didn't go through rather than have it silently fail.
-ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, portions, sectionCode }) => {
+ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, portions, sectionCode }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
 
@@ -305,6 +307,18 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       category_id: category.id,
       protein_type_id: protein ? protein.id : null,
       is_daily_repeating: isDailyRepeating ? 1 : 0,
+      calories_per_100g: caloriesPer100g ?? null,
+      // Both pre-existing bugs, unrelated to item_portions.quantity retirement -- found while
+      // smoke-testing Add Item afterward, neither previously set here:
+      // - is_active: violates NOT NULL in Postgres (update-item always sets it; add-item never
+      //   did). A new item obviously starts active, matching every eligibility query's
+      //   .eq('is_active', 1) filter elsewhere.
+      // - created_at: also violates NOT NULL -- despite save-recipe's own comment claiming
+      //   menu_items has a DB-side default (unlike recipes), it empirically does not right now.
+      //   Set explicitly, same insert-only pattern save-recipe/add-ingredient already use for
+      //   tables confirmed to lack one.
+      is_active: 1,
+      created_at: new Date().toISOString(),
     })
     .select('id')
     .single();
@@ -315,18 +329,29 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
   }
   const itemId = inserted.id;
 
+  // item_portions.quantity is retired (see conversation notes -- category_portion_defaults is
+  // now the sole source of portion size, no per-item override). A row's mere EXISTENCE still
+  // determines section/age-group membership, so `portions` is just the chef-checked list of age
+  // group codes now, not a quantity+unit she typed -- `unit` still needs a value (NOT NULL), so
+  // each row gets it from that category+section's own default when one's been set, falling back
+  // to the same 'n/a' placeholder the no-portions-given safety net below already used.
   const rows = [];
-  for (const p of portions) {
-    const ag = getAgeGroupByCode(p.ageGroupCode);
-    if (ag) rows.push({ item_id: itemId, age_group_id: ag.id, unit: p.unit, quantity: p.quantity, price: p.price ?? null });
+  for (const ageGroupCode of portions) {
+    const ag = getAgeGroupByCode(ageGroupCode);
+    if (!ag) continue;
+    const def = getCategoryPortionDefault(category.id, ag.section_id);
+    rows.push({ item_id: itemId, age_group_id: ag.id, unit: def?.unit || 'n/a', price: null });
   }
-  // Safety net: if no portions were provided but we know the section, link the item to
-  // that section's age groups with a zero placeholder so it never silently disappears.
+  // Safety net: if no age groups were checked but we know the section, link the item to
+  // that section's age groups anyway so it never silently disappears.
   if (rows.length === 0 && sectionCode) {
     const section = getSectionByCode(sectionCode);
     if (section) {
       const ags = getAgeGroupsForSection(section.id);
-      for (const ag of ags) rows.push({ item_id: itemId, age_group_id: ag.id, unit: 'n/a', quantity: 0, price: null });
+      for (const ag of ags) {
+        const def = getCategoryPortionDefault(category.id, ag.section_id);
+        rows.push({ item_id: itemId, age_group_id: ag.id, unit: def?.unit || 'n/a', price: null });
+      }
     }
   }
   if (rows.length) {
@@ -384,7 +409,7 @@ ipcMain.handle('check-category-change-impact', async (e, { itemId, newCategoryCo
 // sections/how-many rows would go stale (via check-category-change-impact above) and she's
 // explicitly confirmed -- never inferred or defaulted true, so a category save never deletes
 // portion data the chef hasn't seen and approved in the moment.
-ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, removeInvalidSectionPortions }) => {
+ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, removeInvalidSectionPortions }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
 
@@ -396,6 +421,7 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
       protein_type_id: protein ? protein.id : null,
       is_daily_repeating: isDailyRepeating ? 1 : 0,
       is_active: isActive ? 1 : 0,
+      calories_per_100g: caloriesPer100g ?? null,
     })
     .eq('id', id);
 
@@ -461,6 +487,138 @@ ipcMain.handle('update-item-rc', async (e, { id, rcCode }) => {
   const { error } = await supabase.from('menu_items').update({ rc_code: rcCode || null }).eq('id', id);
   if (error) throw supaFail('update-item-rc', error);
   return { success: true };
+});
+
+// Nutritional Menu Analysis, Phase 1 -- backfills calories_per_100g for every existing item
+// that's missing it, scoped to Daycare/KG_LP/MS_UP only (Staff/CEO are adults, explicitly out of
+// scope for this whole feature, not just its later analysis screen -- see conversation notes).
+// Deliberately reusable, not a one-shot migration script: it only ever touches rows where
+// calories_per_100g IS NULL, so re-running it later after new items are added just backfills
+// whatever's still missing, same idempotent shape as the rest of this app's catalog tooling.
+//
+// Estimates in batches of 50 (BATCH_SIZE), sequentially -- not in parallel -- so a slow/rate-
+// limited Anthropic call doesn't fan out into many concurrent Edge Function invocations at once,
+// and so calorie-estimate-progress events arrive in a sane, readable order for the renderer's
+// status line. Each item gets its own value, so a single Supabase call can't set the whole batch
+// at once (no established bulk-upsert-with-per-row-values precedent in this codebase to lean on);
+// per-item .update() calls within a batch DO run in parallel via Promise.all, since those are
+// independent writes with no ordering requirement of their own.
+//
+// 50, not 100: a live run at 100 came back with a truncated `estimates` array (see
+// estimate-calories/index.ts's own max_tokens comment) on every single 100-item batch, while the
+// same run's final, smaller 79-item batch succeeded cleanly. Paired with the Edge Function's
+// max_tokens bump to 8192, 50 is a conservative margin below the ~79-100 boundary that actually
+// failed, not just relying on the token-budget fix alone.
+const CALORIE_ESTIMATE_IN_SCOPE_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
+const CALORIE_ESTIMATE_BATCH_SIZE = 50;
+
+ipcMain.handle('estimate-missing-calories', async (e) => {
+  const ageGroupIds = CALORIE_ESTIMATE_IN_SCOPE_SECTIONS
+    .map(code => getSectionByCode(code))
+    .filter(Boolean)
+    .flatMap(section => getAgeGroupsForSection(section.id).map(a => a.id));
+  if (ageGroupIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+
+  // item_portions rows for three whole sections can comfortably exceed PostgREST's 1000-row
+  // default page -- see fetchAllRowsMain's own comment (the same reason get-eligible-swap-items
+  // and the Lunch Main pool query below both already page through it).
+  const portionRows = await fetchAllRowsMain(() => supabase
+    .from('item_portions').select('item_id').in('age_group_id', ageGroupIds))
+    .catch(err => { throw supaFail('estimate-missing-calories: load item_portions', err); });
+  const itemIds = [...new Set(portionRows.map(r => r.item_id))];
+  if (itemIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+
+  const { data: items, error: itemsErr } = await supabase
+    .from('menu_items')
+    .select('id, name, category_id, protein_type_id')
+    .in('id', itemIds)
+    .is('calories_per_100g', null);
+  if (itemsErr) throw supaFail('estimate-missing-calories: load menu_items', itemsErr);
+  if (items.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+
+  // Tags each item with its own positional `index` and reconciles the response by that index
+  // rather than by array position/length -- a live run proved Haiku doesn't reliably preserve
+  // exact 1:1 correspondence over a batch of many short, structurally similar {name, category,
+  // protein} objects (every failure had stop_reason "end_turn", i.e. a normal complete response
+  // that just came back with the wrong count -- see estimate-calories/index.ts's own comment).
+  // Returns which items in THIS batch got a usable estimate written vs which didn't (a failed
+  // Edge Function call puts the whole batch in `missing`; a partial response puts only the actual
+  // gaps there), so the caller can retry just the gaps instead of the whole batch.
+  async function estimateAndWriteBatch(batch) {
+    const payloadItems = batch.map((it, idx) => {
+      const cat = getCategoryById(it.category_id);
+      const pt = it.protein_type_id ? getProteinById(it.protein_type_id) : null;
+      return { index: idx, name: it.name, category: cat?.name ?? null, protein: pt?.name ?? null };
+    });
+
+    let estimates;
+    try {
+      estimates = await estimateCalories({ items: payloadItems });
+    } catch (err) {
+      return { written: 0, missing: batch, error: err.message };
+    }
+
+    const byIndex = new Map(estimates.map(est => [est.index, est.calories_per_100g]));
+    const toWrite = [];
+    const missing = [];
+    batch.forEach((it, idx) => {
+      const value = byIndex.get(idx);
+      if (value == null || isNaN(value)) missing.push(it);
+      else toWrite.push({ it, value });
+    });
+
+    const writeResults = await Promise.all(toWrite.map(({ it, value }) =>
+      supabase.from('menu_items').update({ calories_per_100g: value }).eq('id', it.id)
+        .then(({ error }) => ({ ok: !error, it }))
+    ));
+    writeResults.filter(r => !r.ok).forEach(r => missing.push(r.it));
+
+    return { written: writeResults.filter(r => r.ok).length, missing, error: null };
+  }
+
+  function chunk(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  let estimated = 0;
+  const failures = [];
+  let stillMissing = [];
+
+  const batches = chunk(items, CALORIE_ESTIMATE_BATCH_SIZE);
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    e.sender.send('calorie-estimate-progress', `Estimating batch ${b + 1} of ${batches.length} (${batch.length} items)…`);
+    const result = await estimateAndWriteBatch(batch);
+    estimated += result.written;
+    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} items): ${result.error}`);
+    stillMissing.push(...result.missing);
+  }
+
+  // One retry pass over whatever specific items didn't come back the first time (not the whole
+  // batch they happened to be in) -- gives every item a second chance before being reported as a
+  // real failure, without unboundedly looping if the same items keep failing.
+  if (stillMissing.length > 0) {
+    e.sender.send('calorie-estimate-progress', `Retrying ${stillMissing.length} item(s) that didn't come back the first time…`);
+    const retryBatches = chunk(stillMissing, CALORIE_ESTIMATE_BATCH_SIZE);
+    const retryMissing = [];
+    for (let b = 0; b < retryBatches.length; b++) {
+      const batch = retryBatches[b];
+      e.sender.send('calorie-estimate-progress', `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…`);
+      const result = await estimateAndWriteBatch(batch);
+      estimated += result.written;
+      if (result.error) failures.push(`Retry batch ${b + 1} (${batch.length} items): ${result.error}`);
+      retryMissing.push(...result.missing);
+    }
+    if (retryMissing.length > 0) {
+      const names = retryMissing.slice(0, 10).map(it => it.name).join(', ');
+      failures.push(`${retryMissing.length} item(s) still missing an estimate after retry: ${names}${retryMissing.length > 10 ? '…' : ''}`);
+    }
+  }
+
+  e.sender.send('calorie-estimate-progress', `Done -- ${estimated} of ${items.length} items updated.`);
+  return { success: true, estimated, totalMissing: items.length, failures };
 });
 
 // ---------------------------------------------------------------
@@ -656,11 +814,14 @@ ipcMain.handle('get-material', async (e, id) => {
 ipcMain.handle('save-material', async (e, payload) => {
   const fields = {
     name: payload.name,
+    category: payload.category ?? null,
     shape_type: payload.shapeType,
     diameter_cm: payload.diameterCm ?? null,
     length_cm: payload.lengthCm ?? null,
     width_cm: payload.widthCm ?? null,
     height_cm: payload.heightCm ?? null,
+    base_cm: payload.baseCm ?? null,
+    tri_height_cm: payload.triHeightCm ?? null,
     cup_diameter_cm: payload.cupDiameterCm ?? null,
     cup_depth_cm: payload.cupDepthCm ?? null,
     cup_rows: payload.cupRows ?? null,
@@ -981,9 +1142,10 @@ ipcMain.handle('save-recipe', async (e, payload) => {
     if (delErr) throw supaFail('save-recipe: clear old recipe_processes', delErr);
   } else {
     code = await nextRecipeCode();
-    // created_at has no DB-side default on Supabase's recipes table (unlike menu_items/
-    // ingredients, which do -- add-item and add-ingredient don't need to set it), so it's
-    // set explicitly here, insert-only, so editing a recipe later never resets it.
+    // created_at has no DB-side default on Supabase's recipes table (ingredients confirmed the
+    // same, see add-ingredient; menu_items too, see add-item's own comment -- this claimed
+    // menu_items had one, which turned out to be wrong), so it's set explicitly here,
+    // insert-only, so editing a recipe later never resets it.
     const { data: inserted, error: insErr } = await supabase
       .from('recipes').insert({ code, ...fields, created_at: new Date().toISOString() }).select('id').single();
     if (insErr) throw supaFail('save-recipe: insert recipes', insErr);
@@ -2029,20 +2191,11 @@ async function fetchGeneratedMenuExportData(generatedMenuId) {
 
   const itemIds = [...new Set(dayItemRows.map(r => r.item_id))];
   const itemById = new Map();
-  const portionsByItem = new Map(); // item_id -> Map(age_group_id -> {unit, quantity})
   if (itemIds.length) {
     const { data: items, error: itemsErr } = await supabase
       .from('menu_items').select('id, name, rc_code, is_daily_repeating, category_id').in('id', itemIds);
     if (itemsErr) throw supaFail('fetchGeneratedMenuExportData: load menu_items', itemsErr);
     items.forEach(i => itemById.set(i.id, i));
-
-    const { data: portions, error: portErr } = await supabase
-      .from('item_portions').select('item_id, age_group_id, unit, quantity').in('item_id', itemIds);
-    if (portErr) throw supaFail('fetchGeneratedMenuExportData: load item_portions', portErr);
-    for (const p of portions) {
-      if (!portionsByItem.has(p.item_id)) portionsByItem.set(p.item_id, new Map());
-      portionsByItem.get(p.item_id).set(p.age_group_id, { unit: p.unit, quantity: p.quantity });
-    }
   }
 
   // Category for display MUST come from the slot the item was actually placed into for this
@@ -2074,19 +2227,16 @@ async function fetchGeneratedMenuExportData(generatedMenuId) {
   }
 
   const daysWithItems = days.map(d => ({ ...d, items: dayItemsByDay.get(d.id) || [] }));
-  // item_portions.quantity is now an optional per-item override (most rows are still 0/unset
-  // from before this category-default redesign); the category+section default from
-  // lib/referenceData.js is the primary source, keyed off the same slot-resolved category
-  // used for display above -- not the item's raw catalog category_id -- so a forced
-  // cross-category pick (e.g. Staff Main Dish's shared Lunch Main items) still gets Staff
-  // Main's portion size, not Lunch Main's.
+  // item_portions.quantity is retired -- category_portion_defaults (lib/referenceData.js) is now
+  // the ONLY source of portion size, no per-item override/exception path. Keyed off the same
+  // slot-resolved category used for display above -- not the item's raw catalog category_id --
+  // so a forced cross-category pick (e.g. Staff Main Dish's shared Lunch Main items) still gets
+  // Staff Main's portion size, not Lunch Main's.
   const getPortion = (itemId, ageGroupId) => {
-    const override = portionsByItem.get(itemId)?.get(ageGroupId);
-    if (override && override.quantity) return override;
     const catId = displayCategoryByItem.get(itemId);
     const sectionId = getAgeGroupById(ageGroupId)?.section_id;
-    if (catId == null || sectionId == null) return override || null;
-    return getCategoryPortionDefault(catId, sectionId) || override || null;
+    if (catId == null || sectionId == null) return null;
+    return getCategoryPortionDefault(catId, sectionId);
   };
 
   return { menu, section, ageGroups, days: daysWithItems, getPortion };
@@ -2180,26 +2330,17 @@ async function fetchListsSheetData(sectionCodes) {
     bySection[sectionCode] = { ageGroups, categories };
   }
 
-  const portionsByItem = new Map();
-  if (allItemIds.size) {
-    const { data: portions, error } = await supabase
-      .from('item_portions').select('item_id, age_group_id, unit, quantity').in('item_id', [...allItemIds]);
-    if (error) throw supaFail('fetchListsSheetData: load item_portions (lists)', error);
-    for (const p of portions) {
-      if (!portionsByItem.has(p.item_id)) portionsByItem.set(p.item_id, new Map());
-      portionsByItem.get(p.item_id).set(p.age_group_id, { unit: p.unit, quantity: p.quantity });
-    }
-  }
-
-  // Same override-then-category-default logic as fetchGeneratedMenuExportData's getPortion --
-  // see the comment there for why quantity is now primarily a category+section lookup.
+  // item_portions.quantity is retired -- same pure category+section lookup as
+  // fetchGeneratedMenuExportData's getPortion, no per-item override/exception path. Note the
+  // FIRST item_portions query above (building `pool`/allItemIds via section membership) is
+  // untouched -- that's row-existence-only and still determines which items belong to which
+  // sections; only the second, now-removed quantity/unit fetch this comment used to sit above is
+  // gone.
   const getPortion = (itemId, ageGroupId) => {
-    const override = portionsByItem.get(itemId)?.get(ageGroupId);
-    if (override && override.quantity) return override;
     const sectionId = getAgeGroupById(ageGroupId)?.section_id;
     const catId = sectionId != null ? categoryByItem.get(`${sectionId}:${itemId}`) : undefined;
-    if (catId == null || sectionId == null) return override || null;
-    return getCategoryPortionDefault(catId, sectionId) || override || null;
+    if (catId == null || sectionId == null) return null;
+    return getCategoryPortionDefault(catId, sectionId);
   };
   return { bySection, getPortion };
 }

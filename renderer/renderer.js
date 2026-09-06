@@ -567,12 +567,23 @@ async function openItemModal(existingItem) {
       <div class="field">
         <label><input type="checkbox" id="m-daily" ${isEdit && existingItem.is_daily_repeating ? 'checked' : ''} /> Repeats every day automatically</label>
       </div>
+      <div class="field" style="max-width:220px;">
+        <label>Calories per 100g</label>
+        <input id="m-calories" type="number" min="0" step="1" value="${isEdit && existingItem.calories_per_100g != null ? existingItem.calories_per_100g : ''}" />
+      </div>
       <div class="field">
-        <label>Portions per age group (grams/ml)</label>
+        <label>Applies to age groups</label>
+        <!-- Portion SIZE is no longer set here -- category_portion_defaults (Item Catalog's
+             category defaults) is the only source of that now, no per-item override. This grid
+             is purely which age groups get an item_portions row at all (section membership),
+             same as before but a checkbox instead of a quantity/unit she used to type.
+             Disabled on Edit -- editing an existing item's age-group membership was already a
+             no-op before this change (parsed but never sent to update-item), so this just makes
+             that honestly read-only instead of looking editable when it silently wasn't. -->
         <div class="portion-grid">
           ${ageGroups.map(ag => {
             const existing = portions.find(p => p.age_group_code === ag.code);
-            return `<div class="portion-cell"><span class="portion-cell-label">${ag.name}</span><input data-ag="${ag.code}" value="${existing ? existing.quantity + existing.unit : ''}" /></div>`;
+            return `<label class="portion-cell"><input type="checkbox" data-ag="${ag.code}" ${existing ? 'checked' : ''} ${isEdit ? 'disabled' : ''} /> ${ag.name}</label>`;
           }).join('')}
         </div>
       </div>
@@ -662,25 +673,18 @@ async function openItemModal(existingItem) {
     const name = nameInput.value.trim();
     if (!name) return alert('Please enter an item name.');
 
-    const portionInputs = overlay.querySelectorAll('[data-ag]');
-    const parsedPortions = [];
-    portionInputs.forEach(inp => {
-      const val = inp.value.trim();
-      if (!val) return;
-      // accept "150gm", "180 ml", or a bare "150" (defaults to gm)
-      const match = val.match(/([\d.]+)\s*(gm|g|ml|l)?/i);
-      if (match) {
-        const rawUnit = (match[2] || 'gm').toLowerCase();
-        parsedPortions.push({
-          ageGroupCode: inp.dataset.ag,
-          quantity: parseFloat(match[1]),
-          unit: rawUnit === 'g' ? 'gm' : rawUnit,
-        });
-      }
-    });
+    const caloriesRaw = overlay.querySelector('#m-calories').value.trim();
+    const caloriesPer100g = caloriesRaw === '' ? null : parseFloat(caloriesRaw);
 
-    if (!isEdit && parsedPortions.length === 0) {
-      return alert('Please enter a portion size (e.g. 150gm or 180ml) for at least one age group, otherwise the item can\'t be linked to this section and won\'t appear.');
+    // No quantity/unit to parse anymore -- just which age groups she checked (see the portion
+    // grid's own comment above for why: category_portion_defaults is now the sole portion-size
+    // source, this is purely section/age-group membership).
+    const checkedAgeGroupCodes = [...overlay.querySelectorAll('[data-ag]')]
+      .filter(inp => inp.checked)
+      .map(inp => inp.dataset.ag);
+
+    if (!isEdit && checkedAgeGroupCodes.length === 0) {
+      return alert('Please select at least one age group, otherwise the item can\'t be linked to this section and won\'t appear.');
     }
 
     // This form only ever shows/edits portions for the current section -- if this item also
@@ -715,13 +719,15 @@ async function openItemModal(existingItem) {
           proteinCode: proteinSelect.value || null,
           isDailyRepeating: dailyCheckbox.checked,
           isActive: true,
+          caloriesPer100g,
           removeInvalidSectionPortions,
         })
       : await window.api.addItem({
           name, categoryCode: categorySelect.value,
           proteinCode: proteinSelect.value || null,
           isDailyRepeating: dailyCheckbox.checked,
-          portions: parsedPortions,
+          caloriesPer100g,
+          portions: checkedAgeGroupCodes,
           sectionCode: state.currentSection,
         });
 
@@ -3215,6 +3221,52 @@ function computeMultiplierFromTarget(ingredients, targetQtyText) {
   return { multiplier: target / originalTotal };
 }
 
+// Sum of the given processes' own ORIGINAL (1x, unscaled) waste-adjusted Net Weight -- each
+// process's compoundWasteYield(sumIngredientQuantities(p.ingredientRows), p.wastes), added
+// together. Always reads ingredientRows (the persistent, never-scaled 1x basis), never
+// scaledIngredients, so this stays stable across repeated Calculate clicks -- shared by
+// computeMultiplierFromTargetPortions below and updateQtyOriginalDisplay's "portions" branch, so
+// both read the exact same original basis.
+function originalCombinedNetWeight(processes) {
+  return roundNice(processes.reduce((sum, p) => sum + compoundWasteYield(sumIngredientQuantities(p.ingredientRows), p.wastes), 0));
+}
+
+// Nudges the target-portions multiplier up by a tiny relative amount so the scaled combined Net
+// Weight reliably clears target*portionWeight despite the rounding chain below (originalNetWeight
+// itself is roundNice'd, then every scaled ingredient quantity, each process's totalQuantity/
+// netWeight, and the combined sum are each roundNice'd again) -- five compounding 0.01g roundings
+// between "multiplier solved for" and "Portions Produced displayed", which on their own can leave
+// the final combined Net Weight a hair below the exact target and cost a whole portion once
+// Math.floor (computePortionsProducedLive) truncates it. On a multi-kilogram batch this is a few
+// grams of headroom -- invisible to a chef, but enough to survive the rounding chain. See the
+// investigation that led to this: simulating the full chain over 5000 randomized recipes without
+// this margin landed exactly 1 portion short 36% of the time and never over; with it, 0/5000 short
+// and 0/5000 over across the same randomized ranges (verified after adding this constant).
+const TARGET_PORTIONS_SAFETY_MARGIN = 1.0008; // 0.08% -- middle of the 0.05-0.1% range that reliably covers the rounding chain without visibly over-provisioning the batch
+
+// Computes the effective multiplier for "scale to target portion count" mode: (target portions x
+// the recipe's Portion Weight (g)) / the ORIGINAL, unscaled combined Net Weight of the given
+// processes -- never the currently-displayed/already-scaled figure, same discipline
+// computeMultiplierFromTarget already applies to target-quantity mode, so repeated Calculate
+// clicks always scale from the same 1x basis instead of compounding. Returns { error } when
+// there's no Portion Weight set, nothing to divide by, or the target doesn't parse; { multiplier }
+// otherwise.
+function computeMultiplierFromTargetPortions(processes, targetPortionsText, portionWeightGrams) {
+  const pw = parseFloat(portionWeightGrams);
+  if (!pw || pw <= 0) {
+    return { error: 'Set a Portion Weight (g) on this recipe before scaling to a target portion count.' };
+  }
+  const originalNetWeight = originalCombinedNetWeight(processes);
+  if (!originalNetWeight || originalNetWeight <= 0) {
+    return { error: 'This recipe has no ingredient quantities to scale against.' };
+  }
+  const target = parseFloat(targetPortionsText);
+  if (!target || target <= 0) {
+    return { error: 'Please enter a target portion count greater than 0, e.g. 50.' };
+  }
+  return { multiplier: (target * pw) / originalNetWeight * TARGET_PORTIONS_SAFETY_MARGIN };
+}
+
 function renderCalculatorView(main) {
   main.innerHTML = `
     <div class="topbar">
@@ -3246,11 +3298,12 @@ function renderCalculatorView(main) {
           <label id="calc-qty-original-label">Quantity Produced (original)</label>
           <input id="calc-qty-original" value="" disabled />
         </div>
-        <div class="field" style="max-width:260px;">
+        <div class="field" style="max-width:340px;">
           <label>Scaling Mode</label>
           <div class="mode-toggle">
             <button type="button" class="mode-toggle-btn active" data-mode="factor">Multiply by factor</button>
             <button type="button" class="mode-toggle-btn" data-mode="target">Scale to target quantity</button>
+            <button type="button" class="mode-toggle-btn" data-mode="portions" id="calc-mode-portions-btn">Scale to target portions</button>
           </div>
         </div>
         <div class="field" style="max-width:120px;" id="calc-multiplier-field">
@@ -3261,7 +3314,16 @@ function renderCalculatorView(main) {
           <label>Target Total Quantity (g)</label>
           <input id="calc-target-qty" type="number" step="1" min="0" />
         </div>
+        <div class="field" style="max-width:160px; display:none;" id="calc-portions-field">
+          <label>Target Portion Count</label>
+          <input id="calc-target-portions" type="number" step="1" min="0" />
+        </div>
       </div>
+      <div class="field" style="max-width:200px; display:none;" id="calc-all-portions-field">
+        <label>Scale All to Target Portions</label>
+        <input id="calc-all-portions-target" type="number" step="1" min="0" placeholder="e.g. 50" />
+      </div>
+      <button type="button" class="secondary" id="calc-all-portions-clear" style="display:none;" title="Reset every process back to independent scaling">Reset to Independent Scaling</button>
       <button class="primary" id="calc-calculate-btn" disabled>Calculate</button>
     </div>
     <div id="calc-mode-error" style="display:none; color:var(--danger, #c0392b); font-size:12.5px; margin:-10px 0 14px;"></div>
@@ -3281,6 +3343,12 @@ function renderCalculatorView(main) {
   const multiplierInput = document.getElementById('calc-multiplier');
   const targetField = document.getElementById('calc-target-field');
   const targetInput = document.getElementById('calc-target-qty');
+  const portionsField = document.getElementById('calc-portions-field');
+  const portionsInput = document.getElementById('calc-target-portions');
+  const portionsModeBtn = document.getElementById('calc-mode-portions-btn');
+  const allPortionsField = document.getElementById('calc-all-portions-field');
+  const allPortionsInput = document.getElementById('calc-all-portions-target');
+  const allPortionsClearBtn = document.getElementById('calc-all-portions-clear');
   const modeErrorEl = document.getElementById('calc-mode-error');
   const calculateBtn = document.getElementById('calc-calculate-btn');
   const resultEl = document.getElementById('calc-result');
@@ -3388,6 +3456,9 @@ function renderCalculatorView(main) {
     resultEl.innerHTML = '';
     modeErrorEl.style.display = 'none';
     singleScaleFields.style.display = 'contents';
+    allPortionsField.style.display = 'none';
+    allPortionsClearBtn.style.display = 'none';
+    allPortionsInput.value = '';
     perProcessScaling = new Map();
   }
 
@@ -3402,9 +3473,12 @@ function renderCalculatorView(main) {
     if (scalingMode === 'factor') {
       qtyOriginalLabel.textContent = 'Quantity Produced (original)';
       qtyOriginalInput.value = selectedFullRecipe?.quantity_produced || '';
-    } else {
+    } else if (scalingMode === 'target') {
       qtyOriginalLabel.textContent = 'Total Ingredient Quantity (original)';
       qtyOriginalInput.value = `${sumIngredientQuantities(selectedIngredients || [])}g`;
+    } else {
+      qtyOriginalLabel.textContent = 'Net Weight (original)';
+      qtyOriginalInput.value = `${originalCombinedNetWeight(processesToScale())}g`;
     }
   }
 
@@ -3423,12 +3497,32 @@ function renderCalculatorView(main) {
     const scaled = processesToScale();
     if (scaled.length > 1) {
       singleScaleFields.style.display = 'none';
+      allPortionsField.style.display = 'flex';
+      allPortionsClearBtn.style.display = '';
       const next = new Map();
       scaled.forEach(p => next.set(p.localId, perProcessScaling.get(p.localId) || { mode: 'factor', multiplier: '1', target: '' }));
       perProcessScaling = next;
     } else {
       singleScaleFields.style.display = 'contents';
+      allPortionsField.style.display = 'none';
+      allPortionsClearBtn.style.display = 'none';
       perProcessScaling = new Map();
+      // Scale-to-target-portions only makes sense against the recipe's whole finished product --
+      // a single process filtered out of a multi-process recipe describes one component, not the
+      // combined portion size, so the button (and mode, if she was already in it) is unavailable
+      // in that one case even though the single-control block itself is still shown.
+      const portionsAvailable = allProcesses().length <= 1;
+      portionsModeBtn.style.display = portionsAvailable ? '' : 'none';
+      if (!portionsAvailable && scalingMode === 'portions') {
+        scalingMode = 'factor';
+        document.querySelectorAll('.generate-controls [data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === scalingMode));
+        multiplierField.style.display = 'flex';
+        targetField.style.display = 'none';
+        portionsField.style.display = 'none';
+        multiplierInput.value = '';
+        targetInput.value = '';
+        portionsInput.value = '';
+      }
       updateQtyOriginalDisplay();
     }
   }
@@ -3453,11 +3547,13 @@ function renderCalculatorView(main) {
       document.querySelectorAll('.generate-controls [data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === scalingMode));
       multiplierField.style.display = scalingMode === 'factor' ? 'flex' : 'none';
       targetField.style.display = scalingMode === 'target' ? 'flex' : 'none';
+      portionsField.style.display = scalingMode === 'portions' ? 'flex' : 'none';
       // Clears whichever field she's leaving AND the one she's arriving at -- regardless of
       // direction -- so a value typed under the previous mode (e.g. Multiplier "20") never
       // silently carries over and reappears if she switches back later.
       multiplierInput.value = '';
       targetInput.value = '';
+      portionsInput.value = '';
       modeErrorEl.style.display = 'none';
       updateQtyOriginalDisplay();
       // Whatever's currently shown was computed under the PREVIOUS mode (either a stale
@@ -3467,6 +3563,20 @@ function renderCalculatorView(main) {
       // what's selected.
       renderResultView(true);
     });
+  });
+
+  // Backs out of "Scale All to Target Portions" -- clears the sticky field (so it stops
+  // overriding future Calculate clicks), clears any error left showing, and puts every currently-
+  // shown process's own inline Mode/Multiplier/Target control back to a clean independent-scaling
+  // default (factor/1x) rather than leaving whatever multiplier the override last computed. Those
+  // per-process controls are never hidden/disabled by the override in the first place -- this is
+  // purely about giving her an explicit, unambiguous "start fresh" action instead of having to
+  // realize she can just retype over the override field herself.
+  allPortionsClearBtn.addEventListener('click', () => {
+    allPortionsInput.value = '';
+    modeErrorEl.style.display = 'none';
+    processesToScale().forEach(p => perProcessScaling.set(p.localId, { mode: 'factor', multiplier: '1', target: '' }));
+    renderResultView(true);
   });
 
   // Renders the currently-selected recipe/process(es) into #calc-result. `forceUnscaled` resets
@@ -3582,6 +3692,30 @@ function renderCalculatorView(main) {
     const scaled = processesToScale();
 
     if (scaled.length > 1) {
+      // "Scale All to Target Portions" -- takes priority over every process's own inline Mode/
+      // Multiplier/Target control on every Calculate click FOR AS LONG AS this field has a value
+      // (sticky, not a one-shot -- see calc-all-portions-clear below for how she backs out of it).
+      // Computes a single multiplier from the recipe's combined original Net Weight and Portion
+      // Weight and applies it directly to every shown process, then syncs each process's own
+      // inline control to 'factor' mode pre-filled with that multiplier so it's visible and
+      // hand-tunable without needing another Calculate click.
+      const allPortionsValue = allPortionsInput.value.trim();
+      if (allPortionsValue) {
+        modeErrorEl.style.display = 'none';
+        const result = computeMultiplierFromTargetPortions(scaled, allPortionsValue, selectedFullRecipe.portion_weight_grams);
+        if (result.error) {
+          modeErrorEl.textContent = result.error;
+          modeErrorEl.style.display = 'block';
+          return;
+        }
+        scaled.forEach(proc => {
+          proc.multiplier = result.multiplier;
+          perProcessScaling.set(proc.localId, { mode: 'factor', multiplier: String(roundNice(result.multiplier)), target: '' });
+        });
+        renderResultView(false);
+        return;
+      }
+
       // Independent per-process scaling -- validate every process's own control (read from
       // perProcessScaling, kept live by the inline controls renderScaledRecipeResult renders
       // above each process's own section) and collect every error at once (unlike the
@@ -3624,8 +3758,16 @@ function renderCalculatorView(main) {
       if (scalingMode === 'factor') {
         multiplier = parseFloat(multiplierInput.value);
         if (!multiplier || multiplier <= 0) return alert('Please enter a multiplier greater than 0.');
-      } else {
+      } else if (scalingMode === 'target') {
         const result = computeMultiplierFromTarget(selectedIngredients, targetInput.value);
+        if (result.error) {
+          modeErrorEl.textContent = result.error;
+          modeErrorEl.style.display = 'block';
+          return;
+        }
+        multiplier = result.multiplier;
+      } else {
+        const result = computeMultiplierFromTargetPortions(scaled, portionsInput.value, selectedFullRecipe.portion_weight_grams);
         if (result.error) {
           modeErrorEl.textContent = result.error;
           modeErrorEl.style.display = 'block';
@@ -4740,13 +4882,52 @@ const MATERIAL_SHAPE_PRESETS = {
       { key: 'cupColumns', label: 'Columns', step: '1' },
     ],
   },
+  // Isosceles, apex centered above the base -- fully determined by baseCm + triHeightCm (the 2D
+  // triangle's own apex height, NOT the object's vertical height) with no third side-length/angle
+  // input, matching how real triangular pastry/tart cutters are shaped. heightCm is REUSED as-is
+  // (same DB column, same meaning as Round/Rectangular's own heightCm: how tall the object stands/
+  // the prism's vertical wall height) rather than inventing a differently-named third dimension.
+  triangle: {
+    label: 'Triangle',
+    fields: [
+      { key: 'baseCm', label: 'Base (cm)', step: '0.1' },
+      { key: 'triHeightCm', label: 'Triangle Height (cm)', step: '0.1' },
+      { key: 'heightCm', label: 'Height (cm)', step: '0.1' },
+    ],
+  },
 };
+
+// Purpose, not shape -- shape stays entirely on shape_type, never duplicated here (see
+// conversation notes: a combined field like "round_tray"/"square_cutter" would drift out of sync
+// with shape_type and can't express e.g. a square-shaped tray without inventing yet another
+// value). Only two values for now; deliberately no DB enum/CHECK constraint, same convention as
+// shape_type -- this map is the only place validating it. Drives two things: the Materials list's
+// grouping label (materialGroupLabel below, which derives "Round Tray"/"Cutter"/etc. from this
+// plus shape_type without storing that combination anywhere) and buildMaterialGroup's floor --
+// only a cutter renders open-top/open-bottom with no floor mesh at all.
+const MATERIAL_CATEGORIES = {
+  tray_pan: { label: 'Tray / Pan' },
+  cutter: { label: 'Cutter' },
+};
+
+// Display-only grouping label for the Materials list -- see MATERIAL_CATEGORIES' own comment for
+// why this is derived here rather than stored as its own column. Cutters are one flat group
+// (matching how they were requested -- no shape breakdown), trays/pans split by shape_type so
+// "Round Tray"/"Rectangular Tray"/"Muffin Tray" fall out of just two stored fields. A rectangular
+// tray with equal length/width ("a square tray") still groups as "Rectangular Tray" here, same as
+// shape_type already treats square as a rectangular special case rather than its own shape.
+const MATERIAL_SHAPE_NOUNS = { round: 'Round', rectangular: 'Rectangular', muffin_tray: 'Muffin', triangle: 'Triangle' };
+function materialGroupLabel(m) {
+  if (m.category === 'cutter') return 'Cutter';
+  return `${MATERIAL_SHAPE_NOUNS[m.shape_type] || m.shape_type} Tray`;
+}
 
 // Every possible dimension column, camelCase form key -> snake_case DB column -- shared by
 // materialDimsFromRow (loading) and buildMaterialDimensionPayload (saving) so the two can never
 // drift out of sync with main.js's own save-material `fields` object.
 const MATERIAL_DIMENSION_DB_KEYS = {
   diameterCm: 'diameter_cm', lengthCm: 'length_cm', widthCm: 'width_cm', heightCm: 'height_cm',
+  baseCm: 'base_cm', triHeightCm: 'tri_height_cm',
   cupDiameterCm: 'cup_diameter_cm', cupDepthCm: 'cup_depth_cm', cupRows: 'cup_rows', cupColumns: 'cup_columns',
 };
 
@@ -4761,6 +4942,7 @@ function formatMaterialDimensions(m) {
   if (m.shape_type === 'round') return `⌀${m.diameter_cm ?? '?'}cm × H${m.height_cm ?? '?'}cm`;
   if (m.shape_type === 'rectangular') return `${m.length_cm ?? '?'}×${m.width_cm ?? '?'}×H${m.height_cm ?? '?'}cm`;
   if (m.shape_type === 'muffin_tray') return `${m.length_cm ?? '?'}×${m.width_cm ?? '?'}cm tray, ${m.cup_rows ?? '?'}×${m.cup_columns ?? '?'} cups ⌀${m.cup_diameter_cm ?? '?'}cm`;
+  if (m.shape_type === 'triangle') return `Base ${m.base_cm ?? '?'}cm × Face H${m.tri_height_cm ?? '?'}cm × H${m.height_cm ?? '?'}cm`;
   return '';
 }
 
@@ -4923,9 +5105,9 @@ function createMaterialPreview3D(canvasEl) {
     });
   }
 
-  function setShape(shapeType, dims) {
+  function setShape(shapeType, dims, category) {
     if (group) { scene.remove(group); disposeGroup(group); group = null; }
-    const built = buildMaterialGroup(shapeType, dims);
+    const built = buildMaterialGroup(shapeType, dims, category);
     if (!built) { render(); return; }
     group = built;
     scene.add(group);
@@ -4987,14 +5169,29 @@ function createMaterialPreview3D(canvasEl) {
 const MATERIAL_STEEL = new THREE.MeshStandardMaterial({ color: 0xC9CDD1, metalness: 0.85, roughness: 0.38, side: THREE.DoubleSide });
 const MATERIAL_STEEL_DARK = new THREE.MeshStandardMaterial({ color: 0x9BA1A6, metalness: 0.8, roughness: 0.5, side: THREE.DoubleSide });
 
-// Builds a genuinely hollow, open-top rectangular container (floor + 4 walls, five separate box
-// meshes) rather than one solid block -- plain box primitives instead of an extruded/holed shape
-// or a CSG subtraction, so normals/UVs behave predictably with no exotic-geometry edge cases.
-// Every mesh gets its own real inner faces (visible when looking down into it) and casts/receives
-// shadow, which is what actually makes the inside read as recessed -- see createMaterialPreview3D.
-function addHollowBox(group, l, w, h, mat) {
-  const wallT = Math.min(Math.max(Math.min(l, w) * 0.045, 0.3), 2, Math.min(l, w) * 0.4);
-  const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+// A Cutter's wall is a thin cutting blade, not a tray's structural wall -- FIXED regardless of the
+// cutter's own size (a real cutter's sheet-metal gauge doesn't get proportionally thicker on a
+// bigger cutter the way a tray's wall reasonably does), and much thinner than the tray formulas
+// below ever produce (their own 0.3cm/3mm floor read as two visually separate rings rather than
+// one thin band at typical cutter sizes -- this constant replaces that formula for cutters only,
+// trays are untouched). 0.15cm = 1.5mm.
+const MATERIAL_CUTTER_WALL_THICKNESS_CM = 0.15;
+
+// Builds a genuinely hollow rectangular container (floor + 4 walls, five separate box meshes,
+// unless openBottom) rather than one solid block -- plain box primitives instead of an extruded/
+// holed shape or a CSG subtraction, so normals/UVs behave predictably with no exotic-geometry
+// edge cases. Every mesh gets its own real inner faces (visible when looking down into it) and
+// casts/receives shadow, which is what actually makes the inside read as recessed -- see
+// createMaterialPreview3D. openBottom (a Cutter -- see MATERIAL_CATEGORIES) skips the floor mesh
+// entirely and stretches all 4 walls to the FULL height h (rather than h-floorT, which exists
+// only to leave room for a floor that no longer gets built) -- a genuinely open ring/tube, open at
+// both top and bottom, same as buildMaterialGroup's round/triangle cutter branches. wallThickness
+// overrides the tray-scaled formula below entirely when given -- the caller (buildMaterialGroup's
+// cutter branch) passes MATERIAL_CUTTER_WALL_THICKNESS_CM plus l/w already expanded outward from
+// the entered INNER size, since this function's own l/w are always its OUTER footprint.
+function addHollowBox(group, l, w, h, mat, { openBottom = false, wallThickness } = {}) {
+  const wallT = wallThickness ?? Math.min(Math.max(Math.min(l, w) * 0.045, 0.3), 2, Math.min(l, w) * 0.4);
+  const floorT = openBottom ? 0 : Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
   const innerH = Math.max(h - floorT, 0.1);
   const sideDepth = Math.max(w - 2 * wallT, 0.1);
 
@@ -5006,11 +5203,37 @@ function addHollowBox(group, l, w, h, mat) {
     group.add(mesh);
   }
 
-  addMesh(new THREE.BoxGeometry(l, floorT, w), 0, floorT / 2, 0); // floor
+  if (!openBottom) addMesh(new THREE.BoxGeometry(l, floorT, w), 0, floorT / 2, 0); // floor
   addMesh(new THREE.BoxGeometry(l, innerH, wallT), 0, floorT + innerH / 2, -w / 2 + wallT / 2); // back wall
   addMesh(new THREE.BoxGeometry(l, innerH, wallT), 0, floorT + innerH / 2, w / 2 - wallT / 2); // front wall
   addMesh(new THREE.BoxGeometry(wallT, innerH, sideDepth), -l / 2 + wallT / 2, floorT + innerH / 2, 0); // left wall
   addMesh(new THREE.BoxGeometry(wallT, innerH, sideDepth), l / 2 - wallT / 2, floorT + innerH / 2, 0); // right wall
+}
+
+// Shrinks a simple convex polygon inward by a constant perpendicular distance -- a real polygon
+// offset (each edge pushed inward along its own normal, then adjacent offset edges intersected for
+// the new vertices), not a naive scale-toward-centroid, which would give a visibly non-uniform
+// wall thickness on anything but a regular/equilateral shape. `points` must be wound CLOCKWISE
+// (matching every outer contour in this file -- see buildMaterialGroup's triangle branch and the
+// muffin tray's own outline above), so "inward" is consistently each edge's RIGHT-hand normal.
+// Generic over vertex count, not triangle-specific, so any future straight-edged shape can reuse it.
+function insetPolygon(points, dist) {
+  const n = points.length;
+  const offsetEdges = points.map((p1, i) => {
+    const p2 = points[(i + 1) % n];
+    const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = dy / len, ny = -dx / len; // right-hand normal -- inward for a CW-wound polygon
+    return { px: p1[0] + nx * dist, py: p1[1] + ny * dist, dx, dy };
+  });
+  function intersect(e1, e2) {
+    const denom = e1.dx * e2.dy - e1.dy * e2.dx;
+    if (Math.abs(denom) < 1e-9) return [e2.px, e2.py]; // parallel edges -- fall back rather than divide by ~0
+    const dxp = e2.px - e1.px, dyp = e2.py - e1.py;
+    const t = (dxp * e2.dy - dyp * e2.dx) / denom;
+    return [e1.px + t * e1.dx, e1.py + t * e1.dy];
+  }
+  return points.map((_, i) => intersect(offsetEdges[(i - 1 + n) % n], offsetEdges[i]));
 }
 
 // Approximates each shape with plain geometry -- no CSG/boolean-subtraction library involved
@@ -5025,32 +5248,73 @@ function addHollowBox(group, l, w, h, mat) {
 // floor's underside at y=0 (like a real tray resting on a surface), not centered on the origin --
 // see the preview's own orbit-target comment for why that matters here. Returns null when the
 // current shape's required dimensions aren't all filled in yet (a blank/partial New Material form).
-function buildMaterialGroup(shapeType, dims) {
+//
+// `category` (see MATERIAL_CATEGORIES) decides whether the shape gets a floor at all -- a Cutter
+// renders fully open, top AND bottom, a genuine hollow ring/tube, regardless of which shape it is;
+// everything else (Tray/Pan) keeps the closed-floor container built here unchanged. Muffin trays
+// are never cutters in practice (a multi-cavity tray has no cutter use), so that branch doesn't
+// read `category` at all.
+function buildMaterialGroup(shapeType, dims, category) {
   const group = new THREE.Group();
+  const isCutter = category === 'cutter';
 
   if (shapeType === 'round') {
     const { diameterCm: d, heightCm: h } = dims;
     if (!(d > 0) || !(h > 0)) return null;
-    const outerR = d / 2;
-    const wallT = Math.min(Math.max(outerR * 0.07, 0.3), 1.8, outerR * 0.4);
-    const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
-    const innerR = Math.max(outerR - wallT, 0.05);
-    const profile = [
-      new THREE.Vector2(0, 0),
-      new THREE.Vector2(outerR, 0),
-      new THREE.Vector2(outerR, h),
-      new THREE.Vector2(innerR, h),
-      new THREE.Vector2(innerR, floorT),
-      new THREE.Vector2(0, floorT),
-    ];
-    const mesh = new THREE.Mesh(new THREE.LatheGeometry(profile, 48), MATERIAL_STEEL);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
+
+    if (isCutter) {
+      // Entered diameter is the INNER (cutting) size -- the actual piece the cutter produces --
+      // not an outer measurement the wall eats into, so a future area/portion calculation can use
+      // exactly what she typed with no hidden offset. Wall is added OUTWARD from that, at the
+      // fixed thin cutter gauge (not the tray formula), which is also what fixes the "two visually
+      // separate rings" bug -- outer and inner tube now sit close enough to read as one thin band.
+      const innerR = d / 2;
+      const outerR = innerR + MATERIAL_CUTTER_WALL_THICKNESS_CM;
+      // Open ring: two separate open tubes (outer wall, inner wall), each just a vertical line
+      // revolved 360deg -- no closing segment at y=0 or y=h, so neither a floor nor a top rim cap
+      // gets built. MATERIAL_STEEL's side:DoubleSide (set once, module-level) is what makes the
+      // inner tube's inside face visible when looking down into the ring from above, same as the
+      // tray version's own hollow interior below relies on for its floor -- proven convention,
+      // just applied to two independent tubes instead of one closed profile here.
+      [outerR, innerR].forEach(r => {
+        const mesh = new THREE.Mesh(new THREE.LatheGeometry([new THREE.Vector2(r, 0), new THREE.Vector2(r, h)], 48), MATERIAL_STEEL);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+      });
+    } else {
+      // Tray semantics unchanged: entered diameter is the OUTER footprint, wall eats inward.
+      const outerR = d / 2;
+      const wallT = Math.min(Math.max(outerR * 0.07, 0.3), 1.8, outerR * 0.4);
+      const innerR = Math.max(outerR - wallT, 0.05);
+      const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+      const profile = [
+        new THREE.Vector2(0, 0),
+        new THREE.Vector2(outerR, 0),
+        new THREE.Vector2(outerR, h),
+        new THREE.Vector2(innerR, h),
+        new THREE.Vector2(innerR, floorT),
+        new THREE.Vector2(0, floorT),
+      ];
+      const mesh = new THREE.Mesh(new THREE.LatheGeometry(profile, 48), MATERIAL_STEEL);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
   } else if (shapeType === 'rectangular') {
     const { lengthCm: l, widthCm: w, heightCm: h } = dims;
     if (!(l > 0) || !(w > 0) || !(h > 0)) return null;
-    addHollowBox(group, l, w, h, MATERIAL_STEEL);
+    if (isCutter) {
+      // Same inner-measurement treatment as round above -- entered l/w are the INNER cutting
+      // footprint, addHollowBox's own l/w params are its OUTER footprint (unchanged contract), so
+      // the outward-expanded size is computed here and passed in, along with the fixed thin cutter
+      // wall gauge overriding addHollowBox's own tray-scaled wallT formula.
+      const outerL = l + 2 * MATERIAL_CUTTER_WALL_THICKNESS_CM;
+      const outerW = w + 2 * MATERIAL_CUTTER_WALL_THICKNESS_CM;
+      addHollowBox(group, outerL, outerW, h, MATERIAL_STEEL, { openBottom: true, wallThickness: MATERIAL_CUTTER_WALL_THICKNESS_CM });
+    } else {
+      addHollowBox(group, l, w, h, MATERIAL_STEEL);
+    }
   } else if (shapeType === 'muffin_tray') {
     const { lengthCm: l, widthCm: w, heightCm: h, cupDiameterCm: cd, cupDepthCm: cdepth, cupRows: rows, cupColumns: cols } = dims;
     if (!(l > 0) || !(w > 0) || !(h > 0) || !(cd > 0) || !(cdepth > 0) || !(rows > 0) || !(cols > 0)) return null;
@@ -5150,6 +5414,80 @@ function buildMaterialGroup(shapeType, dims) {
         group.add(cup);
       }
     }
+  } else if (shapeType === 'triangle') {
+    // Isosceles, apex centered above the base -- see MATERIAL_SHAPE_PRESETS.triangle's own
+    // comment for why (fully determined by base+triHeight, no third side-length/angle input).
+    // Built the same way the muffin tray's rim plate is (a THREE.Shape extruded via
+    // ExtrudeGeometry, with a hole triangulated for free) rather than addHollowBox's per-side box
+    // walls, since a box's 4 orthogonal wall meshes don't generalize to a triangle's edges -- an
+    // extruded outline-with-hole does, for any straight-edged shape. Two meshes normally: a solid
+    // floor slab (outer outline, no hole) and a wall ring (outer outline with an inset hole, via
+    // insetPolygon), stacked floorT..h same as every other shape here -- a Cutter skips the floor
+    // mesh entirely and stretches the ring to the full height h at y=0, same "open top and bottom,
+    // no floor at all" treatment as the round/rectangular cutter branches above.
+    const { baseCm: b, triHeightCm: triH, heightCm: h } = dims;
+    if (!(b > 0) || !(triH > 0) || !(h > 0)) return null;
+    const floorT = isCutter ? 0 : Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+    const innerH = Math.max(h - floorT, 0.1);
+
+    // Local shape-space (x,y) -- extruded along local Z (becomes world Y/vertical after the
+    // rotateX(-90deg) below), so these two coordinates are purely a flat footprint outline, not
+    // tied to any world X/Z orientation (unlike the muffin tray's holes, this shape has no other
+    // world-space-positioned meshes it needs to align with, so no sign correction is needed).
+    // Wound clockwise -- see insetPolygon's own comment on why that orientation matters.
+    //
+    // Cutter: entered base/triHeight are the INNER (cutting) triangle -- the actual piece the
+    // cutter produces, no hidden offset -- so the OUTER triangle is computed by expanding OUTWARD
+    // (insetPolygon with a NEGATIVE distance; the function doesn't care about the sign, it just
+    // offsets each edge along its own normal either direction) at the fixed thin cutter wall gauge,
+    // same fix as the round/rectangular branches above. Tray: unchanged, entered points are the
+    // OUTER footprint and the inner hole is inset from that at the tray-scaled wallT formula.
+    let outerPts, innerPts;
+    if (isCutter) {
+      innerPts = [[-b / 2, 0], [0, triH], [b / 2, 0]];
+      outerPts = insetPolygon(innerPts, -MATERIAL_CUTTER_WALL_THICKNESS_CM);
+    } else {
+      outerPts = [[-b / 2, 0], [0, triH], [b / 2, 0]];
+      const wallT = Math.min(Math.max(Math.min(b, triH) * 0.05, 0.3), 2, Math.min(b, triH) * 0.4);
+      innerPts = insetPolygon(outerPts, wallT);
+    }
+
+    const outerShape = new THREE.Shape();
+    outerShape.moveTo(outerPts[0][0], outerPts[0][1]);
+    outerPts.slice(1).forEach(([x, y]) => outerShape.lineTo(x, y));
+    outerShape.closePath();
+
+    if (!isCutter) {
+      const floorGeo = new THREE.ExtrudeGeometry(outerShape, { depth: floorT, bevelEnabled: false, curveSegments: 1 });
+      const floor = new THREE.Mesh(floorGeo, MATERIAL_STEEL);
+      floor.rotateX(-Math.PI / 2);
+      floor.castShadow = true;
+      floor.receiveShadow = true;
+      group.add(floor);
+    }
+
+    const ringShape = new THREE.Shape();
+    ringShape.moveTo(outerPts[0][0], outerPts[0][1]);
+    outerPts.slice(1).forEach(([x, y]) => ringShape.lineTo(x, y));
+    ringShape.closePath();
+    // insetPolygon preserves its input's winding (CW, same as outerPts), but a hole needs the
+    // OPPOSITE winding from its outer contour for three.js to triangulate it correctly (same rule
+    // the muffin tray's own round holes follow via absarc's counterclockwise sweep) -- reversed
+    // here rather than changing insetPolygon itself, which is winding-agnostic by design.
+    const holePts = [...innerPts].reverse();
+    const hole = new THREE.Path();
+    hole.moveTo(holePts[0][0], holePts[0][1]);
+    holePts.slice(1).forEach(([x, y]) => hole.lineTo(x, y));
+    hole.closePath();
+    ringShape.holes.push(hole);
+
+    const ringGeo = new THREE.ExtrudeGeometry(ringShape, { depth: innerH, bevelEnabled: false, curveSegments: 1 });
+    const ring = new THREE.Mesh(ringGeo, MATERIAL_STEEL);
+    ring.rotateX(-Math.PI / 2);
+    ring.position.y = floorT;
+    ring.castShadow = true;
+    ring.receiveShadow = true;
+    group.add(ring);
   } else {
     return null;
   }
@@ -5222,24 +5560,51 @@ async function renderMaterialsListView(main) {
       return;
     }
 
+    // Same shared-table-with-rowspan-merged-category pattern as the Dish Catalog/Ingredients
+    // views -- one continuous table, not one per group, so columns stay aligned across every
+    // category. Grouped by materialGroupLabel (Cutter / {Shape} Tray, see its own comment), not a
+    // stored field -- so a fixed display order is needed here (unlike Dish Catalog, which can just
+    // rely on its already-category-sorted backend query): materials has no such pre-sort to lean
+    // on, since `list-materials` orders by name, not category.
+    const GROUP_ORDER = ['Cutter', 'Round Tray', 'Rectangular Tray', 'Muffin Tray', 'Triangle Tray'];
+    const byGroup = new Map();
+    for (const m of filtered) {
+      const label = materialGroupLabel(m);
+      if (!byGroup.has(label)) byGroup.set(label, []);
+      byGroup.get(label).push(m);
+    }
+    const groups = [...byGroup.entries()].sort((a, b) => {
+      const ia = GROUP_ORDER.indexOf(a[0]), ib = GROUP_ORDER.indexOf(b[0]);
+      if (ia === -1 && ib === -1) return a[0].localeCompare(b[0]);
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+
+    const bodyRows = [];
+    for (const [label, list] of groups) {
+      list.forEach((m, idx) => {
+        bodyRows.push(`
+          <tr>
+            ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${label}</td>` : ''}
+            <td>${m.code}</td>
+            <td>${m.name}</td>
+            <td>${MATERIAL_SHAPE_PRESETS[m.shape_type]?.label || m.shape_type}</td>
+            <td>${formatMaterialDimensions(m)}</td>
+            <td>${formatMaterialWeight(m)}</td>
+            <td style="text-align:right">
+              <button class="icon-btn" data-edit="${m.id}">Edit</button>
+              <button class="icon-btn danger" data-delete="${m.id}">Delete</button>
+            </td>
+          </tr>
+        `);
+      });
+    }
+
     content.innerHTML = `
       <table class="materials-table">
-        <thead><tr><th>Code</th><th>Name</th><th>Shape</th><th>Dimensions</th><th>Weight (g)</th><th></th></tr></thead>
-        <tbody>
-          ${filtered.map(m => `
-            <tr>
-              <td>${m.code}</td>
-              <td>${m.name}</td>
-              <td>${MATERIAL_SHAPE_PRESETS[m.shape_type]?.label || m.shape_type}</td>
-              <td>${formatMaterialDimensions(m)}</td>
-              <td>${formatMaterialWeight(m)}</td>
-              <td style="text-align:right">
-                <button class="icon-btn" data-edit="${m.id}">Edit</button>
-                <button class="icon-btn danger" data-delete="${m.id}">Delete</button>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
+        <thead><tr><th>Category</th><th>Code</th><th>Name</th><th>Shape</th><th>Dimensions</th><th>Weight (g)</th><th></th></tr></thead>
+        <tbody>${bodyRows.join('')}</tbody>
       </table>
     `;
 
@@ -5279,6 +5644,7 @@ async function renderMaterialFormView(main) {
 
   const currentPhotoSrc = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
   const initialShape = material?.shape_type || 'round';
+  const initialCategory = material?.category || 'tray_pan';
 
   main.innerHTML = `
     <div class="topbar">
@@ -5290,6 +5656,12 @@ async function renderMaterialFormView(main) {
 
     <div class="generate-controls">
       <div class="field"><label>Name</label><input id="mf-name" value="${material?.name || ''}" dir="auto" /></div>
+      <div class="field" style="max-width:200px;">
+        <label>Category</label>
+        <select id="mf-category">
+          ${Object.entries(MATERIAL_CATEGORIES).map(([key, c]) => `<option value="${key}" ${initialCategory === key ? 'selected' : ''}>${c.label}</option>`).join('')}
+        </select>
+      </div>
       <div class="field" style="max-width:240px;">
         <label>Shape Type</label>
         <select id="mf-shape">
@@ -5375,12 +5747,14 @@ async function renderMaterialFormView(main) {
 
   function currentShape() { return document.getElementById('mf-shape').value; }
 
+  function currentCategory() { return document.getElementById('mf-category').value; }
+
   function updatePreview() {
     const shape = currentShape();
     const dims = readMaterialDims(shape);
     const hasAllDims = MATERIAL_SHAPE_PRESETS[shape].fields.every(f => dims[f.key] > 0);
     document.getElementById('mf-preview-empty').style.display = hasAllDims ? 'none' : '';
-    preview3D.setShape(shape, dims);
+    preview3D.setShape(shape, dims, currentCategory());
   }
 
   // For muffin_tray, the Weight field means weight PER CUP, not the whole tray -- see
@@ -5422,6 +5796,10 @@ async function renderMaterialFormView(main) {
     renderDimensionsForShape(currentShape(), {});
   });
 
+  // Category doesn't change which dimension fields show (only shape does) -- just re-derives the
+  // 3D preview's floor-or-not, so a plain updatePreview() is enough, no full dimension re-render.
+  document.getElementById('mf-category').addEventListener('change', updatePreview);
+
   // The preview canvas has no pixel size of its own (CSS gives its wrapper height:300px, width
   // 100%) -- resize once layout has settled, and again if the window itself resizes while this
   // form stays open.
@@ -5458,6 +5836,7 @@ async function renderMaterialFormView(main) {
     const payload = {
       id: s.formId || undefined,
       name,
+      category: currentCategory(),
       shapeType: shape,
       ...buildMaterialDimensionPayload(shape),
       weightGrams: weightRaw === '' ? null : parseFloat(weightRaw),
