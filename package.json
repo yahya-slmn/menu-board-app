@@ -1,6 +1,6 @@
 {
   "name": "menu-generator",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "description": "School Menu Generator",
   "main": "main.js",
   "scripts": {
