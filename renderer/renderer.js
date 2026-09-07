@@ -465,6 +465,7 @@ async function renderItemsView(main) {
           <tr>
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${catName}</td>` : ''}
             <td>${it.name}</td>
+            <td>${it.calories_per_100g != null ? it.calories_per_100g : '—'}</td>
             <td>
               ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
@@ -482,8 +483,8 @@ async function renderItemsView(main) {
     }
 
     content.innerHTML = `
-      <table class="items-table">
-        <thead><tr><th>Category</th><th>Name</th><th>Tags</th><th>RC</th><th></th></tr></thead>
+      <table class="items-table dish-catalog-table">
+        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Tags</th><th>RC</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
       </table>
     `;
@@ -3319,11 +3320,18 @@ function renderCalculatorView(main) {
           <input id="calc-target-portions" type="number" step="1" min="0" />
         </div>
       </div>
+      <div class="field" style="max-width:340px; display:none;" id="calc-multi-scale-field">
+        <label>Multi-Process Scaling</label>
+        <div class="mode-toggle">
+          <button type="button" class="mode-toggle-btn active" data-multi-scale="together">Scale all processes together</button>
+          <button type="button" class="mode-toggle-btn" data-multi-scale="independent">Scale each process independently</button>
+        </div>
+      </div>
       <div class="field" style="max-width:200px; display:none;" id="calc-all-portions-field">
         <label>Scale All to Target Portions</label>
         <input id="calc-all-portions-target" type="number" step="1" min="0" placeholder="e.g. 50" />
       </div>
-      <button type="button" class="secondary" id="calc-all-portions-clear" style="display:none;" title="Reset every process back to independent scaling">Reset to Independent Scaling</button>
+      <button type="button" class="secondary" id="calc-all-portions-clear" style="display:none;" title="Clear the Scale All to Target Portions override">Reset to Default Scaling</button>
       <button class="primary" id="calc-calculate-btn" disabled>Calculate</button>
     </div>
     <div id="calc-mode-error" style="display:none; color:var(--danger, #c0392b); font-size:12.5px; margin:-10px 0 14px;"></div>
@@ -3346,6 +3354,7 @@ function renderCalculatorView(main) {
   const portionsField = document.getElementById('calc-portions-field');
   const portionsInput = document.getElementById('calc-target-portions');
   const portionsModeBtn = document.getElementById('calc-mode-portions-btn');
+  const multiScaleField = document.getElementById('calc-multi-scale-field');
   const allPortionsField = document.getElementById('calc-all-portions-field');
   const allPortionsInput = document.getElementById('calc-all-portions-target');
   const allPortionsClearBtn = document.getElementById('calc-all-portions-clear');
@@ -3406,6 +3415,14 @@ function renderCalculatorView(main) {
   // click instead of visually resetting to "1". Reset fresh only when the process SET itself
   // changes -- see updateScalingControlsVisibility.
   let perProcessScaling = new Map();
+  // 'together' (default) | 'independent' -- only meaningful when "All Processes" resolves to 2+
+  // processes (see updateScalingControlsVisibility/calc-multi-scale-field). 'together' reuses the
+  // single shared Mode/Multiplier/Target block (singleScaleFields) and applies its one multiplier
+  // uniformly to every shown process; 'independent' is today's per-process inline-control behavior
+  // (perProcessScaling). Defaults to 'together' -- the common case is one uniform scale, with
+  // independent per-process control as the opt-in for genuinely different components (e.g.
+  // Dough/Poolish).
+  let multiScaleMode = 'together';
   // Tracks whether the currently-open list is the "browse all" list specifically, so a second
   // click on the browse button closes it instead of just re-opening the same full list -- but
   // starting to type (which hands the list over to wireRecipeAutocomplete's own search results)
@@ -3456,10 +3473,13 @@ function renderCalculatorView(main) {
     resultEl.innerHTML = '';
     modeErrorEl.style.display = 'none';
     singleScaleFields.style.display = 'contents';
+    multiScaleField.style.display = 'none';
     allPortionsField.style.display = 'none';
     allPortionsClearBtn.style.display = 'none';
     allPortionsInput.value = '';
     perProcessScaling = new Map();
+    multiScaleMode = 'together';
+    document.querySelectorAll('.generate-controls [data-multi-scale]').forEach(b => b.classList.toggle('active', b.dataset.multiScale === multiScaleMode));
   }
 
   // "Quantity Produced (original)" shows the recipe-level free-text serving/container count in
@@ -3483,35 +3503,37 @@ function renderCalculatorView(main) {
   }
 
   // Decides which scaling UI applies: the single shared Mode/Multiplier/Target block at the top
-  // (a specific process is selected, or the recipe has only one process to begin with --
-  // unchanged from before the per-process feature) vs. one independent scaling control per
-  // process ("All Processes" resolves to 2+ processes), rendered inline above each process's own
-  // section by renderCalcProcessCards -- see perProcessScaling. Rebuilds the Map's KEY SET to
-  // match whichever processes are currently shown, but PRESERVES each still-present process's own
-  // existing entry (mode/multiplier/target she's already typed) rather than resetting it --
-  // called after Add/Remove/Reorder Process (via onProcessStructureChanged) as well as recipe
-  // pick/process-filter change, and only the newly-shown-for-the-first-time processes should ever
-  // get fresh defaults; a process that already existed shouldn't lose what she typed just because
-  // she added or removed some OTHER process.
+  // (a specific process is selected, the recipe has only one process to begin with, or "All
+  // Processes" resolves to 2+ processes AND multiScaleMode is 'together') vs. one independent
+  // scaling control per process ("All Processes" resolves to 2+ processes AND multiScaleMode is
+  // 'independent'), rendered inline above each process's own section by renderCalcProcessCards --
+  // see perProcessScaling. In the independent case, rebuilds the Map's KEY SET to match whichever
+  // processes are currently shown, but PRESERVES each still-present process's own existing entry
+  // (mode/multiplier/target she's already typed) rather than resetting it -- called after Add/
+  // Remove/Reorder Process (via onProcessStructureChanged) as well as recipe pick/process-filter
+  // change, and only the newly-shown-for-the-first-time processes should ever get fresh defaults;
+  // a process that already existed shouldn't lose what she typed just because she added or
+  // removed some OTHER process. (Switching multiScaleMode itself goes through a full reset
+  // instead -- see the calc-multi-scale-field click handler -- since there's no sensible partial
+  // migration between "one shared multiplier" and "N independent ones".)
   function updateScalingControlsVisibility() {
     const scaled = processesToScale();
-    if (scaled.length > 1) {
-      singleScaleFields.style.display = 'none';
-      allPortionsField.style.display = 'flex';
-      allPortionsClearBtn.style.display = '';
-      const next = new Map();
-      scaled.forEach(p => next.set(p.localId, perProcessScaling.get(p.localId) || { mode: 'factor', multiplier: '1', target: '' }));
-      perProcessScaling = next;
-    } else {
+    multiScaleField.style.display = scaled.length > 1 ? 'flex' : 'none';
+    allPortionsField.style.display = scaled.length > 1 ? 'flex' : 'none';
+    allPortionsClearBtn.style.display = scaled.length > 1 ? '' : 'none';
+
+    const showSharedControls = scaled.length <= 1 || multiScaleMode === 'together';
+    if (showSharedControls) {
       singleScaleFields.style.display = 'contents';
-      allPortionsField.style.display = 'none';
-      allPortionsClearBtn.style.display = 'none';
       perProcessScaling = new Map();
       // Scale-to-target-portions only makes sense against the recipe's whole finished product --
-      // a single process filtered out of a multi-process recipe describes one component, not the
+      // a single process filtered OUT of a multi-process recipe describes one component, not the
       // combined portion size, so the button (and mode, if she was already in it) is unavailable
-      // in that one case even though the single-control block itself is still shown.
-      const portionsAvailable = allProcesses().length <= 1;
+      // in that one case even though the single-control block itself is still shown -- whether
+      // that's because only 1 process is selected/exists, or because "Scale all processes
+      // together" is applying this same block to the recipe's full set (scaled.length ===
+      // allProcesses().length covers both).
+      const portionsAvailable = scaled.length === allProcesses().length;
       portionsModeBtn.style.display = portionsAvailable ? '' : 'none';
       if (!portionsAvailable && scalingMode === 'portions') {
         scalingMode = 'factor';
@@ -3524,6 +3546,11 @@ function renderCalculatorView(main) {
         portionsInput.value = '';
       }
       updateQtyOriginalDisplay();
+    } else {
+      singleScaleFields.style.display = 'none';
+      const next = new Map();
+      scaled.forEach(p => next.set(p.localId, perProcessScaling.get(p.localId) || { mode: 'factor', multiplier: '1', target: '' }));
+      perProcessScaling = next;
     }
   }
 
@@ -3565,17 +3592,47 @@ function renderCalculatorView(main) {
     });
   });
 
+  // "Scale all processes together" vs "Scale each process independently" -- only visible when
+  // "All Processes" resolves to 2+ processes (see updateScalingControlsVisibility). Switching
+  // clears every scale value currently entered -- the shared block's Multiplier/Target/Portions,
+  // every process's own inline control (via the full perProcessScaling reset, since
+  // updateScalingControlsVisibility rebuilds it from an empty Map below), and the sticky Scale All
+  // to Target Portions override -- and shows the unscaled 1x preview, same "no confusing partial
+  // migration, start fresh" reasoning as switching Scaling Mode above: there's no sensible way to
+  // turn 2+ independent multipliers into one shared value, or vice versa.
+  document.querySelectorAll('.generate-controls [data-multi-scale]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.multiScale === multiScaleMode) return;
+      multiScaleMode = btn.dataset.multiScale;
+      document.querySelectorAll('.generate-controls [data-multi-scale]').forEach(b => b.classList.toggle('active', b.dataset.multiScale === multiScaleMode));
+      multiplierInput.value = '';
+      targetInput.value = '';
+      portionsInput.value = '';
+      allPortionsInput.value = '';
+      modeErrorEl.style.display = 'none';
+      perProcessScaling = new Map();
+      updateScalingControlsVisibility();
+      renderResultView(true);
+    });
+  });
+
   // Backs out of "Scale All to Target Portions" -- clears the sticky field (so it stops
-  // overriding future Calculate clicks), clears any error left showing, and puts every currently-
-  // shown process's own inline Mode/Multiplier/Target control back to a clean independent-scaling
-  // default (factor/1x) rather than leaving whatever multiplier the override last computed. Those
-  // per-process controls are never hidden/disabled by the override in the first place -- this is
-  // purely about giving her an explicit, unambiguous "start fresh" action instead of having to
-  // realize she can just retype over the override field herself.
+  // overriding future Calculate clicks), clears any error left showing, and resets whichever
+  // scaling UI is currently active back to a clean default: every process's own inline
+  // Mode/Multiplier/Target control in 'independent' mode (never hidden/disabled by the override in
+  // the first place), or the shared block's Multiplier/Target/Portions in 'together' mode -- either
+  // way, an explicit, unambiguous "start fresh" action instead of having to realize she can just
+  // retype over the override field herself.
   allPortionsClearBtn.addEventListener('click', () => {
     allPortionsInput.value = '';
     modeErrorEl.style.display = 'none';
-    processesToScale().forEach(p => perProcessScaling.set(p.localId, { mode: 'factor', multiplier: '1', target: '' }));
+    if (multiScaleMode === 'independent') {
+      processesToScale().forEach(p => perProcessScaling.set(p.localId, { mode: 'factor', multiplier: '1', target: '' }));
+    } else {
+      multiplierInput.value = '';
+      targetInput.value = '';
+      portionsInput.value = '';
+    }
     renderResultView(true);
   });
 
@@ -3641,6 +3698,22 @@ function renderCalculatorView(main) {
     if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
 
     selectedFullRecipe = full; // recipe-level fields (comment, presentation, etc.) edited directly on this
+    // Photo edits are local/export-only, same guarantee as everything else in the Calculator --
+    // existing photo(s) are fetched once per recipe selection into calc-prefixed fields on `full`
+    // itself (same "fetched once, edited directly on this object" convention comment/presentation
+    // already use), never touching `full.photo_path`/`full.photos` or the real saved recipe.
+    if (currentNs().photoModel === 'gallery') {
+      const paths = (full.photos || []).map(p => p.photo_path);
+      const dataUrls = paths.length > 0 ? await currentNs().api.getPhotos(paths) : [];
+      full.calcExistingPhotos = (full.photos || []).map((p, i) => ({ ...p, dataUrl: dataUrls[i] }));
+      full.calcPendingPhotos = [];
+    } else {
+      full.calcExistingPhotoDataUrl = full.photo_path ? await currentNs().api.getPhoto(full.photo_path) : null;
+      full.calcPendingPhoto = null;
+      full.calcRemovePhoto = false;
+    }
+    if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded during photo fetch
+
     // Reuses the recipe form's own process-shaping function unmodified -- see the comment on
     // workingProcesses above. Guarantees at least one (empty) process to edit, matching the form's
     // own "always at least 1 process" convention, in the unlikely case a saved recipe has none.
@@ -3691,17 +3764,18 @@ function renderCalculatorView(main) {
 
     const scaled = processesToScale();
 
+    // "Scale All to Target Portions" -- takes priority over whichever scaling UI is currently
+    // active on every Calculate click FOR AS LONG AS this field has a value (sticky, not a
+    // one-shot -- see calc-all-portions-clear above for how she backs out of it), identically
+    // whether processes are being scaled together or independently (multiScaleMode doesn't gate
+    // this at all). Computes a single multiplier from the recipe's combined original Net Weight
+    // and Portion Weight and applies it directly to every shown process; in 'independent' mode
+    // also syncs each process's own inline control to 'factor' pre-filled with that multiplier so
+    // it's visible and hand-tunable without needing another Calculate click ('together' mode has
+    // no per-process controls to sync -- the shared block stays whatever it already showed).
     if (scaled.length > 1) {
-      // "Scale All to Target Portions" -- takes priority over every process's own inline Mode/
-      // Multiplier/Target control on every Calculate click FOR AS LONG AS this field has a value
-      // (sticky, not a one-shot -- see calc-all-portions-clear below for how she backs out of it).
-      // Computes a single multiplier from the recipe's combined original Net Weight and Portion
-      // Weight and applies it directly to every shown process, then syncs each process's own
-      // inline control to 'factor' mode pre-filled with that multiplier so it's visible and
-      // hand-tunable without needing another Calculate click.
       const allPortionsValue = allPortionsInput.value.trim();
       if (allPortionsValue) {
-        modeErrorEl.style.display = 'none';
         const result = computeMultiplierFromTargetPortions(scaled, allPortionsValue, selectedFullRecipe.portion_weight_grams);
         if (result.error) {
           modeErrorEl.textContent = result.error;
@@ -3710,16 +3784,20 @@ function renderCalculatorView(main) {
         }
         scaled.forEach(proc => {
           proc.multiplier = result.multiplier;
-          perProcessScaling.set(proc.localId, { mode: 'factor', multiplier: String(roundNice(result.multiplier)), target: '' });
+          if (multiScaleMode === 'independent') {
+            perProcessScaling.set(proc.localId, { mode: 'factor', multiplier: String(roundNice(result.multiplier)), target: '' });
+          }
         });
         renderResultView(false);
         return;
       }
+    }
 
+    if (scaled.length > 1 && multiScaleMode === 'independent') {
       // Independent per-process scaling -- validate every process's own control (read from
       // perProcessScaling, kept live by the inline controls renderScaledRecipeResult renders
       // above each process's own section) and collect every error at once (unlike the
-      // single-control path below, more than one process can be invalid at the same time),
+      // shared-control path below, more than one process can be invalid at the same time),
       // rather than stopping at the first. Error divs are queried directly off the currently
       // rendered result -- rendered fresh only on success below, so an error stays visible right
       // where she's looking rather than triggering a rebuild that would hide it. On success, each
@@ -3741,7 +3819,7 @@ function renderCalculatorView(main) {
           proc.multiplier = val;
         } else {
           // Scoped to this process's OWN ingredients only -- scaling Dough to 5kg shouldn't be
-          // measured against Poolish's ingredients too, unlike the single-control path's target
+          // measured against Poolish's ingredients too, unlike the shared-control path's target
           // mode, which is deliberately measured against whatever pool is currently selected.
           const result = computeMultiplierFromTarget(proc.ingredientRows, st.target);
           if (result.error) {
@@ -3754,6 +3832,9 @@ function renderCalculatorView(main) {
       }
       if (hasError) return;
     } else {
+      // Shared Mode/Multiplier/Target block -- a single process (or a specific process selected),
+      // or "Scale all processes together" applying this one multiplier uniformly to every shown
+      // process (scaled.forEach below covers both: scaled has exactly 1 entry in the former case).
       let multiplier;
       if (scalingMode === 'factor') {
         multiplier = parseFloat(multiplierInput.value);
@@ -3775,7 +3856,7 @@ function renderCalculatorView(main) {
         }
         multiplier = result.multiplier;
       }
-      scaled[0].multiplier = multiplier;
+      scaled.forEach(proc => { proc.multiplier = multiplier; });
     }
 
     renderResultView(false);
@@ -3928,20 +4009,35 @@ function renderInlineProcessScalingControls(proc, state) {
 // wireProcessIngredientRowDrag UNCHANGED for drag-and-drop reordering -- it only ever splices
 // process.ingredientRows by localId, no catalog coupling to strip out.
 //
-// Quantity is the one column NOT bound to the persistent row: process.ingredientRows[].quantity
-// is the immutable 1x basis (set once, at working-copy build time, and never touched by scaling),
-// so process.scaledIngredients is (re)computed fresh here on every call -- from ingredientRows x
-// process.multiplier -- and the Quantity input is bound to THAT instead, preserving the original
-// quantity-edit contract: freely hand-overridable for this one calculation, reset back to
-// multiplier x original on the next Calculate. Name/Unit/Method bind directly to the persistent
-// row, so those edits (and row add/remove/reorder) survive future Calculate clicks.
+// Quantity is the one column NOT bound directly to the persistent row: the Quantity input is
+// bound to process.scaledIngredients[i] instead, preserving the original quantity-edit contract --
+// freely hand-overridable for this one calculation, reset back to multiplier x original Qty on
+// the next Calculate. Original Qty (process.ingredientRows[].quantity) is this calculation
+// session's own editable starting/base quantity -- session-local only, never read by
+// save-recipe/save-extracted-recipe, so editing it (like everything else here) never touches
+// recipe_ingredients/extracted_recipe_ingredients. Name/Unit/Method/Original-Qty bind directly to
+// the persistent row.
+//
+// scaledIngredients is rebuilt every call by carrying forward each row's existing entry (keyed by
+// localId, since scaleIngredients spreads it onto every entry) rather than unconditionally
+// recomputing basis x multiplier -- only a genuinely new row (just added, no existing entry yet)
+// gets a fresh computation. Without this, any hand-typed Quantity/Original Qty edit would be
+// silently discarded by the next unrelated Add/Remove/Reorder Ingredient Row action -- for a
+// brand-new ingredient (no ingredientRows-level basis at all) that meant its quantity vanishing
+// from Total Quantity/Net Weight entirely, not just resetting to some fallback number. The actual
+// reset-to-basis-x-multiplier still happens on a real Calculate click, since
+// renderScaledRecipeResult's own top-level scaleIngredients() call runs first on every Calculate
+// and its result is exactly what gets carried forward here on that render.
 function renderCalcIngredientRows(process, tbodyEl, onChange) {
-  process.scaledIngredients = scaleIngredients(process.ingredientRows, process.multiplier ?? 1);
+  const prevByLocalId = new Map((process.scaledIngredients || []).map(ing => [ing.localId, ing]));
+  process.scaledIngredients = process.ingredientRows.map(row =>
+    prevByLocalId.get(row.localId) || scaleIngredients([row], process.multiplier ?? 1)[0]);
 
   tbodyEl.innerHTML = process.ingredientRows.map((row, i) => `
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
       <td><input class="calc-ing-name" value="${row.name}" dir="auto" /></td>
+      <td><input class="calc-ing-orig-qty" value="${row.quantity ?? ''}" title="This calculation's starting/base quantity -- editable, never saved to the recipe" /></td>
       <td><input class="calc-ing-qty" value="${process.scaledIngredients[i].quantity ?? ''}" /></td>
       <td><input class="calc-ing-unit" value="${row.unit}" /></td>
       <td><input class="calc-ing-method" value="${row.method}" dir="auto" /></td>
@@ -3949,11 +4045,39 @@ function renderCalcIngredientRows(process, tbodyEl, onChange) {
     </tr>
   `).join('');
 
+  // Name/Unit/Method must be mirrored into scaledIngredients[i] (not just written to the
+  // persistent row) because the Export payload reads ingredient fields off scaledIngredients
+  // exclusively (see renderScaledRecipeResult's calc-export-btn handler), and because it's what
+  // the carry-forward-by-localId rebuild above reuses on the next render -- without this mirror a
+  // plain field edit here would silently never reach the exported file (this was the root cause
+  // of both the "new ingredient missing from export" and "unit change not reflected in export"
+  // bugs) or survive an unrelated Add/Remove/Reorder Ingredient Row action. Quantity already
+  // worked this way -- kept as-is below.
   process.ingredientRows.forEach((row, i) => {
     const tr = tbodyEl.querySelector(`tr[data-row="${row.localId}"]`);
-    tr.querySelector('.calc-ing-name').addEventListener('input', (e) => { row.name = e.target.value; });
-    tr.querySelector('.calc-ing-unit').addEventListener('input', (e) => { row.unit = e.target.value; });
-    tr.querySelector('.calc-ing-method').addEventListener('input', (e) => { row.method = e.target.value; });
+    tr.querySelector('.calc-ing-name').addEventListener('input', (e) => {
+      row.name = e.target.value;
+      process.scaledIngredients[i].name = e.target.value;
+    });
+    // Original Qty -- editing it wins over any previous manual override of the scaled Quantity
+    // column: recomputes that column fresh from the new basis x the process's current multiplier
+    // (reusing scaleIngredients, the same math the initial/Calculate-time computation uses),
+    // since she's redefining the starting point and expects the derived number to follow.
+    tr.querySelector('.calc-ing-orig-qty').addEventListener('input', (e) => {
+      row.quantity = e.target.value;
+      const recomputed = scaleIngredients([row], process.multiplier ?? 1)[0];
+      process.scaledIngredients[i] = { ...process.scaledIngredients[i], quantity: recomputed.quantity };
+      tr.querySelector('.calc-ing-qty').value = process.scaledIngredients[i].quantity ?? '';
+      onChange();
+    });
+    tr.querySelector('.calc-ing-unit').addEventListener('input', (e) => {
+      row.unit = e.target.value;
+      process.scaledIngredients[i].unit = e.target.value;
+    });
+    tr.querySelector('.calc-ing-method').addEventListener('input', (e) => {
+      row.method = e.target.value;
+      process.scaledIngredients[i].method = e.target.value;
+    });
     tr.querySelector('.calc-ing-qty').addEventListener('input', (e) => {
       process.scaledIngredients[i].quantity = e.target.value;
       onChange();
@@ -3994,7 +4118,7 @@ function renderCalcProcessCards(ns, workingProcesses, processesShown, wasteTypes
       </div>
       ${perProcessScaling && perProcessScaling.has(proc.localId) ? renderInlineProcessScalingControls(proc, perProcessScaling.get(proc.localId)) : ''}
       <table class="recipe-ingredients-table">
-        <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Method</th><th></th></tr></thead>
+        <thead><tr><th></th><th>Ingredient</th><th>Original Qty</th><th>Quantity</th><th>Unit</th><th>Method</th><th></th></tr></thead>
         <tbody class="calc-ing-rows"></tbody>
       </table>
       <button type="button" class="secondary calc-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
@@ -4231,6 +4355,23 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
           <textarea id="calc-comment" rows="3" dir="auto">${recipe.comment || ''}</textarea>
         </div>
 
+        ${ns.photoModel === 'gallery' ? `
+        <div class="field" style="margin-bottom:20px;">
+          <label>Photos (up to 10) -- export only, never saved to the recipe</label>
+          <div id="calc-photo-gallery" class="photo-gallery"></div>
+          <input type="file" id="calc-photo-input" accept="image/jpeg,image/png" multiple />
+        </div>
+        ` : `
+        <div class="field" style="margin-bottom:16px; max-width:320px;">
+          <label>Photo -- export only, never saved to the recipe</label>
+          <input type="file" id="calc-photo-input" accept="image/jpeg,image/png" />
+          <div id="calc-photo-preview-wrap" style="margin-top:8px; display:none;">
+            <img id="calc-photo-preview" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+            <button type="button" class="secondary" id="calc-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
+          </div>
+        </div>
+        `}
+
         <div style="display:flex; align-items:center; gap:10px;">
           <button class="primary" id="calc-export-btn">Export to Excel</button>
           ${exportLanguagePickerHtml('calc')}
@@ -4263,6 +4404,120 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
   document.getElementById('calc-category').addEventListener('input', (e) => { recipe.category = e.target.value; });
   document.getElementById('calc-country').addEventListener('input', (e) => { recipe.country_origin = e.target.value; });
 
+  // Photo edit -- export-only, exactly like every other field here: state lives on
+  // recipe.calcExistingPhotos/calcPendingPhotos (gallery) or recipe.calcPendingPhoto/
+  // calcRemovePhoto (single), never on recipe.photos/recipe.photo_path, so the real saved
+  // recipe/extracted_recipe_photos rows are never touched. Mirrors the recipe form's own
+  // gallery/single photo widgets (renderRecipeFormView) field-for-field, just re-scoped onto
+  // these calc-prefixed ids/state so nothing here can collide with the real form if both are
+  // ever open at once.
+  if (ns.photoModel === 'gallery') {
+    function totalCalcPhotoCount() {
+      return recipe.calcExistingPhotos.length + recipe.calcPendingPhotos.length;
+    }
+    function renderCalcPhotoGallery() {
+      const gallery = document.getElementById('calc-photo-gallery');
+      const tiles = [
+        ...recipe.calcExistingPhotos.map(p => ({ kind: 'existing', key: p.id, src: p.dataUrl })),
+        ...recipe.calcPendingPhotos.map(p => ({ kind: 'pending', key: p.localId, src: p.dataUrl })),
+      ];
+      gallery.innerHTML = tiles.length > 0
+        ? tiles.map(t => `
+            <div class="photo-thumb">
+              <img src="${t.src}" />
+              <button type="button" class="photo-thumb-remove" data-calc-remove-photo="${t.kind}:${t.key}" title="Remove photo">×</button>
+            </div>
+          `).join('')
+        : `<div class="photo-gallery-empty">No photos yet.</div>`;
+
+      gallery.querySelectorAll('[data-calc-remove-photo]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const [kind, key] = btn.dataset.calcRemovePhoto.split(':');
+          if (kind === 'existing') {
+            recipe.calcExistingPhotos = recipe.calcExistingPhotos.filter(p => String(p.id) !== key);
+          } else {
+            recipe.calcPendingPhotos = recipe.calcPendingPhotos.filter(p => String(p.localId) !== key);
+          }
+          renderCalcPhotoGallery();
+        });
+      });
+    }
+
+    document.getElementById('calc-photo-input').addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+
+      let remaining = 10 - totalCalcPhotoCount();
+      let hitCap = false;
+      for (const file of files) {
+        if (remaining <= 0) { hitCap = true; break; }
+        if (!['image/jpeg', 'image/png'].includes(file.type)) {
+          alert(`"${file.name}" isn't a JPG or PNG image and was skipped.`);
+          continue;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+          alert(`"${file.name}" is larger than 5MB and was skipped.`);
+          continue;
+        }
+        remaining -= 1;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          const base64 = dataUrl.split(',')[1];
+          const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+          recipe.calcPendingPhotos.push({ localId: ++_recipeRowLocalIdCounter, dataUrl, base64, ext });
+          renderCalcPhotoGallery();
+        };
+        reader.readAsDataURL(file);
+      }
+      if (hitCap) alert('You can attach up to 10 photos per recipe.');
+    });
+
+    renderCalcPhotoGallery();
+  } else {
+    function updateCalcPhotoPreview() {
+      const src = recipe.calcPendingPhoto
+        ? recipe.calcPendingPhoto.dataUrl
+        : (recipe.calcExistingPhotoDataUrl && !recipe.calcRemovePhoto ? recipe.calcExistingPhotoDataUrl : null);
+      document.getElementById('calc-photo-preview-wrap').style.display = src ? '' : 'none';
+      document.getElementById('calc-photo-preview').src = src || '';
+    }
+
+    document.getElementById('calc-photo-input').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (!['image/jpeg', 'image/png'].includes(file.type)) {
+        alert('Please choose a JPG or PNG image.');
+        e.target.value = '';
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        alert('Photo must be 5MB or smaller.');
+        e.target.value = '';
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        const base64 = dataUrl.split(',')[1];
+        const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+        recipe.calcPendingPhoto = { dataUrl, base64, ext };
+        recipe.calcRemovePhoto = false;
+        updateCalcPhotoPreview();
+      };
+      reader.readAsDataURL(file);
+    });
+
+    document.getElementById('calc-photo-remove-btn').addEventListener('click', () => {
+      recipe.calcPendingPhoto = null;
+      recipe.calcRemovePhoto = true;
+      document.getElementById('calc-photo-input').value = '';
+      updateCalcPhotoPreview();
+    });
+
+    updateCalcPhotoPreview();
+  }
+
   function recomputeCombined() {
     combinedNetWeight = roundNice(processesShown.reduce((sum, p) => sum + p.netWeight, 0));
     const combinedEl = document.getElementById('calc-combined-netweight');
@@ -4287,12 +4542,43 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
     // See the List "Export Selected" handler's comment -- same missing-try/catch bug fixed here.
     const unsubscribe = window.api.onExportProgress((message) => { statusEl.textContent = message; });
     try {
-      // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending --
-      // export-scaled-extracted-recipe re-fetches Extractor photos fresh by recipeId itself (a
-      // no-op for Recipe Book, whose export-scaled-recipe handler ignores recipeId and reads
-      // photo_path off `recipe` directly instead), and the shown processes below are the ones
-      // that actually belong in the export, not the full working-copy set.
-      const { processes: _origProcesses, photos: _origPhotos, ...recipeFields } = recipe;
+      // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending, plus
+      // every calc-prefixed photo-editing helper field (large dataUrl/base64 strings that would
+      // otherwise double up in the payload -- their content is collected separately into
+      // photoOverride/photosOverride below) -- the shown processes below are the ones that
+      // actually belong in the export, not the full working-copy set.
+      const {
+        processes: _origProcesses, photos: _origPhotos,
+        calcExistingPhotoDataUrl: _o1, calcPendingPhoto: _o2, calcRemovePhoto: _o3,
+        calcExistingPhotos: _o4, calcPendingPhotos: _o5,
+        ...recipeFields
+      } = recipe;
+      // Photo override -- always sent explicitly (never left for main.js to infer), since it's
+      // the one clean way to tell the export handlers "use exactly this, don't touch the real
+      // saved photo(s)" including the "she removed it/them for this export only" case, which a
+      // falsy-value check alone couldn't distinguish from "no edit made".
+      const photoOverrideFields = ns.photoModel === 'gallery'
+        ? {
+            photosOverride: [
+              ...recipe.calcExistingPhotos.map(p => ({
+                base64: p.dataUrl.split(',')[1],
+                ext: p.photo_path && p.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg',
+              })),
+              ...recipe.calcPendingPhotos.map(p => ({ base64: p.base64, ext: p.ext })),
+            ],
+          }
+        : {
+            photoOverride: recipe.calcRemovePhoto
+              ? null
+              : recipe.calcPendingPhoto
+                ? { base64: recipe.calcPendingPhoto.base64, ext: recipe.calcPendingPhoto.ext }
+                : recipe.calcExistingPhotoDataUrl
+                  ? {
+                      base64: recipe.calcExistingPhotoDataUrl.split(',')[1],
+                      ext: recipe.photo_path && recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg',
+                    }
+                  : null,
+          };
       const exportRecipe = {
         ...recipeFields,
         // Falls back to the original, unscaled recipe-level quantity when processes were scaled
@@ -4303,6 +4589,7 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
         quantity_produced: quantityProducedScaled || recipe.quantity_produced,
         yield_notes: `${combinedNetWeight} G`,
         presentation_serving: collectTextListFieldValue(recipe, TEXT_LIST_FIELDS.calcPresentation),
+        ...photoOverrideFields,
       };
       // ingredient_name (not `name`) is what lib/export.js/the translate step actually read --
       // scaledIngredients rows carry `name` (the working copy's own field, from

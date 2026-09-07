@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 const { autoUpdater } = require('electron-updater');
@@ -58,6 +58,17 @@ function createWindow() {
 // package.json's build.publish). Downloads silently in the background; the user is only
 // interrupted once the update is fully downloaded and ready to install.
 //
+// Every check used to be a single shot at app launch with zero user-visible feedback on
+// anything short of a fully-downloaded update (a failed/no-op check just logged to a file
+// nobody opens) -- confirmed as the reason a real release was silently missed on one machine
+// twice in a row: a transient failure at cold launch (network not up yet) or a quit before the
+// launch-time check/download finished would look identical to "nothing happened", and there
+// was no later re-check to self-heal it. Two fixes below: a 4-hour periodic re-check (see
+// app.whenReady) so a launch-time miss or a mid-session release isn't stuck until the next full
+// quit/relaunch, and a manual "Check for Updates..." menu item (buildApplicationMenu) with real
+// status feedback for exactly the escape-hatch case where she wants to know NOW rather than
+// trust the silent background path.
+//
 // Logging only, added for debugging -- no update/signing behavior changed here. A packaged
 // .app has no attached terminal, so console.log/error were never visible in practice; this
 // routes everything (electron-log's own internal messages included, via autoUpdater.logger)
@@ -71,20 +82,57 @@ autoUpdater.logger = log;
 
 autoUpdater.autoDownload = true;
 
+// Set only while a manually-triggered check (the menu item) is in flight -- every event handler
+// below branches on it so the automatic launch-time/periodic checks stay exactly as silent as
+// before (logged only, no dialogs, no menu-label changes) while a manual check gets full,
+// real-time feedback in the menu item's own label plus a terminal dialog. Cleared by
+// resetCheckForUpdatesMenuItem, called from every terminal event (not-available/downloaded/error).
+let manualCheckInProgress = false;
+// Set once buildApplicationMenu() runs; mutating a live MenuItem's .label/.enabled updates the
+// menu immediately, no need to rebuild/reassign the whole Menu.
+let checkForUpdatesMenuItem = null;
+
+function resetCheckForUpdatesMenuItem() {
+  manualCheckInProgress = false;
+  if (checkForUpdatesMenuItem) {
+    checkForUpdatesMenuItem.label = 'Check for Updates…';
+    checkForUpdatesMenuItem.enabled = true;
+  }
+}
+
 autoUpdater.on('checking-for-update', () => {
   log.info('[auto-updater] checking-for-update event fired');
 });
 
 autoUpdater.on('update-available', (info) => {
   log.info(`[auto-updater] update-available: v${info.version} -- downloading in background`);
+  if (manualCheckInProgress && checkForUpdatesMenuItem) {
+    checkForUpdatesMenuItem.label = `Downloading Update (v${info.version})…`;
+  }
+});
+
+autoUpdater.on('download-progress', (progress) => {
+  if (manualCheckInProgress && checkForUpdatesMenuItem) {
+    checkForUpdatesMenuItem.label = `Downloading Update… ${Math.round(progress.percent)}%`;
+  }
 });
 
 autoUpdater.on('update-not-available', (info) => {
   log.info(`[auto-updater] update-not-available -- current app version is already latest (checked against v${info?.version})`);
+  if (manualCheckInProgress) {
+    dialog.showMessageBox(mainWindow || loginWindow, {
+      type: 'info',
+      title: 'No Updates Available',
+      message: "You're on the latest version.",
+      detail: `Menu Board v${app.getVersion()}`,
+    });
+  }
+  resetCheckForUpdatesMenuItem();
 });
 
 autoUpdater.on('update-downloaded', (info) => {
   log.info(`[auto-updater] update-downloaded: v${info.version} -- prompting to restart`);
+  resetCheckForUpdatesMenuItem();
   dialog.showMessageBox(mainWindow || loginWindow, {
     type: 'info',
     title: 'Update Ready',
@@ -102,28 +150,159 @@ autoUpdater.on('error', (err) => {
   log.error('[auto-updater] error event:', {
     message: err?.message, code: err?.code, name: err?.name, stack: err?.stack,
   });
+  if (manualCheckInProgress) {
+    dialog.showMessageBox(mainWindow || loginWindow, {
+      type: 'error',
+      title: 'Update Check Failed',
+      message: "Couldn't check for updates.",
+      detail: err?.message || 'An unknown error occurred. Check your network connection and try again.',
+    });
+  }
+  resetCheckForUpdatesMenuItem();
 });
 
-function checkForUpdates() {
+function checkForUpdates(manual = false) {
   // Unpacked dev runs (npm start) have no app-update.yml -- that file only exists inside a
   // build produced by electron-builder -- so checkForUpdates() would just throw noisily.
   // This means dev-mode testing (npm start) will NEVER produce any auto-update log lines at
   // all, by design -- to see anything here, test the actual packaged/installed .app.
   if (!app.isPackaged) {
     log.info('[auto-updater] skipped: app.isPackaged is false (dev run via npm start)');
+    if (manual) {
+      dialog.showMessageBox(mainWindow || loginWindow, {
+        type: 'info',
+        title: 'Check for Updates',
+        message: 'Update checks are only available in the installed app.',
+        detail: 'This dev build (npm start) has no update feed to check against.',
+      });
+      resetCheckForUpdatesMenuItem();
+    }
     return;
+  }
+  if (manual) {
+    manualCheckInProgress = true;
+    if (checkForUpdatesMenuItem) {
+      checkForUpdatesMenuItem.enabled = false;
+      checkForUpdatesMenuItem.label = 'Checking for Updates…';
+    }
   }
   log.info(`[auto-updater] calling checkForUpdates() -- current app version is ${app.getVersion()}`);
   autoUpdater.checkForUpdates().catch((err) => {
     log.error('[auto-updater] checkForUpdates() promise rejected:', {
       message: err?.message, code: err?.code, name: err?.name, stack: err?.stack,
     });
+    // checkForUpdates() rejecting (as opposed to the updater's own 'error' event firing) means
+    // the request never got far enough to reach the updater's normal event flow at all -- still
+    // needs the same manual-check feedback, since otherwise a manual click could fail this way
+    // and just leave the menu item stuck on "Checking for Updates…" forever.
+    if (manual) {
+      dialog.showMessageBox(mainWindow || loginWindow, {
+        type: 'error',
+        title: 'Update Check Failed',
+        message: "Couldn't check for updates.",
+        detail: err?.message || 'An unknown error occurred. Check your network connection and try again.',
+      });
+      resetCheckForUpdatesMenuItem();
+    }
   });
 }
 
+// Full macOS menu template -- the app has never called Menu.setApplicationMenu before, so it's
+// been running on Electron's built-in default (App/File/Edit/View/Window/Help) this whole time.
+// Reproduced here field-for-field via the same `role:` shorthands Electron's own default menu
+// uses internally, so every existing behavior/accelerator (Cmd+Q, Cmd+W, Cmd+C/V, DevTools
+// toggle, fullscreen, etc.) keeps working exactly as before -- the only actual addition is
+// "Check for Updates..." in the app menu, placed right under "About" per standard macOS
+// convention (Chrome/Slack/VS Code/Notion all place it there, not under Help).
+function buildApplicationMenu() {
+  const template = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        {
+          id: 'checkForUpdates',
+          label: 'Check for Updates…',
+          click: () => checkForUpdates(true),
+        },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'File',
+      submenu: [{ role: 'close' }],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'pasteAndMatchStyle' },
+        { role: 'delete' },
+        { role: 'selectAll' },
+        { type: 'separator' },
+        {
+          label: 'Speech',
+          submenu: [{ role: 'startSpeaking' }, { role: 'stopSpeaking' }],
+        },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { role: 'front' },
+      ],
+    },
+    {
+      role: 'help',
+      submenu: [],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+  // The built Menu's own MenuItem, not the plain template object -- mutating its .label/.enabled
+  // is what actually reflects in the live menu (see resetCheckForUpdatesMenuItem/checkForUpdates).
+  checkForUpdatesMenuItem = menu.getMenuItemById('checkForUpdates');
+}
+
 app.whenReady().then(() => {
+  buildApplicationMenu();
   createLoginWindow();
   checkForUpdates();
+  // Closes failure mode #3 from the investigation (leaving the app open across days means the
+  // once-at-launch check never fires again) -- re-checks every 4 hours for as long as the app
+  // stays open, silently (manual=false), same as the launch-time check.
+  setInterval(() => checkForUpdates(), 4 * 60 * 60 * 1000);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       authenticated ? createWindow() : createLoginWindow();
@@ -142,10 +321,56 @@ app.whenReady().then(() => {
 // create the Supabase Auth user behind a new ID.
 const LOGIN_ID_DOMAIN = 'menuboard.local';
 
+// Bounded so a stuck request always surfaces *something* instead of leaving the login screen on
+// "Signing in..." forever with no explanation -- the actual bug this fixes. 15s is generous for
+// a real network round trip but well short of "feels hung".
+const SIGN_IN_TIMEOUT_MS = 15000;
+
+// A system clock far enough from real time breaks TLS certificate validation (HTTPS requires
+// the client's clock to fall within the cert's validity window) -- a well-known class of issue,
+// and opening Date & Time settings force-syncs the clock via NTP and immediately unsticks it,
+// which matches this app's reported symptom (login hangs indefinitely, no error) exactly on two
+// separate machines. It's the leading theory, not a confirmed diagnosis (there's no machine log
+// to inspect), so the message below covers the other realistic cause -- no internet -- too,
+// rather than asserting a clock problem outright.
+const SIGN_IN_NETWORK_FAILURE_MESSAGE = "Couldn't reach the sign-in server. This is often caused "
+  + "by your computer's system clock/date being set incorrectly, which breaks the secure "
+  + 'connection -- check Date & Time in System Settings (turn on "Set automatically") and try '
+  + 'again. If the clock looks right, check your internet connection instead.';
+
+function withTimeout(promise, ms) {
+  let timeoutId;
+  const timeout = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => reject(new Error('timed out')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 ipcMain.handle('auth-sign-in', async (e, { id, password }) => {
   const email = `${(id || '').trim().toLowerCase()}@${LOGIN_ID_DOMAIN}`;
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) return { success: false, message: error.message };
+  let data, error;
+  try {
+    ({ data, error } = await withTimeout(supabase.auth.signInWithPassword({ email, password }), SIGN_IN_TIMEOUT_MS));
+  } catch (timeoutErr) {
+    log.warn(`[auth-sign-in] timed out after ${SIGN_IN_TIMEOUT_MS}ms -- likely a stuck TLS handshake (bad system clock) or a dead connection`);
+    return { success: false, message: SIGN_IN_NETWORK_FAILURE_MESSAGE };
+  }
+  if (error) {
+    // signInWithPassword never throws -- @supabase/auth-js catches every failure itself and
+    // resolves `error` instead, including a fetch()-level failure (TLS handshake included) that
+    // never got as far as a real HTTP response. That specific case is tagged status 0 / name
+    // 'AuthRetryableFetchError' (see node_modules/@supabase/auth-js's fetch.js/errors.js) --
+    // the one reliable signal available to tell "couldn't even reach the server" apart from a
+    // genuine rejection from it (wrong password, etc.), whose message is left completely
+    // untouched below. auth-js's own wrapping collapses every fetch-level failure (offline, DNS,
+    // TLS/certificate) into the same generic "fetch failed" string, so this can't be narrowed
+    // down any further than that from here -- hence the message covering both causes.
+    if (error.status === 0 || error.name === 'AuthRetryableFetchError') {
+      log.warn(`[auth-sign-in] network-level failure reaching Supabase: ${error.message}`);
+      return { success: false, message: SIGN_IN_NETWORK_FAILURE_MESSAGE };
+    }
+    return { success: false, message: error.message };
+  }
 
   // sections/categories/protein_types/age_groups/meal_periods are read constantly and
   // synchronously throughout the app; RLS blocks anonymous reads of them (same as every
@@ -1339,7 +1564,10 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath, targetLanguage
 // `processes` arrive as plain data (already carrying photo_path through from the original
 // recipe row via the Calculator's spread in renderScaledRecipeResult). The photo bytes still
 // have to be fetched from Storage here, same as export-recipes above, since buildRecipeSheet
-// only knows how to embed an in-memory photos array, not a storage path.
+// only knows how to embed an in-memory photos array, not a storage path -- unless the Calculator
+// edited the photo for this export (photoOverride), in which case those bytes came straight from
+// the renderer and Storage is never touched at all. Either way, nothing here ever writes back to
+// Storage or the recipe row -- purely local to this one export.
 ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, targetLanguage }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
@@ -1352,13 +1580,18 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, 
   }
 
   recipe.photos = [];
-  if (recipe.photo_path) {
+  if (Object.prototype.hasOwnProperty.call(recipe, 'photoOverride')) {
+    if (recipe.photoOverride) {
+      recipe.photos = [{ buffer: Buffer.from(recipe.photoOverride.base64, 'base64'), ext: recipe.photoOverride.ext }];
+    }
+  } else if (recipe.photo_path) {
     const { data, error } = await supabase.storage.from(RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
     if (error) throw supaFail('export-scaled-recipe: download photo', error);
     const buffer = Buffer.from(await data.arrayBuffer());
     const ext = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
     recipe.photos = [{ buffer, ext }];
   }
+  delete recipe.photoOverride;
 
   if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
   const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
@@ -1878,6 +2111,10 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath, targ
 // path), nothing here recomputes quantities. `recipeId` is only used to look up this recipe's
 // *original, unscaled* photos fresh from extracted_recipe_photos -- photos aren't a quantity, so
 // there's nothing to scale, same as export-scaled-recipe never scaling recipe.photo_path either.
+// A photosOverride (the Calculator's own gallery edit, if any) always wins over that DB lookup --
+// its bytes come straight from the renderer (already downloaded once to build the on-screen
+// gallery), so extracted_recipe_photos is never even queried in that case, and nothing here ever
+// writes back to it or to Storage.
 ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, processes, savePath, targetLanguage }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
@@ -1889,10 +2126,15 @@ ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, p
     savePath = result.filePath;
   }
 
-  const { data: photoRows, error: photoErr } = await supabase
-    .from('extracted_recipe_photos').select('photo_path').eq('extracted_recipe_id', recipeId).order('sort_order');
-  if (photoErr) throw supaFail('export-scaled-extracted-recipe: load extracted_recipe_photos', photoErr);
-  recipe.photos = await downloadExtractedRecipePhotos(photoRows);
+  if (Object.prototype.hasOwnProperty.call(recipe, 'photosOverride')) {
+    recipe.photos = (recipe.photosOverride || []).map(p => ({ buffer: Buffer.from(p.base64, 'base64'), ext: p.ext }));
+  } else {
+    const { data: photoRows, error: photoErr } = await supabase
+      .from('extracted_recipe_photos').select('photo_path').eq('extracted_recipe_id', recipeId).order('sort_order');
+    if (photoErr) throw supaFail('export-scaled-extracted-recipe: load extracted_recipe_photos', photoErr);
+    recipe.photos = await downloadExtractedRecipePhotos(photoRows);
+  }
+  delete recipe.photosOverride;
 
   if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
   const translated = await translateForRecipeExport(targetLanguage, recipe, processes);

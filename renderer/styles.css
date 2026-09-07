@@ -251,6 +251,15 @@ table.items-table col.col-category, table.items-table th:nth-child(1), table.ite
 table.items-table th:nth-child(3), table.items-table td:nth-child(3) { width: 180px; }
 table.items-table th:nth-child(4), table.items-table td:nth-child(4) { width: 130px; }
 table.items-table th:nth-child(5), table.items-table td:nth-child(5) { width: 110px; }
+/* Dish Catalog's own column layout (Category/Name/Calories/Tags/RC/actions) -- one column wider
+   than the base .items-table rules above (shared with Ingredients/Waste Types, which have their
+   own, different column meanings at positions 3-5), so its Calories/Tags/RC/actions widths are
+   scoped to this extra class instead of renumbering the shared nth-child rules. Higher specificity
+   (two classes) than the base rules, so these simply win for this one table. */
+table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 110px; }
+table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 180px; }
+table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 130px; }
+table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 110px; }
 table.items-table td, table.items-table th {
   padding: 8px 10px;
   text-align: left;
