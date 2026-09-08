@@ -27,6 +27,12 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('calorie-estimate-progress', listener);
     return () => ipcRenderer.removeListener('calorie-estimate-progress', listener);
   },
+  estimateMissingAmSnackStyles: () => ipcRenderer.invoke('estimate-missing-am-snack-styles'),
+  onAmSnackStyleEstimateProgress: (callback) => {
+    const listener = (event, message) => callback(message);
+    ipcRenderer.on('am-snack-style-estimate-progress', listener);
+    return () => ipcRenderer.removeListener('am-snack-style-estimate-progress', listener);
+  },
 
   searchIngredients: (query) => ipcRenderer.invoke('search-ingredients', query),
   addIngredient: (payload) => ipcRenderer.invoke('add-ingredient', payload),

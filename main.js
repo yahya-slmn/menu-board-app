@@ -20,6 +20,7 @@ const {
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
+const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
 
 let mainWindow;
 let loginWindow;
@@ -473,7 +474,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g')
+    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, am_snack_style')
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
 
@@ -492,6 +493,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         protein_code: pt?.code ?? null,
         protein_name: pt?.name ?? null,
         calories_per_100g: mi.calories_per_100g,
+        am_snack_style: mi.am_snack_style,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };
@@ -515,15 +517,37 @@ ipcMain.handle('suggest-classification', (e, { name, mealPeriod, sectionCode }) 
   return suggestClassification(name, mealPeriod, sectionCode);
 });
 
+// AM Snack items in Daycare/KG-LP/MS-UP auto-classify (Pastry/Cold Kitchen) on save when the
+// chef leaves Style blank -- same "apply the AI classification as the final value immediately,
+// no review flag" contract as calories_per_100g's own bulk backfill, just triggered per-item at
+// save time instead of in a batch. A manually picked style (explicitStyle truthy) always wins --
+// this never overwrites her own choice. Never throws: a failed/unreachable AI call just leaves
+// the item unclassified (null) rather than blocking the save, since classification is secondary
+// to the item existing at all -- she can still classify it later via the bulk backfill button or
+// by editing the item directly.
+async function resolveAmSnackStyle(categoryCode, name, explicitStyle) {
+  if (categoryCode !== 'AM_SNACK') return null;
+  if (explicitStyle) return explicitStyle;
+  try {
+    const estimates = await estimateAmSnackStyle({ items: [{ index: 0, name }] });
+    const match = estimates.find(est => est.index === 0);
+    return match?.am_snack_style ?? null;
+  } catch (err) {
+    console.error('[resolveAmSnackStyle] auto-classify failed:', err.message);
+    return null;
+  }
+}
+
 // menu_items has UNIQUE(name, category_id) in Postgres too -- adding/renaming/re-categorizing
 // an item so it collides with another item of the same name already in that category throws
 // a unique_violation (Postgres code 23505). Caught here (same pattern as delete-ingredient
 // below) and reported back as { success: false, duplicate: true } instead of throwing, since
 // the same dish name legitimately recurs across many categories in this catalog and the
 // renderer needs to tell the user why the save didn't go through rather than have it silently fail.
-ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, portions, sectionCode }) => {
+ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
+  const resolvedAmSnackStyle = await resolveAmSnackStyle(categoryCode, name, amSnackStyle);
 
   const { data: inserted, error: insErr } = await supabase
     .from('menu_items')
@@ -533,6 +557,7 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       protein_type_id: protein ? protein.id : null,
       is_daily_repeating: isDailyRepeating ? 1 : 0,
       calories_per_100g: caloriesPer100g ?? null,
+      am_snack_style: resolvedAmSnackStyle,
       // Both pre-existing bugs, unrelated to item_portions.quantity retirement -- found while
       // smoke-testing Add Item afterward, neither previously set here:
       // - is_active: violates NOT NULL in Postgres (update-item always sets it; add-item never
@@ -634,9 +659,10 @@ ipcMain.handle('check-category-change-impact', async (e, { itemId, newCategoryCo
 // sections/how-many rows would go stale (via check-category-change-impact above) and she's
 // explicitly confirmed -- never inferred or defaulted true, so a category save never deletes
 // portion data the chef hasn't seen and approved in the moment.
-ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, removeInvalidSectionPortions }) => {
+ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
+  const resolvedAmSnackStyle = await resolveAmSnackStyle(categoryCode, name, amSnackStyle);
 
   const { error } = await supabase
     .from('menu_items')
@@ -647,6 +673,7 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
       is_daily_repeating: isDailyRepeating ? 1 : 0,
       is_active: isActive ? 1 : 0,
       calories_per_100g: caloriesPer100g ?? null,
+      am_snack_style: resolvedAmSnackStyle,
     })
     .eq('id', id);
 
@@ -843,6 +870,110 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   }
 
   e.sender.send('calorie-estimate-progress', `Done -- ${estimated} of ${items.length} items updated.`);
+  return { success: true, estimated, totalMissing: items.length, failures };
+});
+
+// AM Snack Pastry/Cold-Kitchen weekly rotation, Phase 1 -- backfills am_snack_style for every
+// existing AM_SNACK item that's missing it, scoped to Daycare/KG_LP/MS_UP (the only sections the
+// AM_SNACK category and the rotation rule apply to -- lib/generator.js's own
+// AM_SNACK_ROTATION_SECTIONS). Idempotent, same convention as estimate-missing-calories: only
+// ever touches rows where am_snack_style IS NULL, so re-running it later after new items are
+// added just backfills whatever's still missing. Batching/retry/progress-event shape mirrors
+// estimate-missing-calories exactly -- see that handler's own comments for the full reasoning
+// (index-tagged reconciliation, sequential batches, per-item parallel writes within a batch).
+const AM_SNACK_STYLE_IN_SCOPE_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
+const AM_SNACK_STYLE_BATCH_SIZE = 50;
+
+ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
+  const ageGroupIds = AM_SNACK_STYLE_IN_SCOPE_SECTIONS
+    .map(code => getSectionByCode(code))
+    .filter(Boolean)
+    .flatMap(section => getAgeGroupsForSection(section.id).map(a => a.id));
+  if (ageGroupIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+
+  const portionRows = await fetchAllRowsMain(() => supabase
+    .from('item_portions').select('item_id').in('age_group_id', ageGroupIds))
+    .catch(err => { throw supaFail('estimate-missing-am-snack-styles: load item_portions', err); });
+  const itemIds = [...new Set(portionRows.map(r => r.item_id))];
+  if (itemIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+
+  const amSnackCategory = getCategoryByCode('AM_SNACK');
+  const { data: items, error: itemsErr } = await supabase
+    .from('menu_items')
+    .select('id, name')
+    .in('id', itemIds)
+    .eq('category_id', amSnackCategory.id)
+    .is('am_snack_style', null);
+  if (itemsErr) throw supaFail('estimate-missing-am-snack-styles: load menu_items', itemsErr);
+  if (items.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+
+  async function classifyAndWriteBatch(batch) {
+    const payloadItems = batch.map((it, idx) => ({ index: idx, name: it.name }));
+
+    let estimates;
+    try {
+      estimates = await estimateAmSnackStyle({ items: payloadItems });
+    } catch (err) {
+      return { written: 0, missing: batch, error: err.message };
+    }
+
+    const byIndex = new Map(estimates.map(est => [est.index, est.am_snack_style]));
+    const toWrite = [];
+    const missing = [];
+    batch.forEach((it, idx) => {
+      const value = byIndex.get(idx);
+      if (!value) missing.push(it);
+      else toWrite.push({ it, value });
+    });
+
+    const writeResults = await Promise.all(toWrite.map(({ it, value }) =>
+      supabase.from('menu_items').update({ am_snack_style: value }).eq('id', it.id)
+        .then(({ error }) => ({ ok: !error, it }))
+    ));
+    writeResults.filter(r => !r.ok).forEach(r => missing.push(r.it));
+
+    return { written: writeResults.filter(r => r.ok).length, missing, error: null };
+  }
+
+  function chunk(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  let estimated = 0;
+  const failures = [];
+  let stillMissing = [];
+
+  const batches = chunk(items, AM_SNACK_STYLE_BATCH_SIZE);
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    e.sender.send('am-snack-style-estimate-progress', `Classifying batch ${b + 1} of ${batches.length} (${batch.length} items)…`);
+    const result = await classifyAndWriteBatch(batch);
+    estimated += result.written;
+    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} items): ${result.error}`);
+    stillMissing.push(...result.missing);
+  }
+
+  if (stillMissing.length > 0) {
+    e.sender.send('am-snack-style-estimate-progress', `Retrying ${stillMissing.length} item(s) that didn't come back the first time…`);
+    const retryBatches = chunk(stillMissing, AM_SNACK_STYLE_BATCH_SIZE);
+    const retryMissing = [];
+    for (let b = 0; b < retryBatches.length; b++) {
+      const batch = retryBatches[b];
+      e.sender.send('am-snack-style-estimate-progress', `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…`);
+      const result = await classifyAndWriteBatch(batch);
+      estimated += result.written;
+      if (result.error) failures.push(`Retry batch ${b + 1} (${batch.length} items): ${result.error}`);
+      retryMissing.push(...result.missing);
+    }
+    if (retryMissing.length > 0) {
+      const names = retryMissing.slice(0, 10).map(it => it.name).join(', ');
+      failures.push(`${retryMissing.length} item(s) still missing a classification after retry: ${names}${retryMissing.length > 10 ? '…' : ''}`);
+    }
+  }
+
+  e.sender.send('am-snack-style-estimate-progress', `Done -- ${estimated} of ${items.length} items updated.`);
   return { success: true, estimated, totalMissing: items.length, failures };
 });
 
@@ -1568,7 +1699,7 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath, targetLanguage
 // edited the photo for this export (photoOverride), in which case those bytes came straight from
 // the renderer and Storage is never touched at all. Either way, nothing here ever writes back to
 // Storage or the recipe row -- purely local to this one export.
-ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, targetLanguage }) => {
+ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, targetLanguage, includeOriginalQty }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Scaled Recipe',
@@ -1596,7 +1727,7 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, 
   if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
   const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
   await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
-    ...translated, codeLabelKey: 'ttyCode', onProgress: (message) => e.sender.send('export-progress', message),
+    ...translated, codeLabelKey: 'ttyCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', message),
   });
   return { success: true, path: savePath };
 });
@@ -2115,7 +2246,7 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath, targ
 // its bytes come straight from the renderer (already downloaded once to build the on-screen
 // gallery), so extracted_recipe_photos is never even queried in that case, and nothing here ever
 // writes back to it or to Storage.
-ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, processes, savePath, targetLanguage }) => {
+ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, processes, savePath, targetLanguage, includeOriginalQty }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Scaled Recipe',
@@ -2139,7 +2270,7 @@ ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, p
   if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
   const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
   await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
-    ...translated, codeLabelKey: 'exCode', onProgress: (message) => e.sender.send('export-progress', message),
+    ...translated, codeLabelKey: 'exCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', message),
   });
   return { success: true, path: savePath };
 });

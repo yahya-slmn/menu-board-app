@@ -186,6 +186,11 @@ function getSelectedExportLanguage(idPrefix) {
 }
 
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
+// AM_SNACK_STYLE_OPTIONS (defined below) already carries the display name for each style code --
+// this just maps that same code to its own chip color class, same pattern as CATEGORY_COLOR does
+// for protein codes. Pastry gets a warm rose (bakery), Cold Kitchen a cool teal ("cold") --
+// distinct from every existing chip color (chicken/beef/lamb/daily).
+const AM_SNACK_STYLE_COLOR = { PASTRY: 'pastry', COLD_KITCHEN: 'cold-kitchen' };
 
 // Categories where Protein Type is meaningful, confirmed against real item_portions/
 // protein_type_id usage (not just categories literally named "Main") -- LUNCH_MAIN and
@@ -197,6 +202,16 @@ const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
 const PROTEIN_ELIGIBLE_CATEGORIES = new Set([
   'LUNCH_MAIN', 'STAFF_MAIN', 'STAFF_BREAKFAST', 'STAFF_LUNCHBOX', 'STAFF_LUNCHBOX_SALAD',
 ]);
+
+// AM_SNACK only -- backs lib/generator.js's Pastry/Cold-Kitchen weekly rotation
+// (AM_SNACK_STYLE_BY_PATTERN), scoped to Daycare/KG-LP/MS-UP the same way AM_SNACK itself only
+// ever appears in those three sections' own category lists (SECTION_SLOTS never lists it for
+// Staff/CEO), so no separate section check is needed here.
+const STYLE_ELIGIBLE_CATEGORIES = new Set(['AM_SNACK']);
+const AM_SNACK_STYLE_OPTIONS = [
+  { code: 'PASTRY', name: 'Pastry' },
+  { code: 'COLD_KITCHEN', name: 'Cold Kitchen' },
+];
 
 async function init() {
   state.sections = await window.api.getSections();
@@ -468,6 +483,7 @@ async function renderItemsView(main) {
             <td>${it.calories_per_100g != null ? it.calories_per_100g : '—'}</td>
             <td>
               ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
+              ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
             </td>
             <td>
@@ -572,6 +588,13 @@ async function openItemModal(existingItem) {
         <label>Calories per 100g</label>
         <input id="m-calories" type="number" min="0" step="1" value="${isEdit && existingItem.calories_per_100g != null ? existingItem.calories_per_100g : ''}" />
       </div>
+      <div class="field" style="max-width:220px;">
+        <label>Style (AM Snack only)</label>
+        <select id="m-am-snack-style">
+          <option value="">— auto-classify with AI —</option>
+          ${AM_SNACK_STYLE_OPTIONS.map(s => `<option value="${s.code}" ${isEdit && existingItem.am_snack_style === s.code ? 'selected' : ''}>${s.name}</option>`).join('')}
+        </select>
+      </div>
       <div class="field">
         <label>Applies to age groups</label>
         <!-- Portion SIZE is no longer set here -- category_portion_defaults (Item Catalog's
@@ -602,6 +625,7 @@ async function openItemModal(existingItem) {
   const categoryWarning = overlay.querySelector('#m-category-warning');
   const proteinSelect = overlay.querySelector('#m-protein');
   const dailyCheckbox = overlay.querySelector('#m-daily');
+  const styleSelect = overlay.querySelector('#m-am-snack-style');
   const saveBtn = overlay.querySelector('#m-save');
 
   if (isEdit) {
@@ -637,6 +661,7 @@ async function openItemModal(existingItem) {
     }
     saveBtn.disabled = !categorySelect.value;
     refreshProteinAvailability();
+    refreshStyleAvailability();
   }
 
   // Rule 4: Protein Type only selectable for main-dish-type categories -- confirmed against
@@ -647,11 +672,20 @@ async function openItemModal(existingItem) {
     if (!eligible) proteinSelect.value = '';
   }
 
+  // Style (Pastry/Cold Kitchen) only selectable for AM Snack -- same disabled-when-not-eligible
+  // pattern as Protein Type above.
+  function refreshStyleAvailability() {
+    const eligible = STYLE_ELIGIBLE_CATEGORIES.has(categorySelect.value);
+    styleSelect.disabled = !eligible;
+    if (!eligible) styleSelect.value = '';
+  }
+
   periodSelect.addEventListener('change', () => refreshCategoryOptions());
   categorySelect.addEventListener('change', () => {
     categoryWarning.style.display = 'none';
     saveBtn.disabled = !categorySelect.value;
     refreshProteinAvailability();
+    refreshStyleAvailability();
   });
 
   refreshCategoryOptions(isEdit ? existingItem.category_code : undefined);
@@ -664,6 +698,7 @@ async function openItemModal(existingItem) {
       categoryWarning.style.display = 'none';
       saveBtn.disabled = !categorySelect.value;
       refreshProteinAvailability();
+      refreshStyleAvailability();
     }
     if (suggestion.protein && !proteinSelect.disabled) proteinSelect.value = suggestion.protein;
     dailyCheckbox.checked = suggestion.isDailyRepeating;
@@ -676,6 +711,10 @@ async function openItemModal(existingItem) {
 
     const caloriesRaw = overlay.querySelector('#m-calories').value.trim();
     const caloriesPer100g = caloriesRaw === '' ? null : parseFloat(caloriesRaw);
+    // Blank means "auto-classify with AI" -- resolveAmSnackStyle (main.js) only actually calls
+    // the AI when this comes through null/empty AND the category is AM_SNACK; a manually picked
+    // value here always wins over that.
+    const amSnackStyle = styleSelect.value || null;
 
     // No quantity/unit to parse anymore -- just which age groups she checked (see the portion
     // grid's own comment above for why: category_portion_defaults is now the sole portion-size
@@ -721,6 +760,7 @@ async function openItemModal(existingItem) {
           isDailyRepeating: dailyCheckbox.checked,
           isActive: true,
           caloriesPer100g,
+          amSnackStyle,
           removeInvalidSectionPortions,
         })
       : await window.api.addItem({
@@ -728,6 +768,7 @@ async function openItemModal(existingItem) {
           proteinCode: proteinSelect.value || null,
           isDailyRepeating: dailyCheckbox.checked,
           caloriesPer100g,
+          amSnackStyle,
           portions: checkedAgeGroupCodes,
           sectionCode: state.currentSection,
         });
@@ -4372,6 +4413,9 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
         </div>
         `}
 
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:12px; font-size:12.5px; color:var(--neutral);">
+          <input type="checkbox" id="calc-include-original-qty" /> Include Original Quantity column
+        </label>
         <div style="display:flex; align-items:center; gap:10px;">
           <button class="primary" id="calc-export-btn">Export to Excel</button>
           ${exportLanguagePickerHtml('calc')}
@@ -4598,8 +4642,13 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
         name: p.name,
         method: collectTextListFieldValue(p, makeProcessMethodCfg(p)),
         wastes: p.wastes,
-        ingredients: (p.scaledIngredients || []).map(ing => ({
+        // original_quantity -- this calculation's own pre-scale basis (p.ingredientRows[i].quantity,
+        // index-aligned with scaledIngredients since both are built 1:1 from ingredientRows) --
+        // always sent, but only rendered as its own column when includeOriginalQty is checked
+        // below (see buildRecipeSheet in lib/export.js).
+        ingredients: (p.scaledIngredients || []).map((ing, i) => ({
           ingredient_name: ing.name, quantity: ing.quantity, unit: ing.unit, method: ing.method,
+          original_quantity: p.ingredientRows[i]?.quantity ?? '',
         })),
         // material_id/material_code/material_name/material_fill_weight_grams -- the snake_case,
         // DB-shaped names lib/export.js's computeTraysNeeded actually reads (same convention as
@@ -4612,6 +4661,7 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
       }));
       const result = await ns.api.exportScaled({
         recipeId, recipe: exportRecipe, processes: exportProcesses, targetLanguage: getSelectedExportLanguage('calc'),
+        includeOriginalQty: document.getElementById('calc-include-original-qty').checked,
       });
       if (result.success) statusEl.textContent = `Exported to ${result.path}`;
       else if (!result.cancelled) statusEl.textContent = 'Export failed.';

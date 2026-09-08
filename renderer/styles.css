@@ -14,6 +14,8 @@
   --veg: #5B7F5E;
   --neutral: #8A8477;
   --danger: #A6473D;
+  --pastry: #B5657A;
+  --cold-kitchen: #4A7A8C;
   --radius: 10px;
 }
 
@@ -292,6 +294,8 @@ table.items-table td.cat-cell {
 .chip.beef { background: var(--beef); }
 .chip.lamb { background: var(--lamb); }
 .chip.daily { background: var(--neutral); }
+.chip.pastry { background: var(--pastry); }
+.chip.cold-kitchen { background: var(--cold-kitchen); }
 
 .icon-btn {
   background: none; border: none; cursor: pointer; color: var(--neutral); font-size: 13px;
