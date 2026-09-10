@@ -1597,13 +1597,15 @@ function renderMenuIngredientsView(main) {
     </div>
     <div id="mi-progress-wrap"></div>
     ${mi.fileName ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${mi.rows.length} dish row(s) parsed from "${mi.fileName}"</div>` : ''}
-    ${mi.failures.length ? `
-      <div class="warning-banner" style="margin-bottom:16px;">
-        ⚠ ${mi.failures.length} issue(s) suggesting ingredients -- see below; affected dishes were left blank.
-        <div style="margin-top:6px; font-size:12px;">${mi.failures.map(f => `<div>${f}</div>`).join('')}</div>
-      </div>` : ''}
     <div id="mi-review"></div>
   `;
+  // mi.failures (layout-inference notes, and any dish the AI genuinely couldn't suggest
+  // anything for) is intentionally not rendered here anymore -- it's still returned from
+  // parse-and-suggest-menu-ingredients and logged there (main.js, log.warn), just not shown as
+  // a yellow box in this view. A dish the AI failed on still appears below as a normal row with
+  // an empty Ingredients input -- category and dish name are still populated, so a genuinely
+  // blank one stays visually obvious as a gap in an otherwise-filled column, just without the
+  // explanatory text.
 
   document.getElementById('mi-upload-btn').addEventListener('click', () => {
     document.getElementById('mi-file-input').click();
@@ -1613,6 +1615,11 @@ function renderMenuIngredientsView(main) {
     const file = e.target.files[0];
     e.target.value = '';
     if (!file) return;
+    // Temporary diagnostic logging for the "hangs on second upload" investigation -- mirrors
+    // main.js's own miLog calls so a live repro shows definitively whether the renderer or the
+    // main process is the one that actually stops making progress. Remove once confirmed fixed.
+    const miLog = (msg) => console.log(`[mi-renderer ${new Date().toISOString()}] ${msg}`);
+    miLog(`file selected: "${file.name}", ${file.size} bytes`);
 
     // Disabled for the whole parse -- previously clickable the entire time, so a chef who saw no
     // movement (nothing updated the "Reading file..." label during parsing -- see the new
@@ -1631,26 +1638,36 @@ function renderMenuIngredientsView(main) {
     // carrying that much retained DOM can feel unresponsive everywhere, not just in this view --
     // easy to mistake for the whole app being frozen.
     document.getElementById('mi-review').innerHTML = '';
+    miLog('old review table cleared, upload button disabled');
 
     const uploadToken = crypto.randomUUID();
+    miLog(`uploadToken generated: ${uploadToken}`);
     const progressWrap = document.getElementById('mi-progress-wrap');
     const panel = createProgressPanel(progressWrap, { label: 'Reading file…' });
-    const unsubscribe = window.api.onMenuIngredientsProgress((payload) => panel.update(payload));
+    const unsubscribe = window.api.onMenuIngredientsProgress((payload) => {
+      miLog(`progress event received from main: ${JSON.stringify(payload)}`);
+      panel.update(payload);
+    });
     try {
+      miLog('starting FileReader.readAsDataURL()');
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result.split(',')[1]);
         reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(file);
       });
+      miLog(`FileReader finished -- base64 length=${base64.length} -- invoking parseAndSuggestMenuIngredients`);
       const result = await window.api.parseAndSuggestMenuIngredients({ base64, uploadToken });
+      miLog(`parseAndSuggestMenuIngredients invoke RESOLVED -- success=${result.success}, cancelled=${!!result.cancelled}`);
       if (!result.success) {
         if (!result.cancelled) alert(`Couldn't process this file: ${result.error}`);
         return;
       }
       state.menuIngredients = { fileName: file.name, rows: result.rows, failures: result.failures || [], uploadToken };
       renderMenuIngredientsView(main);
+      miLog('view re-rendered with new rows');
     } catch (err) {
+      miLog(`caught error: ${err.message}`);
       alert(`Couldn't process this file: ${err.message}`);
     } finally {
       // Unconditional, regardless of which branch above ran -- renderMenuIngredientsView(main)
@@ -1664,6 +1681,7 @@ function renderMenuIngredientsView(main) {
       // (including this exact button) via renderMenuIngredientsView(main) above, so there's
       // nothing left to re-enable on that path.
       if (document.body.contains(uploadBtn)) uploadBtn.disabled = false;
+      miLog('finally block done');
     }
   });
 
@@ -1671,12 +1689,15 @@ function renderMenuIngredientsView(main) {
     renderMenuIngredientsReview(document.getElementById('mi-review'), mi.rows);
 
     document.getElementById('mi-export-btn').addEventListener('click', async () => {
+      const miLog = (msg) => console.log(`[mi-renderer ${new Date().toISOString()}] ${msg}`);
       const btn = document.getElementById('mi-export-btn');
       const statusEl = document.getElementById('mi-export-status');
       btn.disabled = true;
       statusEl.textContent = 'Exporting…';
+      miLog(`export clicked -- invoking exportMenuIngredients, uploadToken=${mi.uploadToken}`);
       try {
         const result = await window.api.exportMenuIngredients({ rows: mi.rows, uploadToken: mi.uploadToken });
+        miLog(`exportMenuIngredients invoke RESOLVED -- success=${result.success}, cancelled=${!!result.cancelled}`);
         if (result.success) statusEl.textContent = `Exported to ${result.path}`;
         else if (!result.cancelled) statusEl.textContent = `Export failed: ${result.error || 'unknown error'}`;
         else statusEl.textContent = '';
@@ -1729,6 +1750,10 @@ function renderMenuIngredientsReview(container, rows) {
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.dishName}</td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-ingredients-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
+                        ${row.removedNutTerms && row.removedNutTerms.length ? `
+                          <div style="margin-top:4px; font-size:11.5px; color:var(--danger);">
+                            ⚠ removed (nut policy): ${row.removedNutTerms.map(t => t.replace(/</g, '&lt;')).join(', ')} -- edit the box above to add back if you know this dish is nut-free
+                          </div>` : ''}
                       </td>
                     </tr>
                   `).join('')}

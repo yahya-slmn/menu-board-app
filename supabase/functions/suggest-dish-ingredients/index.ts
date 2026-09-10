@@ -49,12 +49,25 @@ const SUGGEST_SCHEMA = {
   additionalProperties: false,
 };
 
+// Also enforced in the same wording as SYSTEM_PROMPT below (belt-and-suspenders -- a system
+// prompt is generally weighted more heavily by the model, but repeating the constraint inline,
+// right next to the formatting rules it has to satisfy at the same time, costs nothing and
+// guards against exactly the kind of instruction the model might otherwise treat as lower
+// priority than the surrounding task description). This is still only half the safety story --
+// see lib/nutFilter.js for the mandatory post-processing scan every suggestion goes through
+// regardless of how well the model followed this.
+const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly prohibits ALL nuts and nut-derived ingredients, with zero exceptions. Never include any tree nut (almond, cashew, walnut, pistachio, hazelnut, pecan, macadamia, pine nut, brazil nut, chestnut, etc.), peanut, or nut-derived product (nut butter, nut milk, nut oil, marzipan, praline, nutella, nougat, etc.) in ANY suggested ingredient list -- even if the dish traditionally or typically includes one. If a dish's most natural ingredients would normally include a nut, substitute a safe non-nut alternative that fits the dish (e.g. sunflower seed butter instead of peanut butter) or simply omit that component -- never include the nut itself. Treat this with the same seriousness as an allergy-critical instruction, because it is one.`;
+
 function buildPrompt(items: DishItem[]): string {
-  return `For each school/staff cafeteria dish name below, suggest a plausible list of its main ingredients, based on general culinary knowledge of similar dishes (no recipe or quantities are provided or expected).
+  return `${NUT_RESTRICTION}
+
+For each school/staff cafeteria dish name below, suggest a plausible list of its main ingredients, based on general culinary knowledge of similar dishes (no recipe or quantities are provided or expected).
 
 Format each dish's ingredients as a SINGLE string of ingredient names separated by " - " (space, hyphen, space), all lowercase, no quantities/measurements/units, no "and" before the last item, ordered roughly by prominence (main ingredients first, seasonings/condiments last). Keep each list concise -- roughly 4 to 10 ingredients. Example format: "zucchini - red onions - shallots - olive oil - butter - salt".
 
 Each item carries its own "index" number. Return exactly one entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate suggestion. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
+
+Remember: absolutely no nuts or nut-derived ingredients anywhere in your output, per the restriction stated at the top.
 
 Items (JSON array): ${JSON.stringify(items)}`;
 }
@@ -108,6 +121,12 @@ Deno.serve(async (req) => {
     const response = await client.messages.create({
       model: "claude-haiku-4-5",
       max_tokens: 8192,
+      // A system prompt (unique to this function -- no other Edge Function here uses one) is
+      // weighted more heavily by the model than the same instruction inline in the user message,
+      // which is exactly what a hard safety constraint like this needs. Repeated inline in
+      // buildPrompt() too, right next to the formatting rules -- see NUT_RESTRICTION's own
+      // comment for why both places carry it.
+      system: NUT_RESTRICTION,
       messages: [
         { role: "user", content: buildPrompt(items) },
       ],

@@ -22,6 +22,7 @@ const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
+const { filterNutIngredients } = require('./lib/nutFilter');
 const { loadWorkbookFromBuffer, parseWorkbookDishes, appendIngredientsColumn } = require('./lib/menuIngredients');
 
 let mainWindow;
@@ -997,6 +998,12 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
 // session (replaced by the next upload, gone on app restart) -- never a DB row.
 // ---------------------------------------------------------------
 let menuIngredientsWorkbook = null;
+// The dishColumnBySheet map parseWorkbookDishes returned for the current menuIngredientsWorkbook
+// -- export-menu-ingredients needs it too (to insert the Ingredients column next to the dish
+// column rather than past every other column), but it's computed at parse time, not export time,
+// since computing it again here would mean duplicating parseWorkbookDishes' own column-detection
+// logic. Replaced in lockstep with menuIngredientsWorkbook below, for the same reason.
+let menuIngredientsDishColumns = {};
 // The uploadToken of whichever parse most recently WON the race to set menuIngredientsWorkbook
 // above -- generated client-side (renderer.js, one per upload attempt) and threaded through both
 // handlers below. Closes a real bug: this used to be one shared global with no identity check at
@@ -1021,6 +1028,16 @@ const MENU_INGREDIENTS_PARSE_TIMEOUT_MS = 45_000;
 // when both the RC and GM/ML/Weight-Unit marker cells have been deleted from a block) is scored
 // against this real list rather than a hardcoded guess, so it can never drift from the actual
 // categories table.
+// Temporary diagnostic logging for the "hangs on second upload" investigation -- every checkpoint
+// in the file-read -> parse -> AI-suggest chain logs here with a timestamp, specifically so a live
+// repro shows exactly which line execution actually stopped at, instead of inferring it from code
+// review. Remove once the hang is confirmed fixed.
+function miLog(msg, extra) {
+  const line = `[mi-main ${new Date().toISOString()}] ${msg}`;
+  if (extra !== undefined) log.info(line, extra);
+  else log.info(line);
+}
+
 function schoolCategoryVocabulary() {
   const codes = new Set();
   for (const sectionCode of ['DAYCARE', 'KG_LP', 'MS_UP']) {
@@ -1030,39 +1047,55 @@ function schoolCategoryVocabulary() {
 }
 
 ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadToken }) => {
+  miLog(`handler ENTERED, uploadToken=${uploadToken}, base64 length=${base64 ? base64.length : 'null'}`);
   // Claims "current upload" status immediately -- any earlier call still in flight will see its
   // own uploadToken no longer matches at its next checkpoint below and bail out quietly.
   menuIngredientsToken = uploadToken;
 
   e.sender.send('menu-ingredients-progress', { message: 'Reading file…' });
+  miLog('decoding base64 -> Buffer');
   const buffer = Buffer.from(base64, 'base64');
+  miLog(`buffer ready, length=${buffer.length} bytes -- starting workbook.xlsx.load()`);
   let workbook;
+  let loadWarnings;
   try {
-    workbook = await Promise.race([
+    ({ workbook, warnings: loadWarnings } = await Promise.race([
       loadWorkbookFromBuffer(buffer),
       new Promise((_, reject) => setTimeout(
         () => reject(new Error(`Reading the file timed out after ${MENU_INGREDIENTS_PARSE_TIMEOUT_MS / 1000}s -- it may be corrupted or unusually large`)),
         MENU_INGREDIENTS_PARSE_TIMEOUT_MS,
       )),
-    ]);
+    ]));
   } catch (err) {
+    miLog(`workbook.xlsx.load() FAILED/timed out: ${err.message}`);
     return { success: false, error: `Couldn't read this file as an Excel workbook: ${err.message}` };
   }
-  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+  miLog(`workbook.xlsx.load() finished successfully${loadWarnings.length ? ` (${loadWarnings.length} runaway data-validation warning(s))` : ''}`);
+  if (uploadToken !== menuIngredientsToken) {
+    miLog('bailing out after load -- superseded by a newer upload');
+    return { success: false, cancelled: true };
+  }
 
   e.sender.send('menu-ingredients-progress', { message: 'Parsing menu structure…' });
-  const { rows, warnings: parseWarnings } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  miLog('starting parseWorkbookDishes()');
+  const { rows, warnings: parseWarnings, dishColumnBySheet } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  miLog(`parseWorkbookDishes() finished -- ${rows.length} row(s), ${parseWarnings.length} warning(s)`);
   if (rows.length === 0) {
+    miLog('no rows found -- returning failure');
     return {
       success: false,
       error: "No recognizable menu rows found in this file. Make sure it's an export from Generate Menu, Build Menu, or Export All Sections.",
     };
   }
-  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+  if (uploadToken !== menuIngredientsToken) {
+    miLog('bailing out after parse -- superseded by a newer upload');
+    return { success: false, cancelled: true };
+  }
 
   // Dedup dish names (exact trimmed match) so a dish repeating across many days/rows only costs
   // one AI call -- its suggestion is broadcast back to every row sharing that exact name below.
   const uniqueNames = [...new Set(rows.map(r => r.dishName))];
+  miLog(`deduped to ${uniqueNames.length} unique dish name(s) -- starting AI suggestion batches`);
   e.sender.send('menu-ingredients-progress', {
     message: `Found ${rows.length} dish row(s) across ${uniqueNames.length} unique dish(es) -- starting AI suggestions…`,
   });
@@ -1073,17 +1106,26 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
     try {
       estimates = await suggestDishIngredients({ items: payloadItems });
     } catch (err) {
-      return { written: new Map(), missing: batchNames, error: err.message };
+      return { written: new Map(), missing: batchNames, error: err.message, removedByName: new Map() };
     }
     const byIndex = new Map(estimates.map(est => [est.index, est.ingredients]));
     const written = new Map();
     const missing = [];
+    // Mandatory nut-policy safety net (Misk school-wide restriction) -- runs on EVERY suggestion
+    // regardless of how well the prompt/system instruction in suggest-dish-ingredients/index.ts
+    // was followed, since an LLM instruction is never a hard guarantee on its own. See
+    // lib/nutFilter.js for the full blocklist/false-positive reasoning. Never applied to Recipe
+    // Extractor (extract-recipe) -- that transcribes a REAL recipe, so stripping a genuine nut
+    // mention there would hide a true ingredient rather than block a fabricated one.
+    const removedByName = new Map();
     batchNames.forEach((name, idx) => {
-      const value = byIndex.get(idx);
-      if (!value) missing.push(name);
-      else written.set(name, value);
+      const raw = byIndex.get(idx);
+      if (!raw) { missing.push(name); return; }
+      const { cleaned, removed } = filterNutIngredients(raw);
+      written.set(name, cleaned);
+      if (removed.length) removedByName.set(name, removed);
     });
-    return { written, missing, error: null };
+    return { written, missing, error: null, removedByName };
   }
 
   function chunk(arr, size) {
@@ -1093,18 +1135,26 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
   }
 
   const nameToIngredients = new Map();
-  const failures = [...parseWarnings];
+  const nameToRemovedNutTerms = new Map();
+  const failures = [...loadWarnings, ...parseWarnings];
   const batches = chunk(uniqueNames, MENU_INGREDIENTS_BATCH_SIZE);
+  miLog(`${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE} dishes each`);
   for (let b = 0; b < batches.length; b++) {
     // Bails out the moment a newer upload has superseded this one, rather than burning further
     // AI batches (and further wall-clock time) on results nobody will ever see.
-    if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+    if (uploadToken !== menuIngredientsToken) {
+      miLog(`bailing out before batch ${b + 1} -- superseded by a newer upload`);
+      return { success: false, cancelled: true };
+    }
     const batch = batches[b];
+    miLog(`batch ${b + 1}/${batches.length} STARTING (${batch.length} dishes)`);
     e.sender.send('menu-ingredients-progress', {
       message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length,
     });
     const result = await suggestBatch(batch);
+    miLog(`batch ${b + 1}/${batches.length} FINISHED -- written=${result.written.size}, missing=${result.missing.length}, error=${result.error || 'none'}, nut-filtered=${result.removedByName.size}`);
     for (const [name, value] of result.written) nameToIngredients.set(name, value);
+    for (const [name, removed] of result.removedByName) nameToRemovedNutTerms.set(name, removed);
     if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
     if (result.missing.length) {
       // One retry pass, same convention as estimate-missing-calories/estimate-missing-am-snack-
@@ -1112,22 +1162,55 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
       // current/total here -- see those handlers' own comment on why a retry step stays
       // message-only (freezes the bar at its current position instead of moving it).
       e.sender.send('menu-ingredients-progress', { message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
+      miLog(`batch ${b + 1}/${batches.length} retrying ${result.missing.length} missing dish(es)`);
       const retry = await suggestBatch(result.missing);
+      miLog(`batch ${b + 1}/${batches.length} retry FINISHED -- written=${retry.written.size}, still missing=${retry.missing.length}, nut-filtered=${retry.removedByName.size}`);
       for (const [name, value] of retry.written) nameToIngredients.set(name, value);
+      for (const [name, removed] of retry.removedByName) nameToRemovedNutTerms.set(name, removed);
       if (retry.missing.length) {
         failures.push(`${retry.missing.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${retry.missing.slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
       }
     }
   }
 
-  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+  if (uploadToken !== menuIngredientsToken) {
+    miLog('bailing out after all batches -- superseded by a newer upload');
+    return { success: false, cancelled: true };
+  }
 
   e.sender.send('menu-ingredients-progress', {
     message: `Done -- suggested ingredients for ${nameToIngredients.size} of ${uniqueNames.length} unique dishes.`, current: batches.length, total: batches.length,
   });
 
-  const annotatedRows = rows.map(r => ({ ...r, ingredients: nameToIngredients.get(r.dishName) || '' }));
+  // `removedNutTerms` is the flat list of ORIGINAL segment text the nut filter stripped for this
+  // exact dish name (e.g. ["toasted walnuts", "peanut butter"]) -- surfaced to the renderer so a
+  // chef can see it per-row and manually re-add a specific term if they know their version is
+  // actually nut-free, per the school's explicit instruction that this never happen silently.
+  const annotatedRows = rows.map(r => ({
+    ...r,
+    ingredients: nameToIngredients.get(r.dishName) || '',
+    removedNutTerms: (nameToRemovedNutTerms.get(r.dishName) || []).map((x) => x.segment),
+  }));
   menuIngredientsWorkbook = workbook;
+  menuIngredientsDishColumns = dishColumnBySheet;
+  // The renderer no longer shows `failures` as a banner (see renderMenuIngredientsView in
+  // renderer.js -- the yellow warnings box was removed), so this log is now the ONLY place that
+  // detail survives. log.warn (not a bare console.log) specifically because electron-log's file
+  // transport persists this to ~/Library/Logs/menu-generator/main.log even in a packaged build
+  // with no attached terminal -- a bare console.log would vanish the moment the app quits, which
+  // defeats "still traceable if a dish's ingredients look wrong later".
+  if (failures.length) log.warn(`[menu-ingredients] ${failures.length} warning(s) from this upload:`, failures);
+  // Separate from `failures` on purpose -- this is a safety-policy action (Misk's no-nuts rule),
+  // not a parsing/AI-availability issue, and unlike `failures` it's ALSO shown per-row in the UI
+  // (not silently dropped), so this log exists to make the same information searchable/durable
+  // across sessions, not to compensate for the UI hiding it.
+  if (nameToRemovedNutTerms.size) {
+    const detail = [...nameToRemovedNutTerms.entries()].map(([name, removed]) => ({
+      dish: name, removed: removed.map((x) => `${x.segment} (${x.matchedLabels.join(', ')})`),
+    }));
+    log.warn(`[menu-ingredients] nut-policy filter removed ingredient(s) from ${nameToRemovedNutTerms.size} dish(es):`, detail);
+  }
+  miLog('handler RETURNING success=true');
   return { success: true, rows: annotatedRows, failures, uploadToken };
 });
 
@@ -1139,20 +1222,29 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
 // triggers an export against a superseded upload (e.g. a second upload finished after she loaded
 // the export dialog), this fails loudly instead of silently exporting the wrong file's data.
 ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath, uploadToken }) => {
+  miLog(`export handler ENTERED, uploadToken=${uploadToken}, rows=${rows.length}`);
   if (!menuIngredientsWorkbook || uploadToken !== menuIngredientsToken) {
+    miLog('export bailing out -- no in-memory workbook or stale uploadToken');
     return { success: false, error: "This file's data is no longer current (a newer upload replaced it) -- please upload it again before exporting." };
   }
   if (!savePath) {
+    miLog('opening save dialog');
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Menu with Ingredients',
       defaultPath: 'Menu_with_Ingredients.xlsx',
       filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
     });
-    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    if (result.canceled || !result.filePath) {
+      miLog('save dialog cancelled');
+      return { success: false, cancelled: true };
+    }
     savePath = result.filePath;
   }
-  await appendIngredientsColumn(menuIngredientsWorkbook, rows);
+  miLog(`starting appendIngredientsColumn() -> ${savePath}`);
+  await appendIngredientsColumn(menuIngredientsWorkbook, rows, menuIngredientsDishColumns);
+  miLog('appendIngredientsColumn() finished -- starting xlsx.writeFile()');
   await menuIngredientsWorkbook.xlsx.writeFile(savePath);
+  miLog('writeFile() finished -- export handler RETURNING success=true');
   return { success: true, path: savePath };
 });
 
