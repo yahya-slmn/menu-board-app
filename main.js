@@ -21,6 +21,8 @@ const { extractRecipeFromFile } = require('./lib/recipeExtraction');
 const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
+const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
+const { loadWorkbookFromBuffer, parseWorkbookDishes, appendIngredientsColumn } = require('./lib/menuIngredients');
 
 let mainWindow;
 let loginWindow;
@@ -841,7 +843,9 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   const batches = chunk(items, CALORIE_ESTIMATE_BATCH_SIZE);
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
-    e.sender.send('calorie-estimate-progress', `Estimating batch ${b + 1} of ${batches.length} (${batch.length} items)…`);
+    e.sender.send('calorie-estimate-progress', {
+      message: `Estimating batch ${b + 1} of ${batches.length} (${batch.length} items)…`, current: b + 1, total: batches.length,
+    });
     const result = await estimateAndWriteBatch(batch);
     estimated += result.written;
     if (result.error) failures.push(`Batch ${b + 1} (${batch.length} items): ${result.error}`);
@@ -850,14 +854,17 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
 
   // One retry pass over whatever specific items didn't come back the first time (not the whole
   // batch they happened to be in) -- gives every item a second chance before being reported as a
-  // real failure, without unboundedly looping if the same items keep failing.
+  // real failure, without unboundedly looping if the same items keep failing. No current/total
+  // sent here -- the main loop above already reached 100%, and retryBatches.length wasn't known
+  // until just now, so restarting the bar's count from a smaller total would read as the bar
+  // going backwards; the shared panel just freezes at 100% and updates the message text instead.
   if (stillMissing.length > 0) {
-    e.sender.send('calorie-estimate-progress', `Retrying ${stillMissing.length} item(s) that didn't come back the first time…`);
+    e.sender.send('calorie-estimate-progress', { message: `Retrying ${stillMissing.length} item(s) that didn't come back the first time…` });
     const retryBatches = chunk(stillMissing, CALORIE_ESTIMATE_BATCH_SIZE);
     const retryMissing = [];
     for (let b = 0; b < retryBatches.length; b++) {
       const batch = retryBatches[b];
-      e.sender.send('calorie-estimate-progress', `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…`);
+      e.sender.send('calorie-estimate-progress', { message: `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…` });
       const result = await estimateAndWriteBatch(batch);
       estimated += result.written;
       if (result.error) failures.push(`Retry batch ${b + 1} (${batch.length} items): ${result.error}`);
@@ -869,7 +876,7 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
     }
   }
 
-  e.sender.send('calorie-estimate-progress', `Done -- ${estimated} of ${items.length} items updated.`);
+  e.sender.send('calorie-estimate-progress', { message: `Done -- ${estimated} of ${items.length} items updated.`, current: batches.length, total: batches.length });
   return { success: true, estimated, totalMissing: items.length, failures };
 });
 
@@ -948,20 +955,24 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
   const batches = chunk(items, AM_SNACK_STYLE_BATCH_SIZE);
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
-    e.sender.send('am-snack-style-estimate-progress', `Classifying batch ${b + 1} of ${batches.length} (${batch.length} items)…`);
+    e.sender.send('am-snack-style-estimate-progress', {
+      message: `Classifying batch ${b + 1} of ${batches.length} (${batch.length} items)…`, current: b + 1, total: batches.length,
+    });
     const result = await classifyAndWriteBatch(batch);
     estimated += result.written;
     if (result.error) failures.push(`Batch ${b + 1} (${batch.length} items): ${result.error}`);
     stillMissing.push(...result.missing);
   }
 
+  // Same "freeze at 100%, message-only" reasoning as estimate-missing-calories' own retry pass --
+  // see its comment.
   if (stillMissing.length > 0) {
-    e.sender.send('am-snack-style-estimate-progress', `Retrying ${stillMissing.length} item(s) that didn't come back the first time…`);
+    e.sender.send('am-snack-style-estimate-progress', { message: `Retrying ${stillMissing.length} item(s) that didn't come back the first time…` });
     const retryBatches = chunk(stillMissing, AM_SNACK_STYLE_BATCH_SIZE);
     const retryMissing = [];
     for (let b = 0; b < retryBatches.length; b++) {
       const batch = retryBatches[b];
-      e.sender.send('am-snack-style-estimate-progress', `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…`);
+      e.sender.send('am-snack-style-estimate-progress', { message: `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…` });
       const result = await classifyAndWriteBatch(batch);
       estimated += result.written;
       if (result.error) failures.push(`Retry batch ${b + 1} (${batch.length} items): ${result.error}`);
@@ -973,8 +984,134 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
     }
   }
 
-  e.sender.send('am-snack-style-estimate-progress', `Done -- ${estimated} of ${items.length} items updated.`);
+  e.sender.send('am-snack-style-estimate-progress', { message: `Done -- ${estimated} of ${items.length} items updated.`, current: batches.length, total: batches.length });
   return { success: true, estimated, totalMissing: items.length, failures };
+});
+
+// ---------------------------------------------------------------
+// IPC: Menu Ingredients Generator -- upload a menu .xlsx this app itself produced (Export All
+// Sections/Generate Menu/Build Menu), get back an AI-suggested ingredient list per dish to
+// review/edit, then export the annotated file. Purely file in, file out: nothing here reads
+// from or writes to Supabase, and the only "persistence" between the two calls below is
+// menuIngredientsWorkbook, an in-memory ExcelJS Workbook object that lives only for this running
+// session (replaced by the next upload, gone on app restart) -- never a DB row.
+// ---------------------------------------------------------------
+let menuIngredientsWorkbook = null;
+const MENU_INGREDIENTS_BATCH_SIZE = 50;
+
+// Live category display names for Daycare/KG-LP/MS-UP -- lib/menuIngredients.js's School
+// vocabulary (used to content-detect the category column, and to break a School-vs-Staff tie
+// when both the RC and GM/ML/Weight-Unit marker cells have been deleted from a block) is scored
+// against this real list rather than a hardcoded guess, so it can never drift from the actual
+// categories table.
+function schoolCategoryVocabulary() {
+  const codes = new Set();
+  for (const sectionCode of ['DAYCARE', 'KG_LP', 'MS_UP']) {
+    for (const [catCode] of SECTION_SLOTS[sectionCode]) codes.add(catCode);
+  }
+  return [...codes].map(code => getCategoryByCode(code)?.name).filter(Boolean);
+}
+
+ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64 }) => {
+  const buffer = Buffer.from(base64, 'base64');
+  let workbook;
+  try {
+    workbook = await loadWorkbookFromBuffer(buffer);
+  } catch (err) {
+    return { success: false, error: `Couldn't read this file as an Excel workbook: ${err.message}` };
+  }
+
+  const { rows, warnings: parseWarnings } = parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  if (rows.length === 0) {
+    return {
+      success: false,
+      error: "No recognizable menu rows found in this file. Make sure it's an export from Generate Menu, Build Menu, or Export All Sections.",
+    };
+  }
+
+  // Dedup dish names (exact trimmed match) so a dish repeating across many days/rows only costs
+  // one AI call -- its suggestion is broadcast back to every row sharing that exact name below.
+  const uniqueNames = [...new Set(rows.map(r => r.dishName))];
+
+  async function suggestBatch(batchNames) {
+    const payloadItems = batchNames.map((name, idx) => ({ index: idx, name }));
+    let estimates;
+    try {
+      estimates = await suggestDishIngredients({ items: payloadItems });
+    } catch (err) {
+      return { written: new Map(), missing: batchNames, error: err.message };
+    }
+    const byIndex = new Map(estimates.map(est => [est.index, est.ingredients]));
+    const written = new Map();
+    const missing = [];
+    batchNames.forEach((name, idx) => {
+      const value = byIndex.get(idx);
+      if (!value) missing.push(name);
+      else written.set(name, value);
+    });
+    return { written, missing, error: null };
+  }
+
+  function chunk(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  const nameToIngredients = new Map();
+  const failures = [...parseWarnings];
+  const batches = chunk(uniqueNames, MENU_INGREDIENTS_BATCH_SIZE);
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    e.sender.send('menu-ingredients-progress', {
+      message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length,
+    });
+    const result = await suggestBatch(batch);
+    for (const [name, value] of result.written) nameToIngredients.set(name, value);
+    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
+    if (result.missing.length) {
+      // One retry pass, same convention as estimate-missing-calories/estimate-missing-am-snack-
+      // styles -- only the specific dishes that didn't come back, not the whole batch again. No
+      // current/total here -- see those handlers' own comment on why a retry step stays
+      // message-only (freezes the bar at its current position instead of moving it).
+      e.sender.send('menu-ingredients-progress', { message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
+      const retry = await suggestBatch(result.missing);
+      for (const [name, value] of retry.written) nameToIngredients.set(name, value);
+      if (retry.missing.length) {
+        failures.push(`${retry.missing.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${retry.missing.slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
+      }
+    }
+  }
+
+  e.sender.send('menu-ingredients-progress', {
+    message: `Done -- suggested ingredients for ${nameToIngredients.size} of ${uniqueNames.length} unique dishes.`, current: batches.length, total: batches.length,
+  });
+
+  const annotatedRows = rows.map(r => ({ ...r, ingredients: nameToIngredients.get(r.dishName) || '' }));
+  menuIngredientsWorkbook = workbook;
+  return { success: true, rows: annotatedRows, failures };
+});
+
+// `rows` is the SAME flat shape parse-and-suggest-menu-ingredients returned, after her review/
+// edits in the renderer -- each entry's `ingredients` may differ from what the AI first
+// suggested, or from another row sharing the same dish name, since edits are per physical row
+// (sheetName + rowNumber), never per dish name (see appendIngredientsColumn's own comment).
+ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath }) => {
+  if (!menuIngredientsWorkbook) {
+    return { success: false, error: 'No parsed file in memory -- please upload the file again.' };
+  }
+  if (!savePath) {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Menu with Ingredients',
+      defaultPath: 'Menu_with_Ingredients.xlsx',
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    savePath = result.filePath;
+  }
+  appendIngredientsColumn(menuIngredientsWorkbook, rows);
+  await menuIngredientsWorkbook.xlsx.writeFile(savePath);
+  return { success: true, path: savePath };
 });
 
 // ---------------------------------------------------------------
@@ -1681,12 +1818,15 @@ ipcMain.handle('export-recipes', async (e, { recipeIds, savePath, targetLanguage
     }
     doneCount++;
     if (targetLanguage && targetLanguage !== 'English') {
+      // current/total only for a real multi-recipe batch -- a single recipe has no sub-steps to
+      // count (one atomic translate-recipe call), so it stays message-only/indeterminate.
       e.sender.send('export-progress', recipeIds.length > 1
-        ? `Translating recipe ${doneCount} of ${recipeIds.length}…` : 'Translating recipe…');
+        ? { message: `Translating recipe ${doneCount} of ${recipeIds.length}…`, current: doneCount, total: recipeIds.length }
+        : { message: 'Translating recipe…' });
     }
     const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
     return { ...translated, codeLabelKey: 'ttyCode' };
-  }, recipeIds, savePath, (message) => e.sender.send('export-progress', message));
+  }, recipeIds, savePath, (message) => e.sender.send('export-progress', { message }));
   return { success: true, path: savePath };
 });
 
@@ -1724,10 +1864,10 @@ ipcMain.handle('export-scaled-recipe', async (e, { recipe, processes, savePath, 
   }
   delete recipe.photoOverride;
 
-  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
+  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', { message: 'Translating recipe…' });
   const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
   await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
-    ...translated, codeLabelKey: 'ttyCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', message),
+    ...translated, codeLabelKey: 'ttyCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', { message }),
   });
   return { success: true, path: savePath };
 });
@@ -2229,11 +2369,12 @@ ipcMain.handle('export-extracted-recipes', async (e, { recipeIds, savePath, targ
     extractorDoneCount++;
     if (targetLanguage && targetLanguage !== 'English') {
       e.sender.send('export-progress', recipeIds.length > 1
-        ? `Translating recipe ${extractorDoneCount} of ${recipeIds.length}…` : 'Translating recipe…');
+        ? { message: `Translating recipe ${extractorDoneCount} of ${recipeIds.length}…`, current: extractorDoneCount, total: recipeIds.length }
+        : { message: 'Translating recipe…' });
     }
     const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
     return { ...translated, codeLabelKey: 'exCode' };
-  }, recipeIds, savePath, (message) => e.sender.send('export-progress', message));
+  }, recipeIds, savePath, (message) => e.sender.send('export-progress', { message }));
   return { success: true, path: savePath };
 });
 
@@ -2267,10 +2408,10 @@ ipcMain.handle('export-scaled-extracted-recipe', async (e, { recipeId, recipe, p
   }
   delete recipe.photosOverride;
 
-  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', 'Translating recipe…');
+  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', { message: 'Translating recipe…' });
   const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
   await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
-    ...translated, codeLabelKey: 'exCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', message),
+    ...translated, codeLabelKey: 'exCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', { message }),
   });
   return { success: true, path: savePath };
 });

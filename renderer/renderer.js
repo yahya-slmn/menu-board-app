@@ -12,6 +12,11 @@ const state = {
   proteinTypes: [],
   currentGeneratedMenuId: null,
   builder: { label: '', createdBy: '', startDate: '', endDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
+  // Menu Ingredients Generator -- purely in-memory, nothing here is ever saved to Supabase.
+  // `rows` is the flat { sheetName, rowNumber, date, weekday, category, dishName, ingredients }
+  // list parse-and-suggest-menu-ingredients returned, kept here (not a local variable in
+  // renderMenuIngredientsView) so navigating away and back doesn't lose an in-progress review.
+  menuIngredients: { fileName: '', rows: [], failures: [] },
   // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
   // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
   // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
@@ -185,6 +190,113 @@ function getSelectedExportLanguage(idPrefix) {
   return select.value;
 }
 
+// ============================================================
+// SHARED PROGRESS PANEL -- one visual component for every AI-Edge-Function-calling flow (Recipe
+// Extractor upload, Export Selected x2, Calculator export x2, Menu Ingredients Generator, and
+// the calorie/AM-Snack-Style bulk backfills whenever they get a UI trigger again), so none of
+// them hand-roll their own status text/spinner. Two modes, decided per-flow by whether real
+// batch-count data actually exists -- never faked:
+//   - determinate: the first update() call that supplies a real {current, total} flips into this
+//     mode permanently for the panel's lifetime (even if a LATER update omits total, e.g. a
+//     translate loop's final "Building Excel file..." step -- the bar freezes at its last real
+//     percentage instead of reverting to an indeterminate slide, which would read as a step
+//     backwards). ETA is elapsed-time-so-far / units-done-so-far x units-remaining -- literally
+//     "average time per unit so far", extrapolated -- shown as "Estimating..." before the first
+//     unit completes, since there's no data yet to extrapolate from.
+//   - indeterminate: no flow ever supplies a total (a single atomic API call -- recipe
+//     extraction, a one-recipe export -- has no sub-steps to count at all) -- sliding CSS
+//     animation, elapsed time only, deliberately no ETA line (a perpetual "Estimating..." with no
+//     path to resolving would read as broken, not honest).
+// A 1s ticker keeps the elapsed/remaining figures counting live between update() calls, not just
+// jumping when a new batch-progress event arrives.
+// ============================================================
+function createProgressPanel(container, { label } = {}) {
+  const startTime = Date.now();
+  let mode = 'indeterminate';
+  let current = 0, total = 0, avgMsPerUnit = null, lastUpdateTime = startTime;
+
+  container.innerHTML = `
+    <div class="progress-panel">
+      <div class="progress-panel-row">
+        <span class="progress-panel-spinner"></span>
+        <span class="progress-panel-message">${label || 'Working…'}</span>
+        <span class="progress-panel-meta"></span>
+      </div>
+      <div class="progress-panel-track"><div class="progress-panel-fill indeterminate"></div></div>
+    </div>
+  `;
+  const messageEl = container.querySelector('.progress-panel-message');
+  const metaEl = container.querySelector('.progress-panel-meta');
+  const fillEl = container.querySelector('.progress-panel-fill');
+
+  function formatDuration(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s / 60)}m ${s % 60}s`;
+  }
+
+  function render() {
+    const elapsed = Date.now() - startTime;
+    if (mode === 'determinate') {
+      const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+      let etaText;
+      if (current >= total) {
+        etaText = 'Done';
+      } else if (avgMsPerUnit == null) {
+        etaText = 'Estimating…';
+      } else {
+        const sinceUpdate = Date.now() - lastUpdateTime;
+        const remaining = Math.max(0, avgMsPerUnit * (total - current) - sinceUpdate);
+        etaText = `~${formatDuration(remaining)} left`;
+      }
+      metaEl.textContent = `${percent}% · ${current}/${total} · Elapsed ${formatDuration(elapsed)} · ${etaText}`;
+    } else {
+      metaEl.textContent = `Elapsed ${formatDuration(elapsed)}`;
+    }
+  }
+
+  const tick = setInterval(render, 1000);
+  render();
+
+  // { message, current, total } -- current/total omitted entirely (not just falsy) means this
+  // particular step has no count of its own (see the mode-freeze comment above); once the panel
+  // is in determinate mode, an update with only `message` just updates the text and leaves the
+  // bar/ETA exactly where they were.
+  function update({ message, current: c, total: t } = {}) {
+    if (message != null) messageEl.textContent = message;
+    if (typeof t === 'number' && t > 0 && typeof c === 'number') {
+      if (mode !== 'determinate') {
+        mode = 'determinate';
+        fillEl.classList.remove('indeterminate');
+        fillEl.classList.add('determinate');
+      }
+      current = c;
+      total = t;
+      lastUpdateTime = Date.now();
+      if (current >= 1) avgMsPerUnit = (lastUpdateTime - startTime) / current;
+      fillEl.style.width = `${Math.min(100, Math.round((current / total) * 100))}%`;
+    }
+    render();
+  }
+
+  function done(message) {
+    if (mode === 'determinate') {
+      current = total;
+      fillEl.style.width = '100%';
+    }
+    clearInterval(tick);
+    if (message != null) messageEl.textContent = message;
+    metaEl.textContent = `Done in ${formatDuration(Date.now() - startTime)}`;
+  }
+
+  function destroy() {
+    clearInterval(tick);
+    container.innerHTML = '';
+  }
+
+  return { update, done, destroy };
+}
+
 const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
 // AM_SNACK_STYLE_OPTIONS (defined below) already carries the display name for each style code --
 // this just maps that same code to its own chip color class, same pattern as CATEGORY_COLOR does
@@ -307,7 +419,7 @@ function renderSectionNav() {
 }
 
 // The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
-const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll'];
+const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll', 'menuIngredients'];
 
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
@@ -372,6 +484,7 @@ function renderView() {
   if (state.currentView === 'build') return renderBuildMenuView(main);
   if (state.currentView === 'history') return renderHistoryView(main);
   if (state.currentView === 'exportAll') return renderExportAllView(main);
+  if (state.currentView === 'menuIngredients') return renderMenuIngredientsView(main);
   if (state.currentView === 'recipes') return renderRecipesView(main);
   if (state.currentView === 'extractor') return renderExtractorView(main);
   if (state.currentView === 'calculator') return renderCalculatorView(main);
@@ -1460,6 +1573,158 @@ async function renderExportAllView(main) {
 }
 
 // ============================================================
+// MENU INGREDIENTS GENERATOR -- upload a menu .xlsx this app itself produced, review/edit an
+// AI-suggested ingredient list per dish, export the annotated file. Purely one-shot: nothing
+// here is ever saved to Supabase (see state.menuIngredients' own comment and main.js's
+// parse-and-suggest-menu-ingredients/export-menu-ingredients handlers).
+// ============================================================
+function renderMenuIngredientsView(main) {
+  const mi = state.menuIngredients;
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Menu Ingredients Generator</h1><span class="section-pill">Upload a menu, review AI-suggested ingredients, export -- nothing is saved</span></div>
+    </div>
+    <div class="generate-controls" style="align-items:center;">
+      <button class="primary" id="mi-upload-btn">${mi.rows.length ? 'Upload a Different File' : 'Upload Menu File'}</button>
+      <input type="file" id="mi-file-input" accept=".xlsx" hidden />
+      ${mi.rows.length ? `<button class="secondary" id="mi-export-btn">Export to Excel</button>` : ''}
+      <span id="mi-export-status" style="color:var(--neutral); font-size:12.5px;"></span>
+    </div>
+    <div id="mi-progress-wrap"></div>
+    ${mi.fileName ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${mi.rows.length} dish row(s) parsed from "${mi.fileName}"</div>` : ''}
+    ${mi.failures.length ? `
+      <div class="warning-banner" style="margin-bottom:16px;">
+        ⚠ ${mi.failures.length} issue(s) suggesting ingredients -- see below; affected dishes were left blank.
+        <div style="margin-top:6px; font-size:12px;">${mi.failures.map(f => `<div>${f}</div>`).join('')}</div>
+      </div>` : ''}
+    <div id="mi-review"></div>
+  `;
+
+  document.getElementById('mi-upload-btn').addEventListener('click', () => {
+    document.getElementById('mi-file-input').click();
+  });
+
+  document.getElementById('mi-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const progressWrap = document.getElementById('mi-progress-wrap');
+    const panel = createProgressPanel(progressWrap, { label: 'Reading file…' });
+    const unsubscribe = window.api.onMenuIngredientsProgress((payload) => panel.update(payload));
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const result = await window.api.parseAndSuggestMenuIngredients({ base64 });
+      if (!result.success) {
+        alert(`Couldn't process this file: ${result.error}`);
+        return;
+      }
+      state.menuIngredients = { fileName: file.name, rows: result.rows, failures: result.failures || [] };
+      renderMenuIngredientsView(main);
+    } catch (err) {
+      alert(`Couldn't process this file: ${err.message}`);
+    } finally {
+      // Unconditional, regardless of which branch above ran -- renderMenuIngredientsView(main)
+      // on the success path replaces this whole view's innerHTML, which would otherwise orphan
+      // the panel's own setInterval (clearing a container's innerHTML doesn't stop a JS timer
+      // that already captured references to nodes inside it) and leave it silently ticking
+      // forever against detached DOM.
+      unsubscribe();
+      panel.destroy();
+    }
+  });
+
+  if (mi.rows.length) {
+    renderMenuIngredientsReview(document.getElementById('mi-review'), mi.rows);
+
+    document.getElementById('mi-export-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('mi-export-btn');
+      const statusEl = document.getElementById('mi-export-status');
+      btn.disabled = true;
+      statusEl.textContent = 'Exporting…';
+      try {
+        const result = await window.api.exportMenuIngredients({ rows: mi.rows });
+        if (result.success) statusEl.textContent = `Exported to ${result.path}`;
+        else if (!result.cancelled) statusEl.textContent = `Export failed: ${result.error || 'unknown error'}`;
+        else statusEl.textContent = '';
+      } catch (err) {
+        statusEl.textContent = `Export failed: ${err.message}`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+}
+
+// Groups the flat rows list by sheet (section) then by date, preserving the source file's own
+// row order (both Maps fill in first-seen order, which is already sheet-by-sheet/row-by-row scan
+// order from lib/menuIngredients.js -- no re-sorting needed to match "the source file's own
+// structure"). Each ingredients <input> closes over its own row object directly and mutates
+// `row.ingredients` in place on input -- simpler and more robust than a string-keyed lookup,
+// since exportMenuIngredients is later called with this exact same rows array/objects.
+function renderMenuIngredientsReview(container, rows) {
+  const bySheet = new Map();
+  for (const row of rows) {
+    if (!bySheet.has(row.sheetName)) bySheet.set(row.sheetName, new Map());
+    const byDate = bySheet.get(row.sheetName);
+    const dateKey = `${row.date}__${row.weekday}`;
+    if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+    byDate.get(dateKey).push(row);
+  }
+
+  container.innerHTML = [...bySheet.entries()].map(([sheetName, byDate]) => `
+    <div class="day-card" style="margin-bottom:18px;">
+      <div class="day-head"><span>${sheetName}</span></div>
+      <div style="padding:12px 18px;">
+        ${[...byDate.entries()].map(([dateKey, dayRows]) => {
+          const [date, weekday] = dateKey.split('__');
+          return `
+            <div style="margin-bottom:16px;">
+              <div style="font-weight:600; color:var(--sage-dark); margin-bottom:6px;">${weekday.toUpperCase()} &middot; ${date}</div>
+              <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+                <thead>
+                  <tr>
+                    <th style="width:160px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Category</th>
+                    <th style="width:260px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Dish</th>
+                    <th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Ingredients</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${dayRows.map(row => `
+                    <tr>
+                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.category || ''}</td>
+                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.dishName}</td>
+                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
+                        <input class="mi-ingredients-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `).join('');
+
+  container.querySelectorAll('.mi-ingredients-input').forEach((input) => {
+    input.addEventListener('input', (e) => {
+      const sheetName = input.dataset.sheet;
+      const rowNumber = parseInt(input.dataset.row, 10);
+      const row = rows.find(r => r.sheetName === sheetName && r.rowNumber === rowNumber);
+      if (row) row.ingredients = e.target.value;
+    });
+  });
+}
+
+// ============================================================
 // RECIPE BOOK
 // ============================================================
 function renderRecipesView(main) {
@@ -1579,6 +1844,7 @@ async function renderRecipeListView(main, ns) {
       ${exportLanguagePickerHtml('list')}
       <button class="secondary" id="delete-selected-btn" disabled>Delete Selected</button>
     </div>
+    <div id="export-selected-progress-wrap"></div>
     <div id="recipes-content">Loading…</div>
   `;
   wireExportLanguagePicker('list');
@@ -1623,19 +1889,12 @@ async function renderRecipeListView(main, ns) {
 
       importBtn.disabled = true;
       importBtn.textContent = 'Extracting recipe…';
-      // Visible spinner + indeterminate progress bar -- the extraction call is a single-shot
+      // Indeterminate mode (see createProgressPanel) -- the extraction call is a single-shot
       // Anthropic API round trip through the Edge Function, with no real progress fraction to
-      // report, so this is deliberately indeterminate rather than a fake percentage.
+      // report (no update() call below ever supplies current/total), so this is deliberately a
+      // sliding bar + elapsed time only, not a fake percentage.
       const fileWord = files.length === 1 ? 'photo' : 'photos';
-      progressWrap.innerHTML = `
-        <div class="extract-progress">
-          <div class="extract-progress-row">
-            <span class="extract-progress-spinner"></span>
-            <span>Extracting recipe from ${files.length} ${fileWord}… this can take a few seconds.</span>
-          </div>
-          <div class="extract-progress-track"><div class="extract-progress-bar"></div></div>
-        </div>
-      `;
+      const panel = createProgressPanel(progressWrap, { label: `Extracting recipe from ${files.length} ${fileWord}… this can take a few seconds.` });
       try {
         // All files are sent together in one extraction call (not one call per file merged
         // after) so the model has full cross-page context -- required for e.g. correctly
@@ -1664,7 +1923,7 @@ async function renderRecipeListView(main, ns) {
       } finally {
         importBtn.disabled = false;
         importBtn.textContent = 'Upload Recipe';
-        progressWrap.innerHTML = '';
+        panel.destroy();
       }
     });
   }
@@ -1781,24 +2040,25 @@ async function renderRecipeListView(main, ns) {
   }
 
   exportBtn.addEventListener('click', async () => {
-    const originalLabel = exportBtn.textContent;
     exportBtn.disabled = true;
-    exportBtn.textContent = 'Exporting…';
+    const progressWrap = document.getElementById('export-selected-progress-wrap');
+    const panel = createProgressPanel(progressWrap, { label: 'Exporting…' });
     // Bug found in production: this had no try/catch at all -- when the underlying IPC call
     // rejected (e.g. a translation failure), the exception escaped this handler uncaught and
     // every line below (resetting the button) never ran, leaving it stuck on "Exporting…"
     // forever with no visible error. Looked like an infinite hang; was actually a fast failure
     // with nothing to surface it. See conversation notes.
-    const unsubscribe = window.api.onExportProgress((message) => { exportBtn.textContent = message; });
+    const unsubscribe = window.api.onExportProgress((payload) => panel.update(payload));
     try {
       const result = await ns.api.exportSelected([...selected], getSelectedExportLanguage('list'));
+      panel.destroy();
       if (result.success) alert(`Exported to ${result.path}`);
       else if (!result.cancelled) alert('Export failed.');
     } catch (err) {
+      panel.destroy();
       alert(`Export failed: ${err.message}`);
     } finally {
       unsubscribe();
-      exportBtn.textContent = originalLabel;
       updateExportBtn();
     }
   });
@@ -4420,7 +4680,7 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
           <button class="primary" id="calc-export-btn">Export to Excel</button>
           ${exportLanguagePickerHtml('calc')}
         </div>
-        <span id="calc-export-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
+        <div id="calc-export-progress-wrap" style="margin-top:10px;"></div>
       </div>
     </div>
   `;
@@ -4580,11 +4840,11 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
 
   document.getElementById('calc-export-btn').addEventListener('click', async () => {
     const btn = document.getElementById('calc-export-btn');
-    const statusEl = document.getElementById('calc-export-status');
+    const progressWrap = document.getElementById('calc-export-progress-wrap');
     btn.disabled = true;
-    statusEl.textContent = 'Exporting…';
+    const panel = createProgressPanel(progressWrap, { label: 'Exporting…' });
     // See the List "Export Selected" handler's comment -- same missing-try/catch bug fixed here.
-    const unsubscribe = window.api.onExportProgress((message) => { statusEl.textContent = message; });
+    const unsubscribe = window.api.onExportProgress((payload) => panel.update(payload));
     try {
       // Strips this recipe's own (unscaled, full-set) `processes`/`photos` before sending, plus
       // every calc-prefixed photo-editing helper field (large dataUrl/base64 strings that would
@@ -4663,11 +4923,12 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
         recipeId, recipe: exportRecipe, processes: exportProcesses, targetLanguage: getSelectedExportLanguage('calc'),
         includeOriginalQty: document.getElementById('calc-include-original-qty').checked,
       });
-      if (result.success) statusEl.textContent = `Exported to ${result.path}`;
-      else if (!result.cancelled) statusEl.textContent = 'Export failed.';
-      else statusEl.textContent = '';
+      panel.destroy();
+      if (result.success) alert(`Exported to ${result.path}`);
+      else if (!result.cancelled) alert('Export failed.');
     } catch (err) {
-      statusEl.textContent = `Export failed: ${err.message}`;
+      panel.destroy();
+      alert(`Export failed: ${err.message}`);
     } finally {
       unsubscribe();
       btn.disabled = false;

@@ -22,16 +22,27 @@ contextBridge.exposeInMainWorld('api', {
   // Same one-way-progress-events pattern as onExportProgress above (main.js sends
   // 'calorie-estimate-progress' while working through batches, since a single invoke() call has
   // no way to report interim status on its own). Returns an unsubscribe function, same reason.
+  // Payload is now { message, current?, total? } (current/total omitted when this particular step
+  // has no real count -- see createProgressPanel in renderer.js), not a bare string -- forwarded
+  // through as-is, same as every other progress channel below.
   onCalorieEstimateProgress: (callback) => {
-    const listener = (event, message) => callback(message);
+    const listener = (event, payload) => callback(payload);
     ipcRenderer.on('calorie-estimate-progress', listener);
     return () => ipcRenderer.removeListener('calorie-estimate-progress', listener);
   },
   estimateMissingAmSnackStyles: () => ipcRenderer.invoke('estimate-missing-am-snack-styles'),
   onAmSnackStyleEstimateProgress: (callback) => {
-    const listener = (event, message) => callback(message);
+    const listener = (event, payload) => callback(payload);
     ipcRenderer.on('am-snack-style-estimate-progress', listener);
     return () => ipcRenderer.removeListener('am-snack-style-estimate-progress', listener);
+  },
+
+  parseAndSuggestMenuIngredients: (payload) => ipcRenderer.invoke('parse-and-suggest-menu-ingredients', payload),
+  exportMenuIngredients: (payload) => ipcRenderer.invoke('export-menu-ingredients', payload),
+  onMenuIngredientsProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('menu-ingredients-progress', listener);
+    return () => ipcRenderer.removeListener('menu-ingredients-progress', listener);
   },
 
   searchIngredients: (query) => ipcRenderer.invoke('search-ingredients', query),
@@ -81,8 +92,9 @@ contextBridge.exposeInMainWorld('api', {
   // is request/response. Returns an unsubscribe function; callers remove it once their own
   // export call settles so a later, unrelated export's events are never delivered to a stale
   // handler from a previous one.
+  // Payload is { message, current?, total? } -- see onCalorieEstimateProgress's own comment.
   onExportProgress: (callback) => {
-    const listener = (event, message) => callback(message);
+    const listener = (event, payload) => callback(payload);
     ipcRenderer.on('export-progress', listener);
     return () => ipcRenderer.removeListener('export-progress', listener);
   },

@@ -54,15 +54,21 @@ h1, h2, h3, .display {
 .refresh-btn.spinning .refresh-icon { animation: refresh-spin 0.8s linear infinite; }
 @keyframes refresh-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-/* ---------------- Extraction progress (Recipe Extractor's "Upload Recipe") ---------------- */
-.extract-progress {
+/* ---------------- Shared progress panel -- every AI-Edge-Function-calling flow (Recipe
+   Extractor upload, Export Selected x2, Calculator export x2, Menu Ingredients Generator, and
+   the calorie/AM-Snack-Style bulk backfills whenever they get a UI trigger again) drives one of
+   these via createProgressPanel() in renderer.js. Two visual modes: `.determinate` (a real
+   current/total was supplied -- the fill's width is set directly, no animation) vs
+   `.indeterminate` (no batch data exists at all for this flow -- the old sliding-bar animation
+   this block used to style only for Recipe Extractor, generalized). */
+.progress-panel {
   margin-bottom: 14px;
   padding: 10px 14px;
   background: var(--paper-dim);
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
-.extract-progress-row {
+.progress-panel-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -70,33 +76,47 @@ h1, h2, h3, .display {
   color: var(--ink);
   margin-bottom: 8px;
 }
-.extract-progress-spinner {
+.progress-panel-spinner {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
   border: 2px solid var(--line);
   border-top-color: var(--sage);
   border-radius: 50%;
-  animation: extract-spin 0.7s linear infinite;
+  animation: progress-panel-spin 0.7s linear infinite;
 }
-@keyframes extract-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.extract-progress-track {
+@keyframes progress-panel-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.progress-panel-message { flex: 1 1 auto; }
+.progress-panel-meta {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--neutral);
+  white-space: nowrap;
+}
+.progress-panel-track {
   height: 4px;
   background: var(--line);
   border-radius: 2px;
   overflow: hidden;
   position: relative;
 }
-.extract-progress-bar {
-  position: absolute;
-  top: 0; left: -40%;
+.progress-panel-fill {
   height: 100%;
-  width: 40%;
   background: var(--sage);
   border-radius: 2px;
-  animation: extract-progress-slide 1.1s ease-in-out infinite;
 }
-@keyframes extract-progress-slide {
+.progress-panel-fill.determinate {
+  position: static;
+  width: 0%;
+  transition: width 0.4s ease;
+}
+.progress-panel-fill.indeterminate {
+  position: absolute;
+  top: 0; left: -40%;
+  width: 40%;
+  animation: progress-panel-slide 1.1s ease-in-out infinite;
+}
+@keyframes progress-panel-slide {
   0% { left: -40%; }
   100% { left: 100%; }
 }
