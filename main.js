@@ -997,7 +997,24 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
 // session (replaced by the next upload, gone on app restart) -- never a DB row.
 // ---------------------------------------------------------------
 let menuIngredientsWorkbook = null;
+// The uploadToken of whichever parse most recently WON the race to set menuIngredientsWorkbook
+// above -- generated client-side (renderer.js, one per upload attempt) and threaded through both
+// handlers below. Closes a real bug: this used to be one shared global with no identity check at
+// all, so two overlapping calls (a second upload fired before the first resolved, or an export
+// racing a fresh upload) could silently clobber each other -- whichever parse finished LAST won,
+// regardless of which one's rows were actually on screen. Every checkpoint below re-reads this
+// after an await and bails out (cancelled, not an error) the moment a newer upload has superseded
+// the one currently running, so a superseded parse can never win the export or waste further AI
+// calls once eclipsed. export-menu-ingredients below performs the same check before writing.
+let menuIngredientsToken = null;
 const MENU_INGREDIENTS_BATCH_SIZE = 50;
+// Same 45s backstop every AI Edge Function call already has (estimateCalories/
+// suggestDishIngredients/translateTexts) -- ExcelJS's own workbook.xlsx.load() had NONE, so a
+// pathological file (or a genuinely stuck read) could hang this step forever with zero signal,
+// which is exactly what happened: the UI showed "Reading file..." indefinitely since nothing
+// ever wrote a later message over that static, panel-creation-time label (see the new
+// e.sender.send calls below fixing that half of it).
+const MENU_INGREDIENTS_PARSE_TIMEOUT_MS = 45_000;
 
 // Live category display names for Daycare/KG-LP/MS-UP -- lib/menuIngredients.js's School
 // vocabulary (used to content-detect the category column, and to break a School-vs-Staff tie
@@ -1012,26 +1029,43 @@ function schoolCategoryVocabulary() {
   return [...codes].map(code => getCategoryByCode(code)?.name).filter(Boolean);
 }
 
-ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64 }) => {
+ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadToken }) => {
+  // Claims "current upload" status immediately -- any earlier call still in flight will see its
+  // own uploadToken no longer matches at its next checkpoint below and bail out quietly.
+  menuIngredientsToken = uploadToken;
+
+  e.sender.send('menu-ingredients-progress', { message: 'Reading file…' });
   const buffer = Buffer.from(base64, 'base64');
   let workbook;
   try {
-    workbook = await loadWorkbookFromBuffer(buffer);
+    workbook = await Promise.race([
+      loadWorkbookFromBuffer(buffer),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error(`Reading the file timed out after ${MENU_INGREDIENTS_PARSE_TIMEOUT_MS / 1000}s -- it may be corrupted or unusually large`)),
+        MENU_INGREDIENTS_PARSE_TIMEOUT_MS,
+      )),
+    ]);
   } catch (err) {
     return { success: false, error: `Couldn't read this file as an Excel workbook: ${err.message}` };
   }
+  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
 
-  const { rows, warnings: parseWarnings } = parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  e.sender.send('menu-ingredients-progress', { message: 'Parsing menu structure…' });
+  const { rows, warnings: parseWarnings } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
   if (rows.length === 0) {
     return {
       success: false,
       error: "No recognizable menu rows found in this file. Make sure it's an export from Generate Menu, Build Menu, or Export All Sections.",
     };
   }
+  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
 
   // Dedup dish names (exact trimmed match) so a dish repeating across many days/rows only costs
   // one AI call -- its suggestion is broadcast back to every row sharing that exact name below.
   const uniqueNames = [...new Set(rows.map(r => r.dishName))];
+  e.sender.send('menu-ingredients-progress', {
+    message: `Found ${rows.length} dish row(s) across ${uniqueNames.length} unique dish(es) -- starting AI suggestions…`,
+  });
 
   async function suggestBatch(batchNames) {
     const payloadItems = batchNames.map((name, idx) => ({ index: idx, name }));
@@ -1062,6 +1096,9 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64 }) => {
   const failures = [...parseWarnings];
   const batches = chunk(uniqueNames, MENU_INGREDIENTS_BATCH_SIZE);
   for (let b = 0; b < batches.length; b++) {
+    // Bails out the moment a newer upload has superseded this one, rather than burning further
+    // AI batches (and further wall-clock time) on results nobody will ever see.
+    if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
     const batch = batches[b];
     e.sender.send('menu-ingredients-progress', {
       message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length,
@@ -1083,22 +1120,27 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64 }) => {
     }
   }
 
+  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+
   e.sender.send('menu-ingredients-progress', {
     message: `Done -- suggested ingredients for ${nameToIngredients.size} of ${uniqueNames.length} unique dishes.`, current: batches.length, total: batches.length,
   });
 
   const annotatedRows = rows.map(r => ({ ...r, ingredients: nameToIngredients.get(r.dishName) || '' }));
   menuIngredientsWorkbook = workbook;
-  return { success: true, rows: annotatedRows, failures };
+  return { success: true, rows: annotatedRows, failures, uploadToken };
 });
 
 // `rows` is the SAME flat shape parse-and-suggest-menu-ingredients returned, after her review/
 // edits in the renderer -- each entry's `ingredients` may differ from what the AI first
 // suggested, or from another row sharing the same dish name, since edits are per physical row
 // (sheetName + rowNumber), never per dish name (see appendIngredientsColumn's own comment).
-ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath }) => {
-  if (!menuIngredientsWorkbook) {
-    return { success: false, error: 'No parsed file in memory -- please upload the file again.' };
+// `uploadToken` must match the upload that's actually currently in memory -- if she somehow
+// triggers an export against a superseded upload (e.g. a second upload finished after she loaded
+// the export dialog), this fails loudly instead of silently exporting the wrong file's data.
+ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath, uploadToken }) => {
+  if (!menuIngredientsWorkbook || uploadToken !== menuIngredientsToken) {
+    return { success: false, error: "This file's data is no longer current (a newer upload replaced it) -- please upload it again before exporting." };
   }
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
@@ -1109,7 +1151,7 @@ ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath }) => {
     if (result.canceled || !result.filePath) return { success: false, cancelled: true };
     savePath = result.filePath;
   }
-  appendIngredientsColumn(menuIngredientsWorkbook, rows);
+  await appendIngredientsColumn(menuIngredientsWorkbook, rows);
   await menuIngredientsWorkbook.xlsx.writeFile(savePath);
   return { success: true, path: savePath };
 });

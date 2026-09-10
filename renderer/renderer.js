@@ -16,7 +16,11 @@ const state = {
   // `rows` is the flat { sheetName, rowNumber, date, weekday, category, dishName, ingredients }
   // list parse-and-suggest-menu-ingredients returned, kept here (not a local variable in
   // renderMenuIngredientsView) so navigating away and back doesn't lose an in-progress review.
-  menuIngredients: { fileName: '', rows: [], failures: [] },
+  // `uploadToken` identifies which upload these rows belong to -- generated fresh per upload
+  // attempt and echoed back by main.js once its parse actually wins the race to be "current"; a
+  // later export sends it back so main.js can refuse to export against a superseded upload's
+  // in-memory workbook (see main.js's own comment on menuIngredientsToken).
+  menuIngredients: { fileName: '', rows: [], failures: [], uploadToken: null },
   // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
   // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
   // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
@@ -1610,6 +1614,25 @@ function renderMenuIngredientsView(main) {
     e.target.value = '';
     if (!file) return;
 
+    // Disabled for the whole parse -- previously clickable the entire time, so a chef who saw no
+    // movement (nothing updated the "Reading file..." label during parsing -- see the new
+    // e.sender.send calls in main.js fixing that) could click Upload again mid-parse, kicking off
+    // a second concurrent parse. Both would eventually race to set the same shared in-memory
+    // workbook, and whichever finished LAST silently won regardless of which one's rows were on
+    // screen -- root cause of the earlier stale-export bug. uploadToken (below) closes that race
+    // even if this ever gets bypassed some other way; this disable just prevents the easy trigger.
+    const uploadBtn = document.getElementById('mi-upload-btn');
+    uploadBtn.disabled = true;
+
+    // Clear the previous upload's review table (if any) before this one starts, rather than
+    // waiting for a successful parse to replace it -- a large prior table (potentially thousands
+    // of rows, each with its own input) otherwise sits fully live in the DOM for the entire
+    // duration of this new upload's file-read/parse/AI-suggest work, and a renderer window
+    // carrying that much retained DOM can feel unresponsive everywhere, not just in this view --
+    // easy to mistake for the whole app being frozen.
+    document.getElementById('mi-review').innerHTML = '';
+
+    const uploadToken = crypto.randomUUID();
     const progressWrap = document.getElementById('mi-progress-wrap');
     const panel = createProgressPanel(progressWrap, { label: 'Reading file…' });
     const unsubscribe = window.api.onMenuIngredientsProgress((payload) => panel.update(payload));
@@ -1620,12 +1643,12 @@ function renderMenuIngredientsView(main) {
         reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(file);
       });
-      const result = await window.api.parseAndSuggestMenuIngredients({ base64 });
+      const result = await window.api.parseAndSuggestMenuIngredients({ base64, uploadToken });
       if (!result.success) {
-        alert(`Couldn't process this file: ${result.error}`);
+        if (!result.cancelled) alert(`Couldn't process this file: ${result.error}`);
         return;
       }
-      state.menuIngredients = { fileName: file.name, rows: result.rows, failures: result.failures || [] };
+      state.menuIngredients = { fileName: file.name, rows: result.rows, failures: result.failures || [], uploadToken };
       renderMenuIngredientsView(main);
     } catch (err) {
       alert(`Couldn't process this file: ${err.message}`);
@@ -1637,6 +1660,10 @@ function renderMenuIngredientsView(main) {
       // forever against detached DOM.
       unsubscribe();
       panel.destroy();
+      // Only reachable here on failure -- a successful parse already replaced this whole view
+      // (including this exact button) via renderMenuIngredientsView(main) above, so there's
+      // nothing left to re-enable on that path.
+      if (document.body.contains(uploadBtn)) uploadBtn.disabled = false;
     }
   });
 
@@ -1649,7 +1676,7 @@ function renderMenuIngredientsView(main) {
       btn.disabled = true;
       statusEl.textContent = 'Exporting…';
       try {
-        const result = await window.api.exportMenuIngredients({ rows: mi.rows });
+        const result = await window.api.exportMenuIngredients({ rows: mi.rows, uploadToken: mi.uploadToken });
         if (result.success) statusEl.textContent = `Exported to ${result.path}`;
         else if (!result.cancelled) statusEl.textContent = `Export failed: ${result.error || 'unknown error'}`;
         else statusEl.textContent = '';
@@ -1714,13 +1741,17 @@ function renderMenuIngredientsReview(container, rows) {
     </div>
   `).join('');
 
-  container.querySelectorAll('.mi-ingredients-input').forEach((input) => {
-    input.addEventListener('input', (e) => {
-      const sheetName = input.dataset.sheet;
-      const rowNumber = parseInt(input.dataset.row, 10);
-      const row = rows.find(r => r.sheetName === sheetName && r.rowNumber === rowNumber);
-      if (row) row.ingredients = e.target.value;
-    });
+  // One delegated listener on the container instead of one per <input> -- at the scale a large
+  // menu file produces (thousands of rows), attaching a listener per row was itself a meaningful
+  // chunk of the retained-DOM weight this view can build up across uploads (see the comment above
+  // the innerHTML clear in renderMenuIngredientsView). A single listener that checks e.target
+  // scales to any row count at effectively zero added cost per row.
+  container.addEventListener('input', (e) => {
+    if (!e.target.classList.contains('mi-ingredients-input')) return;
+    const sheetName = e.target.dataset.sheet;
+    const rowNumber = parseInt(e.target.dataset.row, 10);
+    const row = rows.find(r => r.sheetName === sheetName && r.rowNumber === rowNumber);
+    if (row) row.ingredients = e.target.value;
   });
 }
 
