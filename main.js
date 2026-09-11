@@ -23,7 +23,7 @@ const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
 const { filterNutIngredients, matchNutTerms } = require('./lib/nutFilter');
-const { loadWorkbookFromBuffer, parseWorkbookDishes, appendIngredientsColumn } = require('./lib/menuIngredients');
+const { loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients } = require('./lib/menuIngredients');
 const { generateDishRecipes } = require('./lib/generateDishRecipes');
 const { matchesGeneratorCategory, normalizeProcessesToGrams } = require('./lib/recipeGenerator');
 
@@ -1249,7 +1249,7 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
 // `rows` is the SAME flat shape parse-and-suggest-menu-ingredients returned, after her review/
 // edits in the renderer -- each entry's `ingredients` may differ from what the AI first
 // suggested, or from another row sharing the same dish name, since edits are per physical row
-// (sheetName + rowNumber), never per dish name (see appendIngredientsColumn's own comment).
+// (sheetName + rowNumber), never per dish name (see restructureAndAppendIngredients' own comment).
 // `uploadToken` must match the upload that's actually currently in memory -- if she somehow
 // triggers an export against a superseded upload (e.g. a second upload finished after she loaded
 // the export dialog), this fails loudly instead of silently exporting the wrong file's data.
@@ -1272,9 +1272,9 @@ ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath, uploadToke
     }
     savePath = result.filePath;
   }
-  miLog(`starting appendIngredientsColumn() -> ${savePath}`);
-  await appendIngredientsColumn(menuIngredientsWorkbook, rows, menuIngredientsDishColumns);
-  miLog('appendIngredientsColumn() finished -- starting xlsx.writeFile()');
+  miLog(`starting restructureAndAppendIngredients() -> ${savePath}`);
+  await restructureAndAppendIngredients(menuIngredientsWorkbook, rows, menuIngredientsDishColumns);
+  miLog('restructureAndAppendIngredients() finished -- starting xlsx.writeFile()');
   await menuIngredientsWorkbook.xlsx.writeFile(savePath);
   miLog('writeFile() finished -- export handler RETURNING success=true');
   return { success: true, path: savePath };

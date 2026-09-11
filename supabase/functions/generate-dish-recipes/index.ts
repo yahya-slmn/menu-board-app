@@ -119,6 +119,16 @@ const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly pr
 // over in short form.
 const DECOMPOSITION_RULE = `Every ingredient name must be a real base ingredient (flour, sugar, butter, eggs, yeast, milk, salt, oil, etc.) -- never a sub-preparation (dough, batter, filling, sauce, breading, etc.) named as if it were an ingredient itself. If the dish involves a sub-preparation, decompose it into its real base ingredients as separate ingredient rows within the relevant process, the same way a real recipe would.`;
 
+// Same enforcement pattern as NUT_RESTRICTION/DECOMPOSITION_RULE above -- a hard constraint
+// stated as its own explicit rule, then referenced again in the closing "Remember" reinforcement
+// (see buildPrompt), rather than left as a soft preference buried inside the ingredients bullet.
+// This is a real correctness fix, not a style preference: the app's own downstream math
+// (normalizeProcessesToGrams' 100g scaling, sumIngredientQuantities/compoundWasteYield's Net
+// Weight calc, the Total-Quantity/Net-Weight rescale cascades) all sum ingredient quantities
+// directly regardless of unit -- a stray "ml" or "pc" silently corrupts every one of those totals
+// exactly like a wrong gram figure would, just less visibly.
+const UNITS_RULE = `Every ingredient's quantity MUST be expressed in grams ("g") -- with zero exceptions. This applies to liquids, oils, sauces, melted or liquid ingredients, and count-based items (a whole egg, a garlic clove, a single fruit) just as much as dry/solid ingredients -- there is no "grams genuinely doesn't apply" case. Never use "ml", any other volume unit, or any non-gram unit ("pc", "piece", "cup", "tbsp", "tsp", etc.) anywhere in your output, even for an ingredient that would naturally be measured that way in a real kitchen. Convert to its gram equivalent using standard culinary density/weight knowledge instead (e.g. water/milk/stock ~1g per ml, olive oil ~0.92g per ml, "1 egg" -> ~50g, "1 garlic clove" -> ~5g) -- never report the ingredient in its natural unit.`;
+
 // Waste has no DB access here (this function is Anthropic-only, no Supabase client) -- the
 // matching decision is inherently semantic ("Baking Waste" and "Oven Loss" might mean the same
 // thing, might not), so it's handed to the model rather than attempted as a string-similarity
@@ -143,10 +153,12 @@ You are generating a REFERENCE recipe for each school/staff cafeteria dish named
 
 ${DECOMPOSITION_RULE}
 
+${UNITS_RULE}
+
 For each dish, generate:
 - "name": the dish name (use the given name, cleaned up if needed).
 - "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish. Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen.
-- Each process's "ingredients": every real base ingredient it needs, each with a realistic quantity for a normal/standard batch of this dish (NOT scaled to any particular total -- just a natural, realistic recipe). Express quantity as a plain number and unit as "g" (grams) for every ingredient wherever physically sensible, including converting count-based items to a gram equivalent (e.g. "1 egg" -> quantity 50, unit "g"); use a different unit only when grams genuinely don't apply (e.g. "ml" for a liquid measured by volume in the source convention, or "pc" for a truly indivisible garnish). "method" on an ingredient is a short prep note (e.g. "diced", "melted"), or null if none.
+- Each process's "ingredients": every real base ingredient it needs, each with a realistic quantity for a normal/standard batch of this dish (NOT scaled to any particular total -- just a natural, realistic recipe). See the units rule above for how quantity/unit must be expressed -- it applies to every ingredient, no exceptions. "method" on an ingredient is a short prep note (e.g. "diced", "melted"), or null if none.
 - Each process's "method_steps": one array entry per distinct preparation step, in order.
 - Each process's "wastes": see the rule below.
 
@@ -154,7 +166,7 @@ ${buildWasteRule(existingWasteTypeNames)}
 
 Each item carries its own "index" number and may carry a "category" (the menu category this dish was listed under, for context on what kind of dish this is -- e.g. a "Soup" category item should be a soup, an "AM Snack" item should be breakfast/snack-appropriate). Return exactly one recipe entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate recipe. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
 
-Remember: absolutely no nuts or nut-derived ingredients anywhere in your output, per the restriction stated at the top. And per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients as their own rows.
+Remember: absolutely no nuts or nut-derived ingredients anywhere in your output, per the restriction stated at the top. Per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients as their own rows. And per the units rule above, every single quantity is in grams ("g") only -- never "ml" or any other unit, even for a liquid, oil, sauce, or count-based ingredient.
 
 Items (JSON array): ${JSON.stringify(items)}`;
 }
