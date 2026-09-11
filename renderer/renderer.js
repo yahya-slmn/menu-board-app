@@ -47,6 +47,22 @@ const state = {
     // cleared) the moment renderRecipeFormView reads it -- see its non-editing branch.
     importedRecipe: null,
   },
+  // Recipe Generator -- shares the same view/formId/processes drill-down shape as recipes/
+  // extractor above (reused via RECIPE_NS.generated + openNewRecipeForm/openEditRecipeForm/
+  // resetRecipeFormState, all unmodified), even though its own form (renderGeneratedRecipeFormView)
+  // is a bespoke, simpler renderer -- pendingPhoto/removePhoto/presentationMode/Text/Items are
+  // reset by that shared machinery but never read by the bespoke form (no photo/presentation UI
+  // there at all), which is harmless unused state, not a bug. `activeTab` is Recipe Generator-only
+  // (Drafts vs the confirmed "Recipe Generated" list) -- independent of view/formId, since both
+  // tabs drill into the same form when a row is opened. `fileName`/`uploadToken` track the most
+  // recent "Upload Menu File" attempt on the Drafts tab, same race-guard convention as
+  // state.menuIngredients.uploadToken.
+  generatedRecipes: {
+    view: 'list', formId: null, processes: [], pendingPhoto: null, removePhoto: false,
+    presentationMode: null, presentationText: '', presentationItems: [],
+    importedRecipe: null,
+    activeTab: 'drafts', fileName: '', uploadToken: null,
+  },
   // Materials/Trays catalog -- same list<->form drill-down shape as recipes/extractor above
   // (view/formId), single-photo model like Recipe Book (pendingPhoto/removePhoto). shapeType and
   // the dimension fields aren't persisted here separately from the form's own inputs -- they're
@@ -123,6 +139,47 @@ const RECIPE_NS = {
       exportScaled: (payload) => window.api.exportScaledExtractedRecipe(payload),
       searchIngredients: (q) => window.api.searchExtractedIngredients(q),
       addIngredient: (payload) => window.api.addExtractedIngredient(payload),
+    },
+  },
+  // Recipe Generator's third namespace -- AI-generated ~100g reference recipes, always free-text
+  // ingredients (no searchIngredients/addIngredient at all: its own bespoke form,
+  // renderGeneratedRecipeFormView, never wires an ingredient-name autocomplete, unlike Book/
+  // Extractor's shared renderRecipeFormView). No allowManualNew/extract entry point either --
+  // generated_recipes rows only ever come from parse-and-generate-recipes (Recipe Generator's own
+  // "Upload Menu File" flow, see renderRecipeGeneratorView), never a blank form or a single-file
+  // extraction. openNew/openEdit are still defined, for structural parity with book/extractor and
+  // in case shared code ever calls them, but only openEdit is ever actually reached (from the
+  // Drafts/Generated tabs' own row actions) -- see renderRecipeGeneratorView's dispatch, which
+  // routes state.generatedRecipes.view==='form' to the bespoke form, not renderRecipeFormView.
+  generated: {
+    stateKey: 'generatedRecipes',
+    title: 'Recipe Generator',
+    subtitle: 'AI-generated ~100g reference recipes from an uploaded menu',
+    codeLabel: 'RG',
+    searchLabel: 'Search by name or RG code',
+    backLabel: '← Back to Recipe Generator',
+    newRecipeHint: '',
+    allowManualNew: false,
+    photoModel: 'single',
+    openNew: () => openNewRecipeForm(RECIPE_NS.generated),
+    openEdit: (id) => openEditRecipeForm(RECIPE_NS.generated, id),
+    api: {
+      // list/search are CONFIRMED-only, always (see main.js's own comment on list-generated-
+      // recipes) -- drafts are reached only via the Drafts tab's own listGeneratedRecipeDrafts
+      // call, never through this namespace's list/search.
+      list: () => window.api.listGeneratedRecipes(),
+      search: (q) => window.api.searchGeneratedRecipes(q),
+      get: (id) => window.api.getGeneratedRecipe(id),
+      save: (payload) => window.api.saveGeneratedRecipe(payload),
+      del: (id) => window.api.deleteGeneratedRecipe(id),
+      // Single-photo model, like Book -- a generated recipe is a speculative, AI-written
+      // reference, not something extracted from a real photographed card, so an optional single
+      // illustrative photo fits (Extractor's multi-page-scan gallery model doesn't apply -- no
+      // physical source document exists here).
+      getPhoto: (path) => window.api.getGeneratedRecipePhoto(path),
+      preview: (id) => window.api.previewGeneratedRecipe(id),
+      exportSelected: (recipeIds, targetLanguage) => window.api.exportGeneratedRecipes({ recipeIds, targetLanguage }),
+      exportScaled: (payload) => window.api.exportScaledGeneratedRecipe(payload),
     },
   },
 };
@@ -367,12 +424,13 @@ function showToast(message) {
 // re-render would silently discard, and an open Add/Edit modal (Item/Ingredient, appended to
 // document.body) was populated from data fetched at modal-open time -- none of these should
 // ever be touched by a background refresh.
-const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'ingredients', 'extractedIngredients', 'exportAll', 'generate'];
+const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'exportAll', 'generate'];
 function isSafeToForceRerender() {
   if (document.querySelector('.modal-overlay')) return false;
   if (state.currentView === 'build') return false;
   if (state.currentView === 'recipes' && state.recipes.view === 'form') return false;
   if (state.currentView === 'extractor' && state.extractor.view === 'form') return false;
+  if (state.currentView === 'recipeGenerator' && state.generatedRecipes.view === 'form') return false;
   return SAFE_REFRESH_VIEWS.includes(state.currentView);
 }
 
@@ -491,6 +549,7 @@ function renderView() {
   if (state.currentView === 'menuIngredients') return renderMenuIngredientsView(main);
   if (state.currentView === 'recipes') return renderRecipesView(main);
   if (state.currentView === 'extractor') return renderExtractorView(main);
+  if (state.currentView === 'recipeGenerator') return renderRecipeGeneratorView(main);
   if (state.currentView === 'calculator') return renderCalculatorView(main);
   if (state.currentView === 'ingredients') return renderIngredientsView(main);
   if (state.currentView === 'extractedIngredients') return renderExtractedIngredientsView(main);
@@ -1707,15 +1766,49 @@ function renderMenuIngredientsView(main) {
         btn.disabled = false;
       }
     });
+  } else {
+    // Pre-upload empty state -- otherwise this screen is just bare space until a file's
+    // uploaded and processed. Mirrors .empty-state's usual centered heading+sentence
+    // convention (see e.g. Recipe Book's "No recipes yet"), extended with a 3-step visual
+    // guide and its own prominent CTA -- reuses the SAME hidden #mi-file-input/'change'
+    // handler wired above (mi-upload-btn's own), just a second button that opens the same
+    // picker, so there's no separate upload code path to keep in sync.
+    document.getElementById('mi-review').innerHTML = `
+      <div class="empty-state mi-empty-state">
+        <div class="display">Upload a menu to get started</div>
+        <div class="mi-empty-tagline">Upload a menu, review AI-suggested ingredients, export -- nothing is saved.</div>
+        <div class="mi-steps">
+          <div class="mi-step">
+            <div class="mi-step-num">1</div>
+            <div class="mi-step-title">Upload a menu file</div>
+            <div class="mi-step-desc">An export from Generate Menu, Build Menu, or Export All Sections</div>
+          </div>
+          <div class="mi-step">
+            <div class="mi-step-num">2</div>
+            <div class="mi-step-title">AI suggests ingredients &amp; allergens</div>
+            <div class="mi-step-desc">Each dish gets a real base-ingredient breakdown and allergen tags</div>
+          </div>
+          <div class="mi-step">
+            <div class="mi-step-num">3</div>
+            <div class="mi-step-title">Review, edit, export</div>
+            <div class="mi-step-desc">Adjust anything, then export the annotated menu back to Excel</div>
+          </div>
+        </div>
+        <button class="primary" id="mi-upload-empty-btn">Upload Menu File</button>
+      </div>
+    `;
+    document.getElementById('mi-upload-empty-btn').addEventListener('click', () => {
+      document.getElementById('mi-file-input').click();
+    });
   }
 }
 
 // Groups the flat rows list by sheet (section) then by date, preserving the source file's own
 // row order (both Maps fill in first-seen order, which is already sheet-by-sheet/row-by-row scan
 // order from lib/menuIngredients.js -- no re-sorting needed to match "the source file's own
-// structure"). Each ingredients <input> closes over its own row object directly and mutates
-// `row.ingredients` in place on input -- simpler and more robust than a string-keyed lookup,
-// since exportMenuIngredients is later called with this exact same rows array/objects.
+// structure"). Each ingredients/allergens <input> mutates its own row object's `ingredients`/
+// `allergens` field in place on input (see the delegated listener below) -- since
+// exportMenuIngredients is later called with this exact same rows array/objects.
 function renderMenuIngredientsReview(container, rows) {
   const bySheet = new Map();
   for (const row of rows) {
@@ -1741,6 +1834,7 @@ function renderMenuIngredientsReview(container, rows) {
                     <th style="width:160px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Category</th>
                     <th style="width:260px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Dish</th>
                     <th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Ingredients</th>
+                    <th style="width:220px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Allergens</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1753,6 +1847,13 @@ function renderMenuIngredientsReview(container, rows) {
                         ${row.removedNutTerms && row.removedNutTerms.length ? `
                           <div style="margin-top:4px; font-size:11.5px; color:var(--danger);">
                             ⚠ removed (nut policy): ${row.removedNutTerms.map(t => t.replace(/</g, '&lt;')).join(', ')} -- edit the box above to add back if you know this dish is nut-free
+                          </div>` : ''}
+                      </td>
+                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
+                        <input class="mi-allergens-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
+                        ${row.removedAllergenNutTerms && row.removedAllergenNutTerms.length ? `
+                          <div style="margin-top:4px; font-size:11.5px; color:var(--danger);">
+                            ⚠ removed (nut policy): ${row.removedAllergenNutTerms.map(t => t.replace(/</g, '&lt;')).join(', ')} -- edit the box above to add back if you know this dish is nut-free
                           </div>` : ''}
                       </td>
                     </tr>
@@ -1770,13 +1871,18 @@ function renderMenuIngredientsReview(container, rows) {
   // menu file produces (thousands of rows), attaching a listener per row was itself a meaningful
   // chunk of the retained-DOM weight this view can build up across uploads (see the comment above
   // the innerHTML clear in renderMenuIngredientsView). A single listener that checks e.target
-  // scales to any row count at effectively zero added cost per row.
+  // scales to any row count at effectively zero added cost per row. Handles both the ingredients
+  // and allergens inputs the same way, keyed off which class actually fired.
   container.addEventListener('input', (e) => {
-    if (!e.target.classList.contains('mi-ingredients-input')) return;
+    const isIngredients = e.target.classList.contains('mi-ingredients-input');
+    const isAllergens = e.target.classList.contains('mi-allergens-input');
+    if (!isIngredients && !isAllergens) return;
     const sheetName = e.target.dataset.sheet;
     const rowNumber = parseInt(e.target.dataset.row, 10);
     const row = rows.find(r => r.sheetName === sheetName && r.rowNumber === rowNumber);
-    if (row) row.ingredients = e.target.value;
+    if (!row) return;
+    if (isIngredients) row.ingredients = e.target.value;
+    else row.allergens = e.target.value;
   });
 }
 
@@ -2316,6 +2422,44 @@ function compoundWasteYield(baseQty, wastes) {
   }, baseQty));
 }
 
+// Same reduction as compoundWasteYield above (baseQty=1 gives exactly the compounded retention
+// fraction, Net Weight / Total Quantity), deliberately NOT reusing compoundWasteYield itself --
+// that function's own roundNice at the end is fine for a DISPLAYED weight but would inject up to
+// ~0.5% error here, where the result is about to be used as a divisor (see
+// computeTargetTotalQuantityFromNetWeight below).
+function processRetentionFactor(wastes) {
+  return (wastes || []).reduce((acc, w) => {
+    const raw = parseFloat(w.percent);
+    const pct = isNaN(raw) ? 0 : Math.min(Math.max(raw, 0), 100);
+    return acc * (1 - pct / 100);
+  }, 1);
+}
+
+// Net Weight editing (Book/Extractor/Generator, both levels) back-solves the Total Quantity that
+// would produce a given target Net Weight through EXISTING waste percentages held fixed, then
+// hands that number to the exact same computeMultiplierFromTarget/scaleIngredients cascade
+// Total Quantity editing already uses -- this is the only new math, everything downstream of it
+// is reused unmodified. `retentionFactor` is either one process's own processRetentionFactor(
+// proc.wastes) (Level 1) or the CURRENT implied aggregate ratio combinedNetWeight/
+// combinedTotalQuantity (Level 2) -- see each call site.
+//
+// Blocks (rather than silently producing an absurd or infinite number) once the retention
+// factor is at or near zero -- MIN_RETENTION_FACTOR (99.9%+ combined waste) is a floor below
+// which a back-solved Total Quantity is so large it almost certainly signals a waste-%
+// data-entry mistake rather than a legitimate target; a caller should fix the waste % first, not
+// receive a number that technically satisfies the math but not any real kitchen scenario.
+const MIN_RETENTION_FACTOR = 0.001;
+function computeTargetTotalQuantityFromNetWeight(retentionFactor, targetNetWeightText) {
+  const target = parseFloat(targetNetWeightText);
+  if (!target || target <= 0) {
+    return { error: 'Please enter a target Net Weight greater than 0, e.g. 2000.' };
+  }
+  if (!retentionFactor || retentionFactor < MIN_RETENTION_FACTOR) {
+    return { error: `Combined waste is too high (≥${roundNice((1 - MIN_RETENTION_FACTOR) * 100)}%) to compute a Total Quantity from a Net Weight target -- adjust the waste percentages first.` };
+  }
+  return { targetTotalQuantity: target / retentionFactor };
+}
+
 // Each process's own Wastes Applied/Net Weight -- reads/writes that one process card's own
 // elements (ep-total-<id>/ep-yield-<id>). Returns the computed net weight (a Number) so callers
 // summing across every process don't need to re-read the DOM afterward. Shared by Recipe Book
@@ -2328,10 +2472,18 @@ function updateProcessNetWeight(proc) {
   if (!totalEl || !yieldEl) return 0;
 
   const totalQty = sumIngredientQuantities(proc.ingredientRows);
-  totalEl.value = `${roundNice(totalQty)} G`;
+  // Never overwrite while she's actively typing a new value into this exact field -- a
+  // per-process rescale (see wireProcessTotalQuantityRescale) fires on 'change' once she moves
+  // away/hits Enter, not per-keystroke; this guard just stops the live recompute-on-any-edit
+  // path (every OTHER change anywhere on the form calls this) from fighting her mid-edit. The
+  // actual Net Weight computation below always uses the real ingredient-derived totalQty
+  // regardless of what's currently displayed here.
+  if (document.activeElement !== totalEl) totalEl.value = `${roundNice(totalQty)} G`;
 
   const netWeight = compoundWasteYield(totalQty, proc.wastes);
-  yieldEl.value = `${netWeight} G`;
+  // Same guard as totalEl above -- Net Weight is now also editable (see
+  // wireProcessNetWeightRescale), and must not fight her mid-edit either.
+  if (document.activeElement !== yieldEl) yieldEl.value = `${netWeight} G`;
 
   // Trays Needed -- how many of this process's linked material (tray/pan/mold) are required to
   // hold its full Net Weight, rounded UP (a partially-filled tray still counts as one you need to
@@ -2362,7 +2514,20 @@ function updateNetWeightSum(ns) {
   if (!yieldEl) return;
   const sum = s.processes.reduce((acc, proc) => acc + updateProcessNetWeight(proc), 0);
   const roundedSum = roundNice(sum);
-  yieldEl.value = `${roundedSum} G`;
+  // Same guard as updateProcessNetWeight's own -- rf-yield is now also editable (see
+  // wireRecipeNetWeightRescale).
+  if (document.activeElement !== yieldEl) yieldEl.value = `${roundedSum} G`;
+
+  // Recipe-level Total Quantity (rf-total-qty) -- the combined PRE-waste sum across every
+  // process, editable (see wireRecipeTotalQuantityRescale); re-summed here every time any
+  // ingredient/process changes, same "flows up, never touches siblings" direction #2 already
+  // established for Recipe Generator's drafts. Guarded against her own in-progress edit the same
+  // way updateProcessNetWeight guards its own per-process field.
+  const totalQtyEl = document.getElementById('rf-total-qty');
+  if (totalQtyEl && document.activeElement !== totalQtyEl) {
+    const combinedTotal = s.processes.reduce((acc, proc) => acc + sumIngredientQuantities(proc.ingredientRows), 0);
+    totalQtyEl.value = roundNice(combinedTotal);
+  }
 
   const portionsEl = document.getElementById('rf-portions-produced');
   if (portionsEl) {
@@ -2395,6 +2560,14 @@ const TEXT_LIST_FIELDS = {
   calcPresentation: {
     modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
     textareaId: 'calc-presentation', mountId: 'calc-presentation-field', rows: 4,
+  },
+  // Same pattern as calcPresentation above -- Recipe Generator's bespoke form
+  // (renderGeneratedRecipeFormView) is its own view with its own DOM ids, read/written against
+  // state.generatedRecipes (already carries presentationMode/Text/Items, unused until this field
+  // existed).
+  generatedPresentation: {
+    modeKey: 'presentationMode', textKey: 'presentationText', itemsKey: 'presentationItems',
+    textareaId: 'rg-presentation', mountId: 'rg-presentation-field', rows: 4,
   },
 };
 
@@ -3107,10 +3280,12 @@ async function renderRecipeFormView(main, ns) {
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" dir="auto" /></div>
       <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" dir="auto" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" dir="auto" /></div>
-      <div class="field"><label>Net Weight (sum of processes)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" readonly /></div>
+      <div class="field"><label>Total Quantity (g)</label><input id="rf-total-qty" value="${recipe?.yield_notes || ''}" /></div>
+      <div class="field"><label>Net Weight (sum of processes)</label><input id="rf-yield" value="${recipe?.yield_notes || ''}" /></div>
       <div class="field"><label>Portions Produced</label><div class="computed-value-box" id="rf-portions-produced">–</div></div>
       <div class="field"><label>Date</label><input id="rf-date" type="date" value="${recipe?.date_created || ''}" /></div>
     </div>
+    <div style="color:var(--neutral); font-size:12px; margin:-14px 0 16px;">Editing a Total Quantity or Net Weight (here or on a process card below) rescales ingredient quantities -- permanent once you save.</div>
 
     <h3 style="margin-bottom:10px;">Processes</h3>
     <div id="ep-process-list"></div>
@@ -3277,7 +3452,7 @@ async function renderRecipeFormView(main, ns) {
         <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
         <div class="field" style="max-width:220px; margin-bottom:14px;">
           <label>Total Quantity</label>
-          <input id="ep-total-${proc.localId}" readonly />
+          <input id="ep-total-${proc.localId}" />
         </div>
         <div class="field" style="margin-bottom:14px;">
           <label>Wastes Applied</label>
@@ -3289,7 +3464,7 @@ async function renderRecipeFormView(main, ns) {
         </div>
         <div class="field" style="max-width:220px; margin-bottom:14px;">
           <label>Net Weight</label>
-          <input id="ep-yield-${proc.localId}" readonly />
+          <input id="ep-yield-${proc.localId}" />
         </div>
         <div class="field" style="max-width:280px; margin-bottom:14px;">
           <label>Material / Tray</label>
@@ -3353,6 +3528,46 @@ async function renderRecipeFormView(main, ns) {
         renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
       });
 
+      // LEVEL 1 -- editing THIS process's own Total Quantity rescales only its own ingredients
+      // (computeMultiplierFromTarget/scaleIngredients, same formula Calculator/Recipe Generator
+      // already use -- not reimplemented here) and never touches any other process. Re-rendering
+      // just this process's ingredient rows (not a full renderProcessCards()) is exactly the same
+      // scoped-update pattern "+ Add Ingredient Row" above already uses; onIngredientChange's own
+      // updateNetWeightSum(ns) call (fired from inside renderProcessIngredientRows) is what flows
+      // the new combined total/Net Weight/Portions Produced UP to the recipe level as a re-sum,
+      // not a second rescale. Fires on 'change' (blur/Enter), not per-keystroke.
+      card.querySelector(`#ep-total-${proc.localId}`).addEventListener('change', (e) => {
+        const result = computeMultiplierFromTarget(proc.ingredientRows, e.target.value);
+        if (result.error) {
+          alert(result.error);
+          updateNetWeightSum(ns); // revert the displayed value back to the real current total
+          return;
+        }
+        proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+        renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
+      });
+
+      // LEVEL 1, Net Weight -- back-solves the Total Quantity this process would need (through
+      // ITS OWN current waste %, held fixed) to produce the typed Net Weight, then hands that
+      // number to the exact same rescale above -- see computeTargetTotalQuantityFromNetWeight's
+      // own comment. Same "this process only, flows up as a re-sum" direction as Total Quantity.
+      card.querySelector(`#ep-yield-${proc.localId}`).addEventListener('change', (e) => {
+        const backSolve = computeTargetTotalQuantityFromNetWeight(processRetentionFactor(proc.wastes), e.target.value);
+        if (backSolve.error) {
+          alert(backSolve.error);
+          updateNetWeightSum(ns);
+          return;
+        }
+        const result = computeMultiplierFromTarget(proc.ingredientRows, backSolve.targetTotalQuantity);
+        if (result.error) {
+          alert(result.error);
+          updateNetWeightSum(ns);
+          return;
+        }
+        proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+        renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
+      });
+
       renderProcessWastes(proc, wasteTypes, () => updateNetWeightSum(ns));
 
       // Material/Tray link -- 1:1 per process (see Phase C design notes), not a multi-add list
@@ -3396,6 +3611,54 @@ async function renderRecipeFormView(main, ns) {
   // it needs its own listener rather than piggybacking on renderProcessCards' ingredient/waste
   // change handlers.
   document.getElementById('rf-portion-weight').addEventListener('input', () => updateNetWeightSum(ns));
+
+  // LEVEL 2 -- editing the recipe-level Total Quantity computes ONE multiplier from the
+  // combined sum across EVERY process's ingredients and rescales all of them uniformly
+  // together (Calculator's own DEFAULT "scale all processes together" mode -- independent
+  // per-process scaling stays a Calculator-only capability, not offered here). A full
+  // renderProcessCards() re-render reflects every process's own Total Quantity/Net Weight as a
+  // derived result of the rescale, same as add/remove/reorder process already trigger.
+  document.getElementById('rf-total-qty').addEventListener('change', (e) => {
+    const allRows = s.processes.flatMap(p => p.ingredientRows);
+    const result = computeMultiplierFromTarget(allRows, e.target.value);
+    if (result.error) {
+      alert(result.error);
+      updateNetWeightSum(ns); // revert the displayed value back to the real current total
+      return;
+    }
+    s.processes.forEach(proc => {
+      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+    });
+    renderProcessCards();
+  });
+
+  // LEVEL 2, Net Weight -- back-solves ONE recipe-level target Total Quantity through the
+  // CURRENT implied aggregate retention factor (combinedNetWeight / combinedTotalQuantity, i.e.
+  // what fraction of the whole recipe currently survives every process's own waste %), then
+  // rescales every process uniformly by the resulting multiplier -- same mechanism as the
+  // Total Quantity field just above, just entered from the Net Weight side.
+  document.getElementById('rf-yield').addEventListener('change', (e) => {
+    const combinedTotal = s.processes.reduce((acc, proc) => acc + sumIngredientQuantities(proc.ingredientRows), 0);
+    const combinedNet = s.processes.reduce((acc, proc) => acc + compoundWasteYield(sumIngredientQuantities(proc.ingredientRows), proc.wastes), 0);
+    const impliedRetention = combinedTotal > 0 ? combinedNet / combinedTotal : 0;
+    const backSolve = computeTargetTotalQuantityFromNetWeight(impliedRetention, e.target.value);
+    if (backSolve.error) {
+      alert(backSolve.error);
+      updateNetWeightSum(ns);
+      return;
+    }
+    const allRows = s.processes.flatMap(p => p.ingredientRows);
+    const result = computeMultiplierFromTarget(allRows, backSolve.targetTotalQuantity);
+    if (result.error) {
+      alert(result.error);
+      updateNetWeightSum(ns);
+      return;
+    }
+    s.processes.forEach(proc => {
+      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+    });
+    renderProcessCards();
+  });
 
   renderProcessCards();
   // Overrides dirAuto per-call rather than setting it on TEXT_LIST_FIELDS.presentation itself,
@@ -3484,6 +3747,757 @@ async function saveProcessRecipeForm(ns) {
 
   try {
     await ns.api.save(payload);
+    goBackToRecipeList(ns);
+  } catch (err) {
+    statusEl.textContent = '';
+    alert(`Save failed: ${err.message}`);
+  }
+}
+
+// ============================================================
+// RECIPE GENERATOR -- AI-generates a full ~100g reference recipe per dish pulled from an
+// uploaded menu file (main.js's parse-and-generate-recipes), for dishes in the AM Snack/PM
+// Snack/Soup/Appetizers/Main Course categories only. Two tabs: Drafts (generated_recipes rows
+// with status='draft', reviewed/edited before being confirmed) and Recipe Generated (status=
+// 'confirmed', an RG- code assigned the moment she confirms). Both tabs drill into the SAME
+// bespoke edit form (renderGeneratedRecipeFormView) when a row is opened -- reviewing a draft
+// and editing an already-confirmed recipe are the same screen, just with a different set of save
+// buttons at the bottom (see that function).
+//
+// Deliberately NOT built on renderRecipeListView/renderRecipeFormView (Book/Extractor's shared
+// screens) -- those assume Material/Tray linking, Waste %, a photo, and a catalog-aware
+// ingredient autocomplete, none of which apply here (generated_recipe_processes has no material/
+// waste columns at all -- see the migration's own comment -- and ingredients must never be
+// catalog-linked, ever). RECIPE_NS.generated is still used for everything that DOES carry over
+// unmodified: list/get/save/delete/preview/export IPC wiring, and Recipe Calculator's third
+// source (see currentNs() below).
+// ============================================================
+
+function renderRecipeGeneratorView(main) {
+  const ns = RECIPE_NS.generated;
+  const s = state[ns.stateKey];
+  if (s.view === 'form') return renderGeneratedRecipeFormView(main, ns);
+  return renderRecipeGeneratorTabs(main, ns);
+}
+
+async function renderRecipeGeneratorTabs(main, ns) {
+  const s = state[ns.stateKey];
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>${ns.title}</h1><span class="section-pill">${ns.subtitle}</span></div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <button class="primary" id="rg-upload-btn">${s.fileName ? 'Upload a Different File' : 'Upload Menu File'}</button>
+      </div>
+    </div>
+    <input type="file" id="rg-file-input" accept=".xlsx" hidden />
+    <div id="rg-progress-wrap"></div>
+    ${s.fileName ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">Last upload: "${s.fileName}"</div>` : ''}
+    <div class="mode-toggle" style="margin-bottom:16px; max-width:360px;">
+      <button type="button" class="mode-toggle-btn ${s.activeTab === 'drafts' ? 'active' : ''}" data-rg-tab="drafts">Drafts</button>
+      <button type="button" class="mode-toggle-btn ${s.activeTab === 'generated' ? 'active' : ''}" data-rg-tab="generated">Recipe Generated</button>
+    </div>
+    <div id="rg-tab-content"></div>
+  `;
+
+  document.getElementById('rg-upload-btn').addEventListener('click', () => {
+    document.getElementById('rg-file-input').click();
+  });
+  document.getElementById('rg-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const uploadBtn = document.getElementById('rg-upload-btn');
+    uploadBtn.disabled = true;
+    const uploadToken = crypto.randomUUID();
+    s.uploadToken = uploadToken;
+    const progressWrap = document.getElementById('rg-progress-wrap');
+    const panel = createProgressPanel(progressWrap, { label: 'Reading file…' });
+    const unsubscribe = window.api.onRecipeGeneratorProgress((payload) => panel.update(payload));
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const result = await window.api.parseAndGenerateRecipes({ base64, uploadToken, fileName: file.name });
+      if (uploadToken !== s.uploadToken) return; // superseded by a newer upload
+      if (!result.success) {
+        if (!result.cancelled) alert(`Couldn't process this file: ${result.error}`);
+        return;
+      }
+      s.fileName = file.name;
+      const warningNote = result.failures && result.failures.length
+        ? `\n\n${result.failures.length} warning(s) -- see the app logs for details.` : '';
+      alert(`Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s). Review them in the Drafts tab.${warningNote}`);
+      s.activeTab = 'drafts';
+      renderRecipeGeneratorTabs(main, ns);
+    } catch (err) {
+      alert(`Couldn't process this file: ${err.message}`);
+    } finally {
+      unsubscribe();
+      panel.destroy();
+      if (document.body.contains(uploadBtn)) uploadBtn.disabled = false;
+    }
+  });
+
+  document.querySelectorAll('[data-rg-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.rgTab === s.activeTab) return;
+      s.activeTab = btn.dataset.rgTab;
+      renderRecipeGeneratorTabs(main, ns);
+    });
+  });
+
+  const content = document.getElementById('rg-tab-content');
+  if (s.activeTab === 'drafts') await renderGeneratedDraftsList(content, ns, main);
+  else await renderGeneratedConfirmedList(content, ns, main);
+}
+
+async function renderGeneratedDraftsList(container, ns, main) {
+  container.innerHTML = 'Loading…';
+  const drafts = await window.api.listGeneratedRecipeDrafts();
+  if (drafts.length === 0) {
+    container.innerHTML = `<div class="empty-state"><div class="display">No drafts yet</div>Click "Upload Menu File" above to generate recipes from a menu.</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <table class="recipes-table rg-drafts-table">
+      <thead><tr><th>Dish</th><th>Category</th><th>Source Menu</th><th>Generated</th><th></th></tr></thead>
+      <tbody>
+        ${drafts.map(d => `
+          <tr>
+            <td>${d.name}</td>
+            <td>${d.category || '–'}</td>
+            <td>${d.source_menu_label || '–'}</td>
+            <td>${new Date(d.created_at).toLocaleDateString()}</td>
+            <td style="text-align:right">
+              <button class="icon-btn" data-rg-review="${d.id}">Review</button>
+              <button class="icon-btn danger" data-rg-delete="${d.id}">Delete</button>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  container.querySelectorAll('[data-rg-review]').forEach(btn => {
+    btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.rgReview, 10)));
+  });
+  container.querySelectorAll('[data-rg-delete]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const d = drafts.find(x => x.id === parseInt(btn.dataset.rgDelete, 10));
+      if (!confirm(`Delete the draft "${d.name}"? This cannot be undone.`)) return;
+      await window.api.deleteGeneratedRecipe(d.id);
+      renderRecipeGeneratorTabs(main, ns);
+    });
+  });
+}
+
+// Adapted from renderRecipeListView's own content logic (search/month-group/export-selected/
+// delete-selected/preview/edit), scoped to RECIPE_NS.generated and mounted inside the tab shell
+// above instead of owning its own topbar -- see this section's own header comment on why this
+// isn't a literal call to renderRecipeListView.
+async function renderGeneratedConfirmedList(container, ns, main) {
+  container.innerHTML = `
+    <div class="search-bar">
+      <label for="rg-search">${ns.searchLabel}</label>
+      <input id="rg-search" type="search" />
+    </div>
+    <div style="margin-bottom:14px; display:flex; align-items:center; gap:10px;">
+      <button class="secondary" id="rg-export-selected-btn" disabled>Export Selected</button>
+      ${exportLanguagePickerHtml('rglist')}
+      <button class="secondary" id="rg-delete-selected-btn" disabled>Delete Selected</button>
+    </div>
+    <div id="rg-export-selected-progress-wrap"></div>
+    <div id="rg-list-content">Loading…</div>
+  `;
+  wireExportLanguagePicker('rglist');
+
+  const recipes = await ns.api.list();
+  const searchInput = document.getElementById('rg-search');
+  const content = document.getElementById('rg-list-content');
+  const exportBtn = document.getElementById('rg-export-selected-btn');
+  const deleteSelectedBtn = document.getElementById('rg-delete-selected-btn');
+  const selected = new Set();
+
+  if (recipes.length === 0) {
+    content.innerHTML = `<div class="empty-state"><div class="display">No confirmed recipes yet</div>Confirm a draft from the Drafts tab to see it here.</div>`;
+    return;
+  }
+
+  function updateExportBtn() {
+    exportBtn.disabled = selected.size === 0;
+    exportBtn.textContent = selected.size > 0 ? `Export Selected (${selected.size})` : 'Export Selected';
+    deleteSelectedBtn.disabled = selected.size === 0;
+    deleteSelectedBtn.textContent = selected.size > 0 ? `Delete Selected (${selected.size})` : 'Delete Selected';
+  }
+
+  function renderFiltered() {
+    const query = searchInput.value.trim().toLowerCase();
+    const filtered = query
+      ? recipes.filter(r => r.name.toLowerCase().includes(query) || r.code.toLowerCase().includes(query))
+      : recipes;
+
+    if (filtered.length === 0) {
+      content.innerHTML = `<div class="empty-state">No recipes match "${searchInput.value}".</div>`;
+      return;
+    }
+
+    const groups = groupRecipesByMonth(filtered);
+    content.innerHTML = groups.map(group => `
+      <div class="recipe-month-group">
+        <div class="recipe-month-head">
+          <label>
+            <input type="checkbox" class="month-select-all" data-month="${group.key}" />
+            <strong>${group.label}</strong>
+            <span style="color:var(--neutral); font-weight:400;">(${group.recipes.length})</span>
+          </label>
+        </div>
+        <table class="recipes-table rg-generated-table">
+          <thead><tr><th></th><th>Code</th><th>Name</th><th>Category</th><th>Date</th><th></th></tr></thead>
+          <tbody>
+            ${group.recipes.map(r => `
+              <tr>
+                <td><input type="checkbox" class="recipe-row-check" data-select="${r.id}" data-month="${group.key}" ${selected.has(r.id) ? 'checked' : ''} /></td>
+                <td>${r.code}</td>
+                <td>${r.name}</td>
+                <td>${r.category || '–'}</td>
+                <td>${r.date_created || '–'}</td>
+                <td style="text-align:right">
+                  <button class="icon-btn" data-preview="${r.id}" title="Preview export" aria-label="Preview export">${EYE_OFF_ICON_SVG}</button>
+                  <button class="icon-btn" data-edit="${r.id}">Edit</button>
+                  <button class="icon-btn danger" data-delete="${r.id}">Delete</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `).join('');
+
+    function updateMonthCheckboxStates() {
+      content.querySelectorAll('.month-select-all').forEach(monthCb => {
+        const monthKey = monthCb.dataset.month;
+        const rowCbs = [...content.querySelectorAll('.recipe-row-check')].filter(cb => cb.dataset.month === monthKey);
+        monthCb.checked = rowCbs.length > 0 && rowCbs.every(cb => cb.checked);
+      });
+    }
+
+    content.querySelectorAll('.recipe-row-check').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const id = parseInt(cb.dataset.select, 10);
+        if (cb.checked) selected.add(id); else selected.delete(id);
+        updateMonthCheckboxStates();
+        updateExportBtn();
+      });
+    });
+    content.querySelectorAll('.month-select-all').forEach(monthCb => {
+      monthCb.addEventListener('change', () => {
+        const monthKey = monthCb.dataset.month;
+        content.querySelectorAll('.recipe-row-check').forEach(cb => {
+          if (cb.dataset.month !== monthKey) return;
+          cb.checked = monthCb.checked;
+          const id = parseInt(cb.dataset.select, 10);
+          if (monthCb.checked) selected.add(id); else selected.delete(id);
+        });
+        updateExportBtn();
+      });
+    });
+    updateMonthCheckboxStates();
+
+    content.querySelectorAll('[data-preview]').forEach(btn => {
+      btn.addEventListener('click', () => openRecipePreviewModal(ns, parseInt(btn.dataset.preview, 10), btn));
+    });
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.edit, 10)));
+    });
+    content.querySelectorAll('[data-delete]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.delete, 10);
+        const recipe = recipes.find(r => r.id === id);
+        if (!confirm(`Delete "${recipe.name}" (${recipe.code})? This cannot be undone.`)) return;
+        await ns.api.del(id);
+        renderRecipeGeneratorTabs(main, ns);
+      });
+    });
+  }
+
+  exportBtn.addEventListener('click', async () => {
+    exportBtn.disabled = true;
+    const progressWrap = document.getElementById('rg-export-selected-progress-wrap');
+    const panel = createProgressPanel(progressWrap, { label: 'Exporting…' });
+    const unsubscribe = window.api.onExportProgress((payload) => panel.update(payload));
+    try {
+      const result = await ns.api.exportSelected([...selected], getSelectedExportLanguage('rglist'));
+      panel.destroy();
+      if (result.success) alert(`Exported to ${result.path}`);
+      else if (!result.cancelled) alert('Export failed.');
+    } catch (err) {
+      panel.destroy();
+      alert(`Export failed: ${err.message}`);
+    } finally {
+      unsubscribe();
+      updateExportBtn();
+    }
+  });
+
+  deleteSelectedBtn.addEventListener('click', async () => {
+    const count = selected.size;
+    if (!confirm(`Delete ${count} selected recipe${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    deleteSelectedBtn.disabled = true;
+    deleteSelectedBtn.textContent = 'Deleting…';
+    try {
+      for (const id of selected) await ns.api.del(id);
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`);
+    }
+    renderRecipeGeneratorTabs(main, ns);
+  });
+
+  searchInput.addEventListener('input', renderFiltered);
+  updateExportBtn();
+  renderFiltered();
+}
+
+// Recipe Generator's own recipe-level aggregator, mirroring updateNetWeightSum's role but with
+// TWO recipe-level numbers instead of one, now that drafts carry Waste % (see the parity
+// migration): a combined pre-waste "Total Quantity" (rg-total-qty, EDITABLE -- see
+// wireGeneratedTotalQuantityRescale) and a combined post-waste "Net Weight" (rg-yield, always
+// read-only/computed, same as everywhere else in the app). Per-process math is NOT
+// reimplemented here -- updateProcessNetWeight is the exact shared helper Book/Extractor's own
+// updateNetWeightSum calls, reused unmodified because this form's process-card markup uses the
+// same ep-total-*/ep-yield-*/ep-trays-* DOM id convention (see renderProcessCards below).
+function updateGeneratedNetWeightSum(s) {
+  let combinedTotal = 0;
+  let combinedNet = 0;
+  s.processes.forEach(proc => {
+    combinedTotal += sumIngredientQuantities(proc.ingredientRows);
+    combinedNet += updateProcessNetWeight(proc);
+  });
+
+  const totalEl = document.getElementById('rg-total-qty');
+  // Never overwrite while she's actively typing in it -- direction #2 (an ingredient changed)
+  // should recompute this field live, but not fight her own edit to this exact field mid-keystroke
+  // (direction #1's own 'change' handler applies the rescale once she moves away/hits Enter).
+  if (totalEl && document.activeElement !== totalEl) totalEl.value = roundNice(combinedTotal);
+
+  const yieldEl = document.getElementById('rg-yield');
+  // Same guard as rg-total-qty above -- rg-yield is now also editable (see
+  // wireGeneratedNetWeightRescale).
+  if (yieldEl && document.activeElement !== yieldEl) yieldEl.value = `${roundNice(combinedNet)} G`;
+
+  const portionsEl = document.getElementById('rg-portions-produced');
+  if (portionsEl) {
+    const portionWeightInput = document.getElementById('rg-portion-weight');
+    const pw = portionWeightInput ? parseFloat(portionWeightInput.value) : NaN;
+    portionsEl.textContent = (!isNaN(pw) && pw > 0) ? String(Math.floor(roundNice(combinedNet) / pw)) : '–';
+  }
+}
+
+// Part 1, direction #1 -- editing the recipe-level Total Quantity field directly proportionally
+// rescales EVERY ingredient in EVERY process by one shared multiplier, matching Calculator's own
+// DEFAULT "scale all processes together" mode (not its opt-in independent-per-process mode,
+// which stays a Calculator-only capability post-confirmation -- confirmed with the chef). Reuses
+// computeMultiplierFromTarget/scaleIngredients UNCHANGED -- same formula Calculator's "scale to
+// target quantity" mode already uses, not reimplemented here. Fires on 'change' (blur/Enter), not
+// per-keystroke, so a partially-typed number never triggers a rescale mid-edit.
+function wireGeneratedTotalQuantityRescale(s, renderProcessCards) {
+  const input = document.getElementById('rg-total-qty');
+  input.addEventListener('change', () => {
+    const allRows = s.processes.flatMap(p => p.ingredientRows);
+    const result = computeMultiplierFromTarget(allRows, input.value);
+    if (result.error) {
+      alert(result.error);
+      updateGeneratedNetWeightSum(s); // revert the displayed value back to the real current total
+      return;
+    }
+    s.processes.forEach(proc => {
+      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+    });
+    renderProcessCards();
+  });
+}
+
+// LEVEL 2, Net Weight -- Recipe Generator's counterpart to Book/Extractor's own recipe-level
+// Net Weight rescale (identical mechanism): back-solve one recipe-level target Total Quantity
+// through the CURRENT implied aggregate retention factor, then rescale every process uniformly
+// by the resulting multiplier -- same as wireGeneratedTotalQuantityRescale above, just entered
+// from the Net Weight side.
+function wireGeneratedNetWeightRescale(s, renderProcessCards) {
+  const input = document.getElementById('rg-yield');
+  input.addEventListener('change', () => {
+    const combinedTotal = s.processes.reduce((acc, proc) => acc + sumIngredientQuantities(proc.ingredientRows), 0);
+    const combinedNet = s.processes.reduce((acc, proc) => acc + compoundWasteYield(sumIngredientQuantities(proc.ingredientRows), proc.wastes), 0);
+    const impliedRetention = combinedTotal > 0 ? combinedNet / combinedTotal : 0;
+    const backSolve = computeTargetTotalQuantityFromNetWeight(impliedRetention, input.value);
+    if (backSolve.error) {
+      alert(backSolve.error);
+      updateGeneratedNetWeightSum(s);
+      return;
+    }
+    const allRows = s.processes.flatMap(p => p.ingredientRows);
+    const result = computeMultiplierFromTarget(allRows, backSolve.targetTotalQuantity);
+    if (result.error) {
+      alert(result.error);
+      updateGeneratedNetWeightSum(s);
+      return;
+    }
+    s.processes.forEach(proc => {
+      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+    });
+    renderProcessCards();
+  });
+}
+
+// Recipe Generator's own lightweight sibling of renderProcessIngredientRows -- plain text name
+// input, no autocomplete/catalog matching at all: an ingredient row here is pure free text,
+// never linked to any ingredient catalog, ever, even after confirmation (see the migration's
+// own comment) -- same "throwaway free text" row shape as Recipe Calculator's own inline rows,
+// just without that function's dual quantity-column scaling machinery (nothing here is ever
+// scaled in place -- scaling to ~100g happens once, server-side, right after generation; see
+// lib/recipeGenerator.js's normalizeProcessesToGrams). Reuses wireProcessIngredientRowDrag
+// UNCHANGED for drag-and-drop reordering, same as renderProcessIngredientRows does.
+function renderGeneratedIngredientRows(process, tbodyEl, onChange) {
+  tbodyEl.innerHTML = process.ingredientRows.map(row => `
+    <tr data-row="${row.localId}">
+      <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
+      <td><input class="rg-ing-name" value="${row.name}" dir="auto" /></td>
+      <td><input class="rg-ing-qty" value="${row.quantity}" /></td>
+      <td><input class="rg-ing-unit" value="${row.unit}" /></td>
+      <td><input class="rg-ing-method" value="${row.method}" dir="auto" /></td>
+      <td style="text-align:right">
+        <button type="button" class="icon-btn danger" data-row-remove="${row.localId}">Remove</button>
+      </td>
+    </tr>
+  `).join('');
+
+  process.ingredientRows.forEach(row => {
+    const tr = tbodyEl.querySelector(`tr[data-row="${row.localId}"]`);
+    tr.querySelector('.rg-ing-name').addEventListener('input', (e) => { row.name = e.target.value; });
+    tr.querySelector('.rg-ing-qty').addEventListener('input', (e) => { row.quantity = e.target.value; onChange(); });
+    tr.querySelector('.rg-ing-unit').addEventListener('input', (e) => { row.unit = e.target.value; });
+    tr.querySelector('.rg-ing-method').addEventListener('input', (e) => { row.method = e.target.value; });
+  });
+
+  tbodyEl.querySelectorAll('[data-row-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.rowRemove, 10);
+      process.ingredientRows = process.ingredientRows.filter(r => r.localId !== id);
+      if (process.ingredientRows.length === 0) process.ingredientRows.push(makeEmptyIngredientRow());
+      renderGeneratedIngredientRows(process, tbodyEl, onChange);
+    });
+  });
+
+  wireProcessIngredientRowDrag(process, tbodyEl, () => renderGeneratedIngredientRows(process, tbodyEl, onChange));
+  onChange();
+}
+
+// The Drafts/Generated tabs' shared "open a row" destination (ns.openEdit) -- reviewing a
+// not-yet-confirmed draft and editing an already-confirmed recipe are the same form, just with a
+// different save-button combo at the bottom (Save Draft + Confirm & Save vs plain Save Changes),
+// since a confirmed recipe's code/status never move once assigned.
+async function renderGeneratedRecipeFormView(main, ns) {
+  const s = state[ns.stateKey];
+  // Fetched once per form open, same convention renderRecipeFormView uses -- backs every
+  // process card's "+ Add Waste" control (Material/Tray's own catalog fetch, `listMaterials`,
+  // is deliberately NOT here -- see the parity migration's own comment on why Material/Tray
+  // stays excluded for a 100g reference recipe).
+  const wasteTypes = await window.api.listWasteTypes();
+
+  const recipe = await ns.api.get(s.formId);
+  if (!recipe) {
+    alert('This recipe was deleted or changed elsewhere.');
+    goBackToRecipeList(ns);
+    return;
+  }
+  let existingPhotoDataUrl = null;
+  if (recipe.photo_path) existingPhotoDataUrl = await ns.api.getPhoto(recipe.photo_path);
+  if (s.processes.length === 0) {
+    s.processes = recipe.processes.length > 0 ? recipe.processes.map(buildProcessFromSaved) : [makeEmptyProcess()];
+  }
+
+  initTextListField(s, TEXT_LIST_FIELDS.generatedPresentation, recipe.presentation_serving);
+
+  const isDraft = recipe.status === 'draft';
+  const currentPhotoSrc = s.pendingPhoto
+    ? s.pendingPhoto.dataUrl
+    : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>${isDraft ? 'Review Generated Recipe' : 'Edit Generated Recipe'}</h1>
+        <span class="section-pill">${recipe.code ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
+      </div>
+      <button class="secondary" id="rg-back-btn">${ns.backLabel}</button>
+    </div>
+    ${isDraft ? `<div style="color:var(--neutral); font-size:12.5px; margin:-10px 0 14px;">Generated from "${recipe.source_menu_label}" -- source dish: "${recipe.source_dish_name}". Review and edit below, then Confirm &amp; Save to assign an RG- code.</div>` : ''}
+
+    <div class="generate-controls">
+      <div class="field"><label>Recipe Name</label><input id="rg-name" value="${recipe.name || ''}" dir="auto" /></div>
+      <div class="field"><label>Quantity Produced</label><input id="rg-qty" value="${recipe.quantity_produced || ''}" dir="auto" /></div>
+      <div class="field"><label>Portion Weight (g)</label><input id="rg-portion-weight" type="number" min="0" step="0.1" value="${recipe.portion_weight_grams ?? ''}" /></div>
+      <div class="field"><label>Prepared By</label><input id="rg-prepared-by" value="${recipe.prepared_by || ''}" dir="auto" /></div>
+      <div class="field"><label>Category</label><input id="rg-category" value="${recipe.category || ''}" dir="auto" /></div>
+      <div class="field"><label>Country/Origin</label><input id="rg-country" value="${recipe.country_origin || ''}" dir="auto" /></div>
+      <div class="field"><label>Total Quantity (g)</label><input id="rg-total-qty" value="${recipe.yield_notes || ''}" /></div>
+      <div class="field"><label>Net Weight (sum of processes)</label><input id="rg-yield" value="${recipe.yield_notes || ''}" /></div>
+      <div class="field"><label>Portions Produced</label><div class="computed-value-box" id="rg-portions-produced">–</div></div>
+      <div class="field"><label>Date</label><input id="rg-date" type="date" value="${recipe.date_created || ''}" /></div>
+    </div>
+
+    <h3 style="margin-bottom:10px;">Processes</h3>
+    <div id="rg-process-list"></div>
+    <button class="secondary" id="rg-add-process-btn" style="margin:10px 0 24px;">+ Add Process</button>
+
+    <div class="field" style="margin-bottom:16px;">
+      <label>Presentation / Decoration / Serving</label>
+      <div id="rg-presentation-field"></div>
+    </div>
+    <div class="field" style="margin-bottom:16px;">
+      <label>Comment</label>
+      <textarea id="rg-comment" rows="3" dir="auto">${recipe.comment || ''}</textarea>
+    </div>
+    <div class="field" style="margin-bottom:16px; max-width:320px;">
+      <label>Upload Photo</label>
+      <input type="file" id="rg-photo-input" accept="image/jpeg,image/png" />
+      <div id="rg-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
+        <img id="rg-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <button type="button" class="secondary" id="rg-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:20px; max-width:320px;">
+      <label>Checked By</label>
+      <input id="rg-checked-by" value="${recipe.checked_by || ''}" dir="auto" />
+    </div>
+
+    <button class="primary" id="rg-save-draft-btn">${isDraft ? 'Save Draft' : 'Save Changes'}</button>
+    ${isDraft ? `<button class="primary" id="rg-confirm-btn" style="margin-left:10px;">Confirm &amp; Save</button>` : ''}
+    <span id="rg-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
+  `;
+
+  function updatePhotoPreview() {
+    const src = s.pendingPhoto
+      ? s.pendingPhoto.dataUrl
+      : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
+    document.getElementById('rg-photo-preview-wrap').style.display = src ? '' : 'none';
+    document.getElementById('rg-photo-preview').src = src || '';
+  }
+
+  document.getElementById('rg-photo-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png'].includes(file.type)) {
+      alert('Please choose a JPG or PNG image.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Photo must be 5MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(',')[1];
+      const ext = file.type === 'image/png' ? 'png' : 'jpeg';
+      s.pendingPhoto = { dataUrl, base64, ext };
+      s.removePhoto = false;
+      updatePhotoPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById('rg-photo-remove-btn').addEventListener('click', () => {
+    s.pendingPhoto = null;
+    s.removePhoto = true;
+    document.getElementById('rg-photo-input').value = '';
+    updatePhotoPreview();
+  });
+
+  function renderProcessCards() {
+    const container = document.getElementById('rg-process-list');
+    container.innerHTML = s.processes.map((proc, idx) => `
+      <div class="process-card" data-process="${proc.localId}">
+        <div class="process-card-head">
+          <input class="process-name-input" value="${proc.name}" dir="auto" />
+          <button type="button" class="icon-btn" data-move-process-up="${proc.localId}" title="Move process up" aria-label="Move process up" ${idx === 0 ? 'disabled' : ''}>▲</button>
+          <button type="button" class="icon-btn" data-move-process-down="${proc.localId}" title="Move process down" aria-label="Move process down" ${idx === s.processes.length - 1 ? 'disabled' : ''}>▼</button>
+          <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${s.processes.length <= 1 ? 'disabled' : ''}>Remove Process</button>
+        </div>
+        <table class="recipe-ingredients-table">
+          <thead><tr><th></th><th>Ingredient</th><th>Quantity</th><th>Unit</th><th>Note</th><th></th></tr></thead>
+          <tbody class="process-ing-rows"></tbody>
+        </table>
+        <button type="button" class="secondary process-add-row-btn" style="margin:8px 0 16px;">+ Add Ingredient Row</button>
+        <div class="field" style="max-width:220px; margin-bottom:14px;">
+          <label>Total Quantity</label>
+          <input id="ep-total-${proc.localId}" readonly />
+        </div>
+        <div class="field" style="margin-bottom:14px;">
+          <label>Wastes Applied</label>
+          <div class="process-waste-rows" id="ep-wastes-${proc.localId}"></div>
+          <select class="builder-select process-add-waste-select" data-add-waste="${proc.localId}" style="margin-top:6px; max-width:240px;">
+            <option value="">+ Add Waste…</option>
+          </select>
+          <div id="ep-new-waste-${proc.localId}"></div>
+        </div>
+        <div class="field" style="max-width:220px; margin-bottom:14px;">
+          <label>Net Weight</label>
+          <input id="ep-yield-${proc.localId}" />
+        </div>
+        <div class="field" style="margin-bottom:8px;">
+          <label>Method</label>
+          <div id="${makeProcessMethodCfg(proc).mountId}"></div>
+        </div>
+      </div>
+    `).join('');
+
+    s.processes.forEach(proc => {
+      const card = container.querySelector(`[data-process="${proc.localId}"]`);
+
+      const nameInput = card.querySelector('.process-name-input');
+      nameInput.addEventListener('input', () => { proc.name = nameInput.value; });
+
+      card.querySelector('[data-remove-process]').addEventListener('click', () => {
+        s.processes = s.processes.filter(p => p.localId !== proc.localId);
+        if (s.processes.length === 0) s.processes.push(makeEmptyProcess());
+        renderProcessCards();
+      });
+
+      const moveUpBtn = card.querySelector('[data-move-process-up]');
+      const moveDownBtn = card.querySelector('[data-move-process-down]');
+      moveUpBtn.addEventListener('click', () => {
+        const i = s.processes.findIndex(p => p.localId === proc.localId);
+        if (i <= 0) return;
+        [s.processes[i - 1], s.processes[i]] = [s.processes[i], s.processes[i - 1]];
+        renderProcessCards();
+      });
+      moveDownBtn.addEventListener('click', () => {
+        const i = s.processes.findIndex(p => p.localId === proc.localId);
+        if (i === -1 || i >= s.processes.length - 1) return;
+        [s.processes[i], s.processes[i + 1]] = [s.processes[i + 1], s.processes[i]];
+        renderProcessCards();
+      });
+
+      const tbody = card.querySelector('.process-ing-rows');
+      const onIngredientChange = () => updateGeneratedNetWeightSum(s);
+      renderGeneratedIngredientRows(proc, tbody, onIngredientChange);
+
+      card.querySelector('.process-add-row-btn').addEventListener('click', () => {
+        proc.ingredientRows.push(makeEmptyIngredientRow());
+        renderGeneratedIngredientRows(proc, tbody, onIngredientChange);
+      });
+
+      // LEVEL 1, Net Weight -- same mechanism as Book/Extractor's own per-process Net Weight
+      // field (see the identical wiring in renderRecipeFormView): back-solve this process's own
+      // target Total Quantity through its current waste %, then the same
+      // computeMultiplierFromTarget/scaleIngredients cascade Total Quantity editing already
+      // uses. This process's OWN Total Quantity field stays read-only/display-only here (never
+      // made directly editable for Generator drafts, per the earlier Total Quantity round) --
+      // only this Net Weight field is a new interactive entry point into the same rescale.
+      card.querySelector(`#ep-yield-${proc.localId}`).addEventListener('change', (e) => {
+        const backSolve = computeTargetTotalQuantityFromNetWeight(processRetentionFactor(proc.wastes), e.target.value);
+        if (backSolve.error) {
+          alert(backSolve.error);
+          updateGeneratedNetWeightSum(s);
+          return;
+        }
+        const result = computeMultiplierFromTarget(proc.ingredientRows, backSolve.targetTotalQuantity);
+        if (result.error) {
+          alert(result.error);
+          updateGeneratedNetWeightSum(s);
+          return;
+        }
+        proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+        renderGeneratedIngredientRows(proc, tbody, onIngredientChange);
+      });
+
+      renderProcessWastes(proc, wasteTypes, onIngredientChange);
+      renderTextListFieldBody(proc, makeProcessMethodCfg(proc));
+    });
+
+    updateGeneratedNetWeightSum(s);
+  }
+
+  document.getElementById('rg-back-btn').addEventListener('click', () => goBackToRecipeList(ns));
+  document.getElementById('rg-add-process-btn').addEventListener('click', () => {
+    s.processes.push(makeEmptyProcess());
+    renderProcessCards();
+  });
+  document.getElementById('rg-save-draft-btn').addEventListener('click', () => saveGeneratedRecipeForm(ns, { confirm: false }));
+  if (isDraft) {
+    document.getElementById('rg-confirm-btn').addEventListener('click', () => saveGeneratedRecipeForm(ns, { confirm: true }));
+  }
+  // Portions Produced depends on this field but isn't stored on the process rows themselves --
+  // same reasoning as the shared form's own rf-portion-weight listener.
+  document.getElementById('rg-portion-weight').addEventListener('input', () => updateGeneratedNetWeightSum(s));
+  wireGeneratedTotalQuantityRescale(s, renderProcessCards);
+  wireGeneratedNetWeightRescale(s, renderProcessCards);
+
+  renderProcessCards();
+  renderTextListFieldBody(s, { ...TEXT_LIST_FIELDS.generatedPresentation, dirAuto: true });
+}
+
+async function saveGeneratedRecipeForm(ns, { confirm }) {
+  const s = state[ns.stateKey];
+  const name = document.getElementById('rg-name').value.trim();
+  if (!name) return alert('Please enter a recipe name.');
+
+  const statusEl = document.getElementById('rg-status');
+  statusEl.textContent = confirm ? 'Confirming…' : 'Saving…';
+
+  const payload = {
+    id: s.formId,
+    name,
+    quantityProduced: document.getElementById('rg-qty').value.trim(),
+    // Numeric, parsed here rather than left as a string -- same convention saveProcessRecipeForm
+    // uses for this exact field.
+    portionWeightGrams: (() => {
+      const raw = document.getElementById('rg-portion-weight').value.trim();
+      return raw === '' ? null : parseFloat(raw);
+    })(),
+    preparedBy: document.getElementById('rg-prepared-by').value.trim(),
+    category: document.getElementById('rg-category').value.trim(),
+    countryOrigin: document.getElementById('rg-country').value.trim(),
+    yieldNotes: document.getElementById('rg-yield').value.trim(),
+    dateCreated: document.getElementById('rg-date').value,
+    presentationServing: collectTextListFieldValue(s, TEXT_LIST_FIELDS.generatedPresentation),
+    comment: document.getElementById('rg-comment').value,
+    checkedBy: document.getElementById('rg-checked-by').value.trim(),
+    confirm: !!confirm,
+    processes: s.processes.map(proc => ({
+      name: proc.name.trim(),
+      method: collectTextListFieldValue(proc, makeProcessMethodCfg(proc)),
+      wastes: proc.wastes.map(w => {
+        const pct = parseFloat(w.percent);
+        return { wasteTypeId: w.wasteTypeId, percent: isNaN(pct) ? 0 : pct };
+      }),
+      ingredients: proc.ingredientRows
+        .filter(r => r.name.trim() !== '')
+        .map(r => ({
+          name: r.name.trim(),
+          quantity: r.quantity ? parseFloat(r.quantity) : null,
+          unit: r.unit || null,
+          method: r.method || null,
+        })),
+    })),
+  };
+
+  if (s.pendingPhoto) {
+    payload.photoBase64 = s.pendingPhoto.base64;
+    payload.photoExt = s.pendingPhoto.ext;
+  } else if (s.removePhoto) {
+    payload.removePhoto = true;
+  }
+
+  try {
+    const result = await ns.api.save(payload);
+    // A successful confirm moves this recipe off the Drafts tab (it's no longer status='draft')
+    // -- switch to Recipe Generated so she lands right on the tab that now shows it, instead of
+    // back on a Drafts list it just disappeared from.
+    if (confirm && result.status === 'confirmed') s.activeTab = 'generated';
     goBackToRecipeList(ns);
   } catch (err) {
     statusEl.textContent = '';
@@ -3637,6 +4651,7 @@ function renderCalculatorView(main) {
         <div class="mode-toggle">
           <button type="button" class="mode-toggle-btn active" data-source="book">Recipe Book</button>
           <button type="button" class="mode-toggle-btn" data-source="extractor">Recipe Extractor</button>
+          <button type="button" class="mode-toggle-btn" data-source="generated">Recipe Generator</button>
         </div>
       </div>
       <div class="field" style="min-width:260px;">
@@ -3787,7 +4802,9 @@ function renderCalculatorView(main) {
   let browseListShowing = false;
 
   function currentNs() {
-    return source === 'book' ? RECIPE_NS.book : RECIPE_NS.extractor;
+    if (source === 'book') return RECIPE_NS.book;
+    if (source === 'extractor') return RECIPE_NS.extractor;
+    return RECIPE_NS.generated;
   }
 
   function allProcesses() {

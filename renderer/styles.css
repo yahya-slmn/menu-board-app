@@ -588,6 +588,33 @@ table.materials-table td.cat-cell {
 .recipes-table th:nth-child(5), .recipes-table td:nth-child(5) { width: 130px; }
 .recipes-table th:nth-child(6), .recipes-table td:nth-child(6) { width: 100px; }
 .recipes-table th:nth-child(7), .recipes-table td:nth-child(7) { width: 150px; }
+
+/* Recipe Generator's Drafts table (Dish, Category, Source Menu, Generated, actions) and its
+   confirmed "Recipe Generated" table (checkbox, Code, Name, Category, Date, actions) -- both
+   reuse .recipes-table's base cell styling (padding/border/font) via the shared class, but need
+   their OWN column widths: neither matches Book/Extractor's 7-column tuning above (checkbox is
+   column 1 there; here Dish Name is column 1 in Drafts, or Name is column 3 in Generated but the
+   overall column count/order still differs), so reusing those nth-child rules unmodified forced
+   the Dish Name column into a 32px width meant for a checkbox -- the actual cause of wrapped
+   dish names visually overlapping the Category column next to them. Category gets explicit left
+   padding on top of the table's own cell padding so a wrapped, multi-line dish name never reads
+   as touching it. Row height grows naturally to fit wrapped text (default table row behavior,
+   same as Book/Extractor's own Name column above -- nothing extra needed for that part). */
+.rg-drafts-table { table-layout: fixed; min-width: 700px; }
+.rg-drafts-table th:nth-child(1), .rg-drafts-table td:nth-child(1) { width: 34%; word-break: break-word; }
+.rg-drafts-table th:nth-child(2), .rg-drafts-table td:nth-child(2) { width: 140px; padding-left: 24px; }
+.rg-drafts-table th:nth-child(3), .rg-drafts-table td:nth-child(3) { width: 220px; word-break: break-word; }
+.rg-drafts-table th:nth-child(4), .rg-drafts-table td:nth-child(4) { width: 110px; }
+.rg-drafts-table th:nth-child(5), .rg-drafts-table td:nth-child(5) { width: 150px; }
+
+.rg-generated-table { table-layout: fixed; min-width: 700px; }
+.rg-generated-table th:nth-child(1), .rg-generated-table td:nth-child(1) { width: 32px; }
+.rg-generated-table th:nth-child(2), .rg-generated-table td:nth-child(2) { width: 90px; }
+.rg-generated-table th:nth-child(3), .rg-generated-table td:nth-child(3) { word-break: break-word; }
+.rg-generated-table th:nth-child(4), .rg-generated-table td:nth-child(4) { width: 150px; padding-left: 24px; }
+.rg-generated-table th:nth-child(5), .rg-generated-table td:nth-child(5) { width: 110px; }
+.rg-generated-table th:nth-child(6), .rg-generated-table td:nth-child(6) { width: 150px; }
+
 .recipe-ingredients-table input {
   width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 12.5px;
 }
@@ -764,3 +791,24 @@ table.materials-table td.cat-cell {
 
 .empty-state { text-align: center; padding: 60px 20px; color: var(--neutral); }
 .empty-state .display { font-size: 20px; margin-bottom: 8px; color: var(--ink); }
+
+/* Menu Ingredients Generator's pre-upload empty state -- .empty-state's usual centered
+   heading+sentence convention (above), extended with a 3-step visual guide and its own
+   prominent upload CTA, since this screen is otherwise bare until a file's uploaded and
+   processed. See renderMenuIngredientsView. */
+.mi-empty-state { padding-top: 48px; }
+.mi-empty-tagline { max-width: 480px; margin: 0 auto 32px; font-size: 13.5px; line-height: 1.5; }
+.mi-steps {
+  display: flex; justify-content: center; gap: 18px; flex-wrap: wrap; margin: 0 auto 32px; max-width: 780px;
+}
+.mi-step {
+  background: white; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 18px 20px; width: 220px; text-align: left;
+}
+.mi-step-num {
+  display: flex; align-items: center; justify-content: center; width: 26px; height: 26px;
+  border-radius: 50%; background: var(--sage); color: white; font-size: 13px; font-weight: 600;
+  margin-bottom: 10px;
+}
+.mi-step-title { font-weight: 600; font-size: 13.5px; margin-bottom: 4px; color: var(--ink); }
+.mi-step-desc { font-size: 12.5px; color: var(--neutral); line-height: 1.4; }

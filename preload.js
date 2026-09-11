@@ -100,6 +100,23 @@ contextBridge.exposeInMainWorld('api', {
   },
   extractRecipeForExtractor: (payload) => ipcRenderer.invoke('extract-recipe-for-extractor', payload),
 
+  parseAndGenerateRecipes: (payload) => ipcRenderer.invoke('parse-and-generate-recipes', payload),
+  onRecipeGeneratorProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('recipe-generator-progress', listener);
+    return () => ipcRenderer.removeListener('recipe-generator-progress', listener);
+  },
+  listGeneratedRecipeDrafts: () => ipcRenderer.invoke('list-generated-recipe-drafts'),
+  listGeneratedRecipes: () => ipcRenderer.invoke('list-generated-recipes'),
+  searchGeneratedRecipes: (query) => ipcRenderer.invoke('search-generated-recipes', query),
+  getGeneratedRecipe: (id) => ipcRenderer.invoke('get-generated-recipe', id),
+  getGeneratedRecipePhoto: (photoPath) => ipcRenderer.invoke('get-generated-recipe-photo', photoPath),
+  saveGeneratedRecipe: (payload) => ipcRenderer.invoke('save-generated-recipe', payload),
+  deleteGeneratedRecipe: (id) => ipcRenderer.invoke('delete-generated-recipe', id),
+  previewGeneratedRecipe: (id) => ipcRenderer.invoke('preview-generated-recipe', id),
+  exportGeneratedRecipes: (payload) => ipcRenderer.invoke('export-generated-recipes', payload),
+  exportScaledGeneratedRecipe: (payload) => ipcRenderer.invoke('export-scaled-generated-recipe', payload),
+
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),
   listGeneratedMenus: () => ipcRenderer.invoke('list-generated-menus'),
   getLatestGeneratedMenu: (sectionCode) => ipcRenderer.invoke('get-latest-generated-menu', sectionCode),

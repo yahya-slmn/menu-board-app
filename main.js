@@ -22,8 +22,10 @@ const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
-const { filterNutIngredients } = require('./lib/nutFilter');
+const { filterNutIngredients, matchNutTerms } = require('./lib/nutFilter');
 const { loadWorkbookFromBuffer, parseWorkbookDishes, appendIngredientsColumn } = require('./lib/menuIngredients');
+const { generateDishRecipes } = require('./lib/generateDishRecipes');
+const { matchesGeneratorCategory, normalizeProcessesToGrams } = require('./lib/recipeGenerator');
 
 let mainWindow;
 let loginWindow;
@@ -1108,22 +1110,28 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
     } catch (err) {
       return { written: new Map(), missing: batchNames, error: err.message, removedByName: new Map() };
     }
-    const byIndex = new Map(estimates.map(est => [est.index, est.ingredients]));
+    const byIndex = new Map(estimates.map(est => [est.index, est]));
     const written = new Map();
     const missing = [];
     // Mandatory nut-policy safety net (Misk school-wide restriction) -- runs on EVERY suggestion
     // regardless of how well the prompt/system instruction in suggest-dish-ingredients/index.ts
     // was followed, since an LLM instruction is never a hard guarantee on its own. See
-    // lib/nutFilter.js for the full blocklist/false-positive reasoning. Never applied to Recipe
-    // Extractor (extract-recipe) -- that transcribes a REAL recipe, so stripping a genuine nut
-    // mention there would hide a true ingredient rather than block a fabricated one.
+    // lib/nutFilter.js for the full blocklist/false-positive reasoning. Applied to BOTH the
+    // ingredients string and the allergens string (same reasoning as ALLERGEN_RULE's own comment
+    // in index.ts -- "nut" must never surface as a flagged allergen either, even if a stray one
+    // slips past the prompt). Never applied to Recipe Extractor (extract-recipe) -- that
+    // transcribes a REAL recipe, so stripping a genuine nut mention there would hide a true
+    // ingredient rather than block a fabricated one.
     const removedByName = new Map();
     batchNames.forEach((name, idx) => {
-      const raw = byIndex.get(idx);
-      if (!raw) { missing.push(name); return; }
-      const { cleaned, removed } = filterNutIngredients(raw);
-      written.set(name, cleaned);
-      if (removed.length) removedByName.set(name, removed);
+      const est = byIndex.get(idx);
+      if (!est) { missing.push(name); return; }
+      const ingredientsFilter = filterNutIngredients(est.ingredients);
+      const allergensFilter = filterNutIngredients(est.allergens);
+      written.set(name, { ingredients: ingredientsFilter.cleaned, allergens: allergensFilter.cleaned });
+      if (ingredientsFilter.removed.length || allergensFilter.removed.length) {
+        removedByName.set(name, { ingredients: ingredientsFilter.removed, allergens: allergensFilter.removed });
+      }
     });
     return { written, missing, error: null, removedByName };
   }
@@ -1135,7 +1143,9 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
   }
 
   const nameToIngredients = new Map();
+  const nameToAllergens = new Map();
   const nameToRemovedNutTerms = new Map();
+  const nameToRemovedAllergenNutTerms = new Map();
   const failures = [...loadWarnings, ...parseWarnings];
   const batches = chunk(uniqueNames, MENU_INGREDIENTS_BATCH_SIZE);
   miLog(`${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE} dishes each`);
@@ -1153,8 +1163,14 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
     });
     const result = await suggestBatch(batch);
     miLog(`batch ${b + 1}/${batches.length} FINISHED -- written=${result.written.size}, missing=${result.missing.length}, error=${result.error || 'none'}, nut-filtered=${result.removedByName.size}`);
-    for (const [name, value] of result.written) nameToIngredients.set(name, value);
-    for (const [name, removed] of result.removedByName) nameToRemovedNutTerms.set(name, removed);
+    for (const [name, value] of result.written) {
+      nameToIngredients.set(name, value.ingredients);
+      nameToAllergens.set(name, value.allergens);
+    }
+    for (const [name, removed] of result.removedByName) {
+      if (removed.ingredients.length) nameToRemovedNutTerms.set(name, removed.ingredients);
+      if (removed.allergens.length) nameToRemovedAllergenNutTerms.set(name, removed.allergens);
+    }
     if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
     if (result.missing.length) {
       // One retry pass, same convention as estimate-missing-calories/estimate-missing-am-snack-
@@ -1165,8 +1181,14 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
       miLog(`batch ${b + 1}/${batches.length} retrying ${result.missing.length} missing dish(es)`);
       const retry = await suggestBatch(result.missing);
       miLog(`batch ${b + 1}/${batches.length} retry FINISHED -- written=${retry.written.size}, still missing=${retry.missing.length}, nut-filtered=${retry.removedByName.size}`);
-      for (const [name, value] of retry.written) nameToIngredients.set(name, value);
-      for (const [name, removed] of retry.removedByName) nameToRemovedNutTerms.set(name, removed);
+      for (const [name, value] of retry.written) {
+        nameToIngredients.set(name, value.ingredients);
+        nameToAllergens.set(name, value.allergens);
+      }
+      for (const [name, removed] of retry.removedByName) {
+        if (removed.ingredients.length) nameToRemovedNutTerms.set(name, removed.ingredients);
+        if (removed.allergens.length) nameToRemovedAllergenNutTerms.set(name, removed.allergens);
+      }
       if (retry.missing.length) {
         failures.push(`${retry.missing.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${retry.missing.slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
       }
@@ -1186,10 +1208,14 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
   // exact dish name (e.g. ["toasted walnuts", "peanut butter"]) -- surfaced to the renderer so a
   // chef can see it per-row and manually re-add a specific term if they know their version is
   // actually nut-free, per the school's explicit instruction that this never happen silently.
+  // `removedAllergenNutTerms` is the same, but for the allergens column (e.g. a stray "nut" word
+  // the model wrote as an allergen despite ALLERGEN_RULE forbidding it).
   const annotatedRows = rows.map(r => ({
     ...r,
     ingredients: nameToIngredients.get(r.dishName) || '',
+    allergens: nameToAllergens.get(r.dishName) || '',
     removedNutTerms: (nameToRemovedNutTerms.get(r.dishName) || []).map((x) => x.segment),
+    removedAllergenNutTerms: (nameToRemovedAllergenNutTerms.get(r.dishName) || []).map((x) => x.segment),
   }));
   menuIngredientsWorkbook = workbook;
   menuIngredientsDishColumns = dishColumnBySheet;
@@ -1209,6 +1235,12 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
       dish: name, removed: removed.map((x) => `${x.segment} (${x.matchedLabels.join(', ')})`),
     }));
     log.warn(`[menu-ingredients] nut-policy filter removed ingredient(s) from ${nameToRemovedNutTerms.size} dish(es):`, detail);
+  }
+  if (nameToRemovedAllergenNutTerms.size) {
+    const detail = [...nameToRemovedAllergenNutTerms.entries()].map(([name, removed]) => ({
+      dish: name, removed: removed.map((x) => `${x.segment} (${x.matchedLabels.join(', ')})`),
+    }));
+    log.warn(`[menu-ingredients] nut-policy filter removed allergen tag(s) from ${nameToRemovedAllergenNutTerms.size} dish(es):`, detail);
   }
   miLog('handler RETURNING success=true');
   return { success: true, rows: annotatedRows, failures, uploadToken };
@@ -1245,6 +1277,679 @@ ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath, uploadToke
   miLog('appendIngredientsColumn() finished -- starting xlsx.writeFile()');
   await menuIngredientsWorkbook.xlsx.writeFile(savePath);
   miLog('writeFile() finished -- export handler RETURNING success=true');
+  return { success: true, path: savePath };
+});
+
+// ---------------------------------------------------------------
+// IPC: Recipe Generator -- AI-generates a full ~100g reference recipe per dish pulled from an
+// uploaded menu file, for dishes in the AM Snack/PM Snack/Soup/Appetizers/Main Course categories
+// only (see lib/recipeGenerator.js's matchesGeneratorCategory -- matched by category TEXT,
+// section-agnostic, per the chef's own instruction). Reuses the SAME parse pipeline as Menu
+// Ingredients Generator (lib/menuIngredients.js's loadWorkbookFromBuffer/parseWorkbookDishes),
+// but as its own independent upload action, not the same upload/trigger -- confirmed with the
+// chef (simpler state; one feature's slowness/failure never blocks the other).
+//
+// Unlike Menu Ingredients Generator (which holds the uploaded workbook in memory until she
+// exports it back out), every generated recipe is written straight to generated_recipes as a
+// draft row the moment it's generated -- the "must survive app restarts" draft requirement falls
+// out of that for free, nothing further needed to "persist" it. A superseded upload (a second
+// upload started before the first finished) is still guarded the same way Menu Ingredients
+// Generator guards its own race, just to avoid wasting further AI batches/wall-clock time on
+// results nobody will see -- not to prevent data loss, since each persisted draft is an
+// independent insert, never a shared clobberable object.
+// ---------------------------------------------------------------
+const RECIPE_GEN_BATCH_SIZE = 8;
+let recipeGenToken = null;
+
+// Resolves an AI-proposed waste (name/percent/matchedExisting, from generate-dish-recipes) to a
+// real waste_types id -- creating a new catalog row directly when genuinely nothing matches, no
+// chef interaction and no scoped-impact modal (there's nothing to reconcile yet: this is the
+// FIRST time this waste type exists at all, unlike a later manual edit to an existing row, which
+// still goes through the normal onWastePercentUpdateClicked flow in renderer.js exactly as
+// before). `wasteTypeCache` is a name(lowercased)->id Map, pre-seeded from the catalog fetched
+// once at the start of parse-and-generate-recipes and extended here as new types are created --
+// shared across the WHOLE upload (every dish in every batch), not just one call, so two dishes
+// independently proposing the same new name (e.g. two things both needing "Heating Waste") don't
+// create duplicate catalog rows.
+//
+// The defensive re-check against the real catalog (regardless of what the model claimed for
+// matchedExisting) mirrors save-extracted-recipe's own resolveIngredientId -- "a wrong silent
+// merge is worse than an extra click" there means never trusting the model's own judgment as the
+// final word when a cheap, authoritative exact-match check is available instead.
+async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
+  const trimmed = (name || '').trim();
+  const key = trimmed.toLowerCase();
+  if (wasteTypeCache.has(key)) return wasteTypeCache.get(key);
+
+  const { data: existing, error: findErr } = await supabase
+    .from('waste_types').select('id').ilike('name', trimmed).limit(1);
+  if (findErr) throw supaFail('resolveWasteTypeId: match waste_types', findErr);
+  if (existing && existing.length > 0) {
+    wasteTypeCache.set(key, existing[0].id);
+    return existing[0].id;
+  }
+
+  const { data: created, error: createErr } = await supabase
+    .from('waste_types').insert({ name: trimmed, default_percent: percent }).select('id').single();
+  if (createErr) throw supaFail('resolveWasteTypeId: create waste_types', createErr);
+  wasteTypeCache.set(key, created.id);
+  return created.id;
+}
+
+// Strips any nut-policy-violating ingredient row (same mandatory safety net every other
+// AI-suggested ingredient list in this app goes through -- see lib/nutFilter.js), normalizes
+// every ingredient's quantity to sum to ~100g (the "reference recipe" requirement -- see
+// normalizeProcessesToGrams's own comment on why this happens here, mathematically, rather than
+// being asked of the model directly), then writes the recipe/processes/ingredients/wastes as one
+// new draft row. `sourceMenuLabel`/`dish.name` back this recipe's traceability fields
+// (requirement 6). `wasteTypeCache` -- see resolveWasteTypeId above.
+async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTypeCache }) {
+  const processesRaw = (gen.processes && gen.processes.length > 0 ? gen.processes : [{ name: gen.name || dish.name, ingredients: [], method_steps: [], wastes: [] }])
+    .map((proc) => ({
+      name: proc.name || dish.name,
+      method: (proc.method_steps || []).join('\n'),
+      ingredients: (proc.ingredients || [])
+        .filter((ing) => matchNutTerms(ing.name).length === 0)
+        .map((ing) => ({ name: ing.name, quantity: ing.quantity, unit: ing.unit, method: ing.method })),
+      wastes: (proc.wastes || []).filter((w) => w.name && w.name.trim()),
+    }))
+    // A process that lost every ingredient to the nut filter and has no method either is dead
+    // weight -- drop it rather than save an empty process card she'd just have to delete herself.
+    .filter((proc) => proc.ingredients.length > 0 || proc.method);
+
+  const normalized = normalizeProcessesToGrams(processesRaw, 100);
+
+  const { data: inserted, error: insErr } = await supabase
+    .from('generated_recipes')
+    .insert({
+      status: 'draft',
+      name: gen.name || dish.name,
+      category: dish.category || null,
+      quantity_produced: '100 G',
+      date_created: new Date().toISOString().slice(0, 10),
+      source_menu_label: sourceMenuLabel,
+      source_dish_name: dish.name,
+      created_at: new Date().toISOString(),
+    })
+    .select('id')
+    .single();
+  if (insErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipes', insErr);
+  const recipeId = inserted.id;
+
+  for (let idx = 0; idx < normalized.length; idx++) {
+    const proc = normalized[idx];
+    const { data: insertedProc, error: procErr } = await supabase
+      .from('generated_recipe_processes')
+      .insert({ generated_recipe_id: recipeId, name: proc.name, method: proc.method || null, sort_order: idx })
+      .select('id')
+      .single();
+    if (procErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipe_processes', procErr);
+
+    const ingredientRows = proc.ingredients.map((ing, i) => ({
+      process_id: insertedProc.id,
+      name: ing.name,
+      quantity: ing.quantity ?? null,
+      unit: ing.unit || null,
+      method: ing.method || null,
+      sort_order: i,
+    }));
+    if (ingredientRows.length) {
+      const { error: ingErr } = await supabase.from('generated_recipe_ingredients').insert(ingredientRows);
+      if (ingErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipe_ingredients', ingErr);
+    }
+
+    const wasteRows = [];
+    for (let wIdx = 0; wIdx < proc.wastes.length; wIdx++) {
+      const w = proc.wastes[wIdx];
+      const pct = parseFloat(w.percent);
+      const safePct = isNaN(pct) ? 0 : pct;
+      const wasteTypeId = await resolveWasteTypeId({ name: w.name, percent: safePct }, wasteTypeCache);
+      wasteRows.push({ process_id: insertedProc.id, waste_type_id: wasteTypeId, percent: safePct, sort_order: wIdx });
+    }
+    if (wasteRows.length) {
+      const { error: wErr } = await supabase.from('generated_recipe_process_wastes').insert(wasteRows);
+      if (wErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipe_process_wastes', wErr);
+    }
+  }
+  return recipeId;
+}
+
+ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fileName }) => {
+  recipeGenToken = uploadToken;
+
+  e.sender.send('recipe-generator-progress', { message: 'Reading file…' });
+  const buffer = Buffer.from(base64, 'base64');
+  let workbook;
+  try {
+    ({ workbook } = await Promise.race([
+      loadWorkbookFromBuffer(buffer),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error(`Reading the file timed out after ${MENU_INGREDIENTS_PARSE_TIMEOUT_MS / 1000}s -- it may be corrupted or unusually large`)),
+        MENU_INGREDIENTS_PARSE_TIMEOUT_MS,
+      )),
+    ]));
+  } catch (err) {
+    return { success: false, error: `Couldn't read this file as an Excel workbook: ${err.message}` };
+  }
+  if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+
+  e.sender.send('recipe-generator-progress', { message: 'Parsing menu structure…' });
+  const { rows } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  if (rows.length === 0) {
+    return {
+      success: false,
+      error: "No recognizable menu rows found in this file. Make sure it's an export from Generate Menu, Build Menu, or Export All Sections.",
+    };
+  }
+  if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+
+  // Scoped to the 5 target categories (requirement 1, matched section-agnostically -- see
+  // matchesGeneratorCategory), then deduped by dish name -- a dish repeating across many days
+  // only needs one generated recipe, same dedup convention parse-and-suggest-menu-ingredients
+  // already uses. Keeps the FIRST category text seen for a given dish name (they should agree
+  // whenever the same dish repeats, but a real spreadsheet inconsistency shouldn't crash this).
+  const seen = new Map(); // dishName -> category
+  for (const r of rows) {
+    if (!matchesGeneratorCategory(r.category)) continue;
+    if (!seen.has(r.dishName)) seen.set(r.dishName, r.category);
+  }
+  const uniqueDishes = [...seen.entries()].map(([name, category]) => ({ name, category }));
+
+  if (uniqueDishes.length === 0) {
+    return { success: false, error: 'No dishes in the AM Snack, PM Snack, Soup, Appetizers, or Main Course categories were found in this file.' };
+  }
+
+  e.sender.send('recipe-generator-progress', {
+    message: `Found ${uniqueDishes.length} eligible dish(es) -- starting AI recipe generation…`,
+  });
+
+  // Fetched ONCE for the whole upload, not per batch -- the Edge Function has no DB access of
+  // its own (see generate-dish-recipes' header comment), so this is how it learns what already
+  // exists to match against. wasteTypeCache is pre-seeded from this same fetch and extended by
+  // resolveWasteTypeId as new types are created during this run, so it's shared across every
+  // dish in every batch (not reset per batch) -- two dishes independently proposing the same new
+  // waste name only ever create one new catalog row between them.
+  const { data: wasteTypesCatalog, error: wasteTypesErr } = await supabase.from('waste_types').select('id, name');
+  if (wasteTypesErr) throw supaFail('parse-and-generate-recipes: load waste_types', wasteTypesErr);
+  const existingWasteTypeNames = wasteTypesCatalog.map((w) => w.name);
+  const wasteTypeCache = new Map(wasteTypesCatalog.map((w) => [w.name.trim().toLowerCase(), w.id]));
+
+  function chunk(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  async function generateBatch(batchDishes) {
+    const payloadItems = batchDishes.map((d, idx) => ({ index: idx, name: d.name, category: d.category || undefined }));
+    let recipes;
+    try {
+      recipes = await generateDishRecipes({ items: payloadItems, existingWasteTypeNames });
+    } catch (err) {
+      return { created: [], missing: batchDishes, error: err.message };
+    }
+    const byIndex = new Map(recipes.map((r) => [r.index, r]));
+    const created = [];
+    const missing = [];
+    for (let idx = 0; idx < batchDishes.length; idx++) {
+      const dish = batchDishes[idx];
+      const gen = byIndex.get(idx);
+      if (!gen) { missing.push(dish); continue; }
+      created.push({ dish, gen });
+    }
+    return { created, missing, error: null };
+  }
+
+  const batches = chunk(uniqueDishes, RECIPE_GEN_BATCH_SIZE);
+  let createdCount = 0;
+  const failures = [];
+  for (let b = 0; b < batches.length; b++) {
+    if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+    const batch = batches[b];
+    e.sender.send('recipe-generator-progress', {
+      message: `Generating recipes: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length,
+    });
+    const result = await generateBatch(batch);
+    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
+    let toPersist = result.created;
+    if (result.missing.length) {
+      e.sender.send('recipe-generator-progress', { message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
+      const retry = await generateBatch(result.missing);
+      toPersist = [...toPersist, ...retry.created];
+      if (retry.missing.length) {
+        failures.push(`${retry.missing.length} dish(es) still missing a recipe after retry -- skipped: ${retry.missing.map((d) => d.name).slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
+      }
+    }
+
+    for (const { dish, gen } of toPersist) {
+      try {
+        await persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel: fileName, wasteTypeCache });
+        createdCount++;
+      } catch (err) {
+        failures.push(`"${dish.name}": ${err.message}`);
+      }
+    }
+  }
+
+  if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+
+  e.sender.send('recipe-generator-progress', {
+    message: `Done -- generated ${createdCount} of ${uniqueDishes.length} recipe(s).`, current: batches.length, total: batches.length,
+  });
+  if (failures.length) log.warn(`[recipe-generator] ${failures.length} warning(s) from this upload:`, failures);
+
+  return { success: true, createdCount, dishCount: uniqueDishes.length, failures };
+});
+
+async function fetchGeneratedRecipeWithProcesses(id) {
+  const { data: recipe, error: recipeErr } = await supabase.from('generated_recipes').select('*').eq('id', id).single();
+  if (recipeErr) {
+    if (recipeErr.code === 'PGRST116') return null;
+    throw supaFail('fetchGeneratedRecipeWithProcesses: load generated_recipes', recipeErr);
+  }
+
+  const { data: processRows, error: procErr } = await supabase
+    .from('generated_recipe_processes')
+    .select('id, name, method, sort_order')
+    .eq('generated_recipe_id', id)
+    .order('sort_order');
+  if (procErr) throw supaFail('fetchGeneratedRecipeWithProcesses: load generated_recipe_processes', procErr);
+
+  const processIds = processRows.map((p) => p.id);
+  let ingredientRows = [];
+  let wasteRows = [];
+  if (processIds.length) {
+    const { data, error: ingErr } = await supabase
+      .from('generated_recipe_ingredients')
+      .select('id, process_id, name, quantity, unit, method, sort_order')
+      .in('process_id', processIds)
+      .order('sort_order');
+    if (ingErr) throw supaFail('fetchGeneratedRecipeWithProcesses: load generated_recipe_ingredients', ingErr);
+    ingredientRows = data;
+
+    const { data: wasteData, error: wasteErr } = await supabase
+      .from('generated_recipe_process_wastes')
+      .select('id, process_id, waste_type_id, percent, sort_order')
+      .in('process_id', processIds)
+      .order('sort_order');
+    if (wasteErr) throw supaFail('fetchGeneratedRecipeWithProcesses: load generated_recipe_process_wastes', wasteErr);
+    wasteRows = wasteData;
+  }
+
+  // Two-step join against waste_types (name only, never embedded via PostgREST) -- same
+  // manual-Map convention fetchRecipeWithProcesses uses for its own wastes.
+  const wasteTypeIds = [...new Set(wasteRows.map((r) => r.waste_type_id))];
+  let wasteTypeById = new Map();
+  if (wasteTypeIds.length) {
+    const { data: wasteTypesData, error: wtErr } = await supabase
+      .from('waste_types').select('id, name').in('id', wasteTypeIds);
+    if (wtErr) throw supaFail('fetchGeneratedRecipeWithProcesses: load waste_types', wtErr);
+    wasteTypeById = new Map(wasteTypesData.map((w) => [w.id, w]));
+  }
+
+  const wastesByProcess = new Map();
+  for (const rw of wasteRows) {
+    const waste = {
+      id: rw.id,
+      waste_type_id: rw.waste_type_id,
+      name: wasteTypeById.get(rw.waste_type_id)?.name,
+      percent: rw.percent,
+      sort_order: rw.sort_order,
+    };
+    if (!wastesByProcess.has(rw.process_id)) wastesByProcess.set(rw.process_id, []);
+    wastesByProcess.get(rw.process_id).push(waste);
+  }
+
+  const ingredientsByProcess = new Map();
+  for (const ri of ingredientRows) {
+    // ingredient_id/ingredient_name/default_unit-shaped keys (not a bare `name`) are deliberate
+    // -- this object is consumed unmodified by renderer.js's buildProcessFromSaved (Recipe
+    // Book/Extractor's own process-shaping function, reused as-is for Calculator's third source
+    // -- see RECIPE_NS.generated) and by lib/export.js's buildRecipeContentModel, both of which
+    // read ingredient_id/ingredient_name regardless of which table they came from. ingredient_id
+    // is always null -- generated_recipe_ingredients has no such column at all (never linked to
+    // any ingredient catalog, ever -- see the migration's own header comment).
+    const ingredient = {
+      id: ri.id,
+      ingredient_id: null,
+      ingredient_name: ri.name,
+      quantity: ri.quantity,
+      unit: ri.unit,
+      method: ri.method,
+      sort_order: ri.sort_order,
+    };
+    if (!ingredientsByProcess.has(ri.process_id)) ingredientsByProcess.set(ri.process_id, []);
+    ingredientsByProcess.get(ri.process_id).push(ingredient);
+  }
+
+  const processes = processRows.map((p) => ({
+    id: p.id,
+    name: p.name,
+    method: p.method,
+    sort_order: p.sort_order,
+    ingredients: ingredientsByProcess.get(p.id) || [],
+    wastes: wastesByProcess.get(p.id) || [],
+    // No Material/Tray on generated recipes -- real-batch production equipment, meaningless for
+    // a 100g reference recipe (confirmed with the chef; deliberately excluded, see the parity
+    // migration's own comment). Always present as null, never `undefined`, since
+    // buildProcessFromSaved/buildRecipeContentModel read these fields regardless of source table.
+    material_id: null,
+    material_name: null,
+    material_code: null,
+    material_fill_weight_grams: null,
+  }));
+
+  return { ...recipe, processes };
+}
+
+ipcMain.handle('get-generated-recipe', async (e, id) => fetchGeneratedRecipeWithProcesses(id));
+
+ipcMain.handle('preview-generated-recipe', async (e, id) => {
+  const full = await fetchGeneratedRecipeWithProcesses(id);
+  const { processes, ...recipe } = full;
+  return buildRecipeContentModel(recipe, processes);
+});
+
+ipcMain.handle('list-generated-recipe-drafts', async () => {
+  const { data, error } = await supabase
+    .from('generated_recipes')
+    .select('id, name, category, source_menu_label, source_dish_name, created_at')
+    .eq('status', 'draft')
+    .order('created_at', { ascending: false });
+  if (error) throw supaFail('list-generated-recipe-drafts', error);
+  return data;
+});
+
+// RECIPE_NS.generated.api.list/search -- confirmed only, always. Drafts aren't scaling/export
+// ready (see Recipe Calculator's third-source integration), so they're deliberately invisible
+// to both the "Recipe Generated" list screen and Calculator's recipe picker; list-generated-
+// recipe-drafts above is the only way to see a draft, via its own Drafts tab.
+ipcMain.handle('list-generated-recipes', async () => {
+  const { data, error } = await supabase
+    .from('generated_recipes')
+    .select('id, code, name, category, prepared_by, date_created, quantity_produced')
+    .eq('status', 'confirmed')
+    .order('id', { ascending: false });
+  if (error) throw supaFail('list-generated-recipes', error);
+  return data;
+});
+
+ipcMain.handle('search-generated-recipes', async (e, query) => {
+  const q = (query || '').trim();
+  if (!q) return [];
+  const { data, error } = await supabase
+    .from('generated_recipes')
+    .select('id, code, name, category, quantity_produced')
+    .eq('status', 'confirmed')
+    .ilike('name', `%${q}%`)
+    .order('name')
+    .limit(25);
+  if (error) throw supaFail('search-generated-recipes', error);
+  return data;
+});
+
+// Mirrors nextRecipeCode/nextExtractedRecipeCode above, 'RG-' prefix, own table -- independent
+// counter, same "find the highest existing number and increment client-side" tradeoff those two
+// already accept (not race-proof against two simultaneous confirms, fine for a single-chef-team
+// desktop tool).
+async function nextGeneratedRecipeCode() {
+  const { data, error } = await supabase.from('generated_recipes').select('code').like('code', 'RG-%');
+  if (error) throw supaFail('nextGeneratedRecipeCode', error);
+  let max = 0;
+  for (const row of data) {
+    const n = parseInt(row.code.slice(3), 10);
+    if (!isNaN(n) && n > max) max = n;
+  }
+  return `RG-${String(max + 1).padStart(5, '0')}`;
+}
+
+// Single-photo model (mirrors RECIPE_PHOTOS_BUCKET/uploadRecipePhoto/deleteRecipePhoto exactly)
+// -- a generated recipe is a speculative, AI-written reference, not something extracted from a
+// real photographed card, so Book's single "here's an illustrative photo" model fits, not
+// Extractor's multi-page-scan gallery (which exists specifically to capture several photos of
+// one physical source document -- there's no such document here). Private bucket, same
+// authenticated-only access as every other table/bucket in this app.
+const GENERATED_RECIPE_PHOTOS_BUCKET = 'generated-recipe-photos';
+
+async function uploadGeneratedRecipePhoto(base64, ext) {
+  const path = `${crypto.randomUUID()}.${ext}`;
+  const buffer = Buffer.from(base64, 'base64');
+  const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+  const { error } = await supabase.storage.from(GENERATED_RECIPE_PHOTOS_BUCKET).upload(path, buffer, { contentType });
+  if (error) throw supaFail('uploadGeneratedRecipePhoto', error);
+  return path;
+}
+
+async function deleteGeneratedRecipePhoto(path) {
+  if (!path) return;
+  const { error } = await supabase.storage.from(GENERATED_RECIPE_PHOTOS_BUCKET).remove([path]);
+  if (error) console.error('[supabase] deleteGeneratedRecipePhoto failed (non-fatal):', error.message);
+}
+
+ipcMain.handle('get-generated-recipe-photo', async (e, photoPath) => {
+  if (!photoPath) return null;
+  const { data, error } = await supabase.storage.from(GENERATED_RECIPE_PHOTOS_BUCKET).download(photoPath);
+  if (error) throw supaFail('get-generated-recipe-photo', error);
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const ext = photoPath.split('.').pop().toLowerCase();
+  const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+  return `data:${mime};base64,${buffer.toString('base64')}`;
+});
+
+// Saves edits to an existing draft or confirmed generated recipe -- never creates one (generated
+// recipes only ever come from AI generation, see parse-and-generate-recipes). `payload.confirm:
+// true` additionally assigns the RG- code and flips draft -> confirmed in this SAME save, so
+// reviewing-and-confirming a draft is one click, not "Save Draft" then a separate confirm step --
+// a no-op on an already-confirmed recipe (code/status never move backward). Ingredient rows carry
+// no ingredientId at all (never validated/required, unlike save-recipe) and are never
+// resolved/created against any ingredient catalog (unlike save-extracted-recipe) -- pure free
+// text, forever, per the migration's own header comment.
+ipcMain.handle('save-generated-recipe', async (e, payload) => {
+  const recipeId = payload.id;
+  if (!recipeId) throw new Error('save-generated-recipe requires an existing draft id -- generated recipes are only ever created by AI generation, never manually.');
+
+  const RECIPE_GONE_MESSAGE = 'This recipe was deleted or changed elsewhere. Please refresh Recipe Generator and try again.';
+  const { data: existing, error: getErr } = await supabase.from('generated_recipes').select('code, status, photo_path').eq('id', recipeId).maybeSingle();
+  if (getErr) throw supaFail('save-generated-recipe: load existing', getErr);
+  if (!existing) throw new Error(RECIPE_GONE_MESSAGE);
+
+  const fields = {
+    name: payload.name,
+    quantity_produced: payload.quantityProduced || null,
+    prepared_by: payload.preparedBy || null,
+    category: payload.category || null,
+    country_origin: payload.countryOrigin || null,
+    yield_notes: payload.yieldNotes || null,
+    date_created: payload.dateCreated || null,
+    presentation_serving: payload.presentationServing || null,
+    comment: payload.comment || null,
+    checked_by: payload.checkedBy || null,
+    portion_weight_grams: payload.portionWeightGrams ?? null,
+  };
+
+  // photo_path is only ever touched when she actually picked a new file or hit "Remove Photo" --
+  // omitted from `fields` entirely otherwise, same convention save-recipe uses, so an unrelated
+  // edit never disturbs an already-uploaded photo.
+  if (payload.photoBase64) {
+    fields.photo_path = await uploadGeneratedRecipePhoto(payload.photoBase64, payload.photoExt);
+  } else if (payload.removePhoto) {
+    fields.photo_path = null;
+  }
+
+  let code = existing.code;
+  let status = existing.status;
+  if (payload.confirm && existing.status === 'draft') {
+    code = await nextGeneratedRecipeCode();
+    status = 'confirmed';
+    fields.code = code;
+    fields.status = status;
+    fields.confirmed_at = new Date().toISOString();
+  }
+
+  const { data: updated, error: updErr } = await supabase.from('generated_recipes').update(fields).eq('id', recipeId).select('id');
+  if (updErr) throw supaFail('save-generated-recipe: update generated_recipes', updErr);
+  if (!updated || updated.length === 0) throw new Error(RECIPE_GONE_MESSAGE);
+
+  // Clean up the old Storage object once the new one is safely committed -- same convention as
+  // save-recipe, so replacing or removing a photo never leaves the previous upload orphaned.
+  if ((payload.photoBase64 || payload.removePhoto) && existing.photo_path) {
+    await deleteGeneratedRecipePhoto(existing.photo_path);
+  }
+
+  // Deleting the processes cascades to their ingredients AND wastes (process_id ON DELETE
+  // CASCADE on both generated_recipe_ingredients and generated_recipe_process_wastes) -- no
+  // separate delete needed for either, same convention as save-recipe/save-extracted-recipe.
+  const { error: delErr } = await supabase.from('generated_recipe_processes').delete().eq('generated_recipe_id', recipeId);
+  if (delErr) throw supaFail('save-generated-recipe: clear old generated_recipe_processes', delErr);
+
+  const rawProcesses = payload.processes || [];
+  const insertedProcessIds = [];
+  for (let idx = 0; idx < rawProcesses.length; idx++) {
+    const proc = rawProcesses[idx];
+    const { data: insertedProc, error: procInsErr } = await supabase
+      .from('generated_recipe_processes')
+      .insert({
+        generated_recipe_id: recipeId,
+        name: (proc.name || '').trim() || `Process ${idx + 1}`,
+        method: proc.method || null,
+        sort_order: idx,
+      })
+      .select('id')
+      .single();
+    if (procInsErr) throw supaFail('save-generated-recipe: insert generated_recipe_processes', procInsErr);
+    insertedProcessIds.push(insertedProc.id);
+  }
+
+  const ingredientRows = [];
+  for (let pIdx = 0; pIdx < rawProcesses.length; pIdx++) {
+    const procIngredients = rawProcesses[pIdx].ingredients || [];
+    for (let idx = 0; idx < procIngredients.length; idx++) {
+      const ing = procIngredients[idx];
+      if (!ing.name || !ing.name.trim()) continue;
+      ingredientRows.push({
+        process_id: insertedProcessIds[pIdx],
+        name: ing.name.trim(),
+        quantity: ing.quantity ?? null,
+        unit: ing.unit || null,
+        method: ing.method || null,
+        sort_order: idx,
+      });
+    }
+  }
+  if (ingredientRows.length) {
+    const { error: insIngErr } = await supabase.from('generated_recipe_ingredients').insert(ingredientRows);
+    if (insIngErr) throw supaFail('save-generated-recipe: insert generated_recipe_ingredients', insIngErr);
+  }
+
+  const wasteRows = [];
+  for (let pIdx = 0; pIdx < rawProcesses.length; pIdx++) {
+    const procWastes = rawProcesses[pIdx].wastes || [];
+    for (let idx = 0; idx < procWastes.length; idx++) {
+      const w = procWastes[idx];
+      if (!w.wasteTypeId) continue;
+      wasteRows.push({
+        process_id: insertedProcessIds[pIdx],
+        waste_type_id: w.wasteTypeId,
+        percent: w.percent ?? 0,
+        sort_order: idx,
+      });
+    }
+  }
+  if (wasteRows.length) {
+    const { error: insWasteErr } = await supabase.from('generated_recipe_process_wastes').insert(wasteRows);
+    if (insWasteErr) throw supaFail('save-generated-recipe: insert generated_recipe_process_wastes', insWasteErr);
+  }
+
+  return { id: recipeId, code, status };
+});
+
+ipcMain.handle('delete-generated-recipe', async (e, id) => {
+  const { data: existing } = await supabase.from('generated_recipes').select('photo_path').eq('id', id).single();
+  // Cascades to generated_recipe_ingredients AND generated_recipe_process_wastes via process_id
+  // ON DELETE CASCADE.
+  await supabase.from('generated_recipe_processes').delete().eq('generated_recipe_id', id);
+  const { error } = await supabase.from('generated_recipes').delete().eq('id', id);
+  if (error) throw supaFail('delete-generated-recipe', error);
+  if (existing?.photo_path) await deleteGeneratedRecipePhoto(existing.photo_path);
+  return { success: true };
+});
+
+ipcMain.handle('export-generated-recipes', async (e, { recipeIds, savePath, targetLanguage }) => {
+  if (!recipeIds || recipeIds.length === 0) return { success: false };
+
+  if (!savePath) {
+    let defaultPath = 'Generated_Recipes_Export.xlsx';
+    if (recipeIds.length === 1) {
+      const { data, error } = await supabase.from('generated_recipes').select('name').eq('id', recipeIds[0]).single();
+      if (error) throw supaFail('export-generated-recipes: load recipe name', error);
+      defaultPath = `${sanitizeSheetName(data.name)}.xlsx`;
+    }
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Generated Recipes',
+      defaultPath,
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    savePath = result.filePath;
+  }
+
+  let doneCount = 0;
+  await exportRecipes(async (recipeId) => {
+    const full = await fetchGeneratedRecipeWithProcesses(recipeId);
+    const { processes, ...recipe } = full;
+    // Single-photo model, same as export-recipes' own handling -- 0 or 1 entries.
+    recipe.photos = [];
+    if (recipe.photo_path) {
+      const { data, error } = await supabase.storage.from(GENERATED_RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
+      if (error) throw supaFail('export-generated-recipes: download photo', error);
+      const buffer = Buffer.from(await data.arrayBuffer());
+      const ext = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+      recipe.photos = [{ buffer, ext }];
+    }
+    doneCount++;
+    if (targetLanguage && targetLanguage !== 'English') {
+      e.sender.send('export-progress', recipeIds.length > 1
+        ? { message: `Translating recipe ${doneCount} of ${recipeIds.length}…`, current: doneCount, total: recipeIds.length }
+        : { message: 'Translating recipe…' });
+    }
+    const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
+    return { ...translated, codeLabelKey: 'rgCode' };
+  }, recipeIds, savePath, (message) => e.sender.send('export-progress', { message }));
+  return { success: true, path: savePath };
+});
+
+// Recipe Calculator's RG- counterpart to export-scaled-recipe -- same single-photo
+// photoOverride-wins-over-Storage-lookup handling, mirrored exactly.
+ipcMain.handle('export-scaled-generated-recipe', async (e, { recipe, processes, savePath, targetLanguage, includeOriginalQty }) => {
+  if (!savePath) {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Scaled Recipe',
+      defaultPath: `${sanitizeSheetName(recipe.name)}.xlsx`,
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    savePath = result.filePath;
+  }
+
+  recipe.photos = [];
+  if (Object.prototype.hasOwnProperty.call(recipe, 'photoOverride')) {
+    if (recipe.photoOverride) {
+      recipe.photos = [{ buffer: Buffer.from(recipe.photoOverride.base64, 'base64'), ext: recipe.photoOverride.ext }];
+    }
+  } else if (recipe.photo_path) {
+    const { data, error } = await supabase.storage.from(GENERATED_RECIPE_PHOTOS_BUCKET).download(recipe.photo_path);
+    if (error) throw supaFail('export-scaled-generated-recipe: download photo', error);
+    const buffer = Buffer.from(await data.arrayBuffer());
+    const ext = recipe.photo_path.split('.').pop().toLowerCase() === 'png' ? 'png' : 'jpeg';
+    recipe.photos = [{ buffer, ext }];
+  }
+  delete recipe.photoOverride;
+
+  if (targetLanguage && targetLanguage !== 'English') e.sender.send('export-progress', { message: 'Translating recipe…' });
+  const translated = await translateForRecipeExport(targetLanguage, recipe, processes);
+  await exportScaledRecipe(translated.recipe, translated.processes, savePath, {
+    ...translated, codeLabelKey: 'rgCode', includeOriginalQty, onProgress: (message) => e.sender.send('export-progress', { message }),
+  });
   return { success: true, path: savePath };
 });
 
@@ -1328,10 +2033,14 @@ ipcMain.handle('add-waste-type', async (e, { name, defaultPercent }) => {
 // cascadeToExisting mirrors update-item's removeInvalidSectionPortions flag -- never inferred or
 // defaulted true, only set after the renderer has shown the chef an explicit scoped-impact
 // choice and she's picked the option that reaches beyond the catalog default. When set, every
-// recipe_process_wastes/extracted_recipe_process_wastes row already snapshotting this waste type
-// is overwritten to the new percent too, not just waste_types.default_percent. Sequential
-// awaited calls, not a transaction -- same accepted tradeoff persistMenu() documents elsewhere in
-// this app; a failure partway through leaves a recoverable, visible inconsistency rather than a
+// recipe_process_wastes/extracted_recipe_process_wastes/generated_recipe_process_wastes row
+// already snapshotting this waste type is overwritten to the new percent too, not just
+// waste_types.default_percent -- generated_recipe_process_wastes added alongside Recipe
+// Generator's own waste generation (an AI-created waste type is just a normal waste_types row
+// the instant it exists, so it must cascade exactly like any chef-created one; this handler
+// simply hadn't been updated for the third table when it was introduced). Sequential awaited
+// calls, not a transaction -- same accepted tradeoff persistMenu() documents elsewhere in this
+// app; a failure partway through leaves a recoverable, visible inconsistency rather than a
 // silent one, since supaFail surfaces it immediately.
 ipcMain.handle('update-waste-type', async (e, { id, name, defaultPercent, cascadeToExisting }) => {
   const { error } = await supabase
@@ -1345,6 +2054,8 @@ ipcMain.handle('update-waste-type', async (e, { id, name, defaultPercent, cascad
     if (rErr) throw supaFail('update-waste-type: cascade recipe_process_wastes', rErr);
     const { error: eErr } = await supabase.from('extracted_recipe_process_wastes').update({ percent: defaultPercent }).eq('waste_type_id', id);
     if (eErr) throw supaFail('update-waste-type: cascade extracted_recipe_process_wastes', eErr);
+    const { error: gErr } = await supabase.from('generated_recipe_process_wastes').update({ percent: defaultPercent }).eq('waste_type_id', id);
+    if (gErr) throw supaFail('update-waste-type: cascade generated_recipe_process_wastes', gErr);
   }
 
   return { success: true };
