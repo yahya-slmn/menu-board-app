@@ -147,11 +147,18 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // No thinking/effort -- Haiku 4.5 doesn't support effort, and this is a single-shot
-    // structured extraction with no need for extended reasoning.
+    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
+    // explicitly disabled to match the original design intent (single-shot structured extraction,
+    // no extended reasoning) and to avoid Sonnet 5's default-on ADAPTIVE thinking (active whenever
+    // the param is omitted, unlike Haiku 4.5 where omitting it meant off) silently adding latency/
+    // cost on top of the higher per-token price already accepted for this upgrade. This is a vision
+    // call (recipe card photos), so thinking could plausibly help with messy/handwritten cards --
+    // worth trying if extraction accuracy ever looks like it needs it, but left off for now for
+    // consistency with every other Edge Function in this app.
     const response = await client.messages.create({
-      model: "claude-haiku-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 4096,
+      thinking: { type: "disabled" },
       // deno-lint-ignore no-explicit-any
       messages: [
         { role: "user", content: [...fileBlocks, { type: "text", text: buildPrompt() }] },

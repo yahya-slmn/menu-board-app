@@ -95,12 +95,15 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // No thinking/effort -- Haiku 4.5 doesn't support effort, and this is a single-shot
-    // structured translation with no need for extended reasoning. Text-only (no vision), so
-    // cheaper/faster than extract-recipe's image calls.
+    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
+    // explicitly disabled: this is still a single-shot structured translation with no need for
+    // extended reasoning, and Sonnet 5 runs ADAPTIVE (on) thinking by default when the param is
+    // omitted, unlike Haiku 4.5 where omitting it meant off -- leaving it unset would silently add
+    // latency/cost on top of the higher per-token price already accepted for this upgrade.
     const response = await client.messages.create({
-      model: "claude-haiku-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 8192,
+      thinking: { type: "disabled" },
       messages: [
         { role: "user", content: buildPrompt(targetLanguage, texts) },
       ],

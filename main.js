@@ -22,10 +22,18 @@ const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
-const { filterNutIngredients, matchNutTerms } = require('./lib/nutFilter');
-const { loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients } = require('./lib/menuIngredients');
+const { filterNutIngredients, matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
+const {
+  loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients,
+  flattenSheetForAI, HIDDEN_SHEET_STATES,
+} = require('./lib/menuIngredients');
 const { generateDishRecipes } = require('./lib/generateDishRecipes');
-const { matchesGeneratorCategory, normalizeProcessesToGrams } = require('./lib/recipeGenerator');
+const { generateDishImage } = require('./lib/generateDishImage');
+const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
+const {
+  matchesGeneratorCategory, isReadyMadeItem, normalizeProcessesToGrams,
+  buildExistingDishIndex, findDuplicateMatch,
+} = require('./lib/recipeGenerator');
 
 let mainWindow;
 let loginWindow;
@@ -1113,15 +1121,15 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { base64, uploadT
     const byIndex = new Map(estimates.map(est => [est.index, est]));
     const written = new Map();
     const missing = [];
-    // Mandatory nut-policy safety net (Misk school-wide restriction) -- runs on EVERY suggestion
-    // regardless of how well the prompt/system instruction in suggest-dish-ingredients/index.ts
-    // was followed, since an LLM instruction is never a hard guarantee on its own. See
-    // lib/nutFilter.js for the full blocklist/false-positive reasoning. Applied to BOTH the
-    // ingredients string and the allergens string (same reasoning as ALLERGEN_RULE's own comment
-    // in index.ts -- "nut" must never surface as a flagged allergen either, even if a stray one
-    // slips past the prompt). Never applied to Recipe Extractor (extract-recipe) -- that
-    // transcribes a REAL recipe, so stripping a genuine nut mention there would hide a true
-    // ingredient rather than block a fabricated one.
+    // Mandatory nut/sesame-policy safety net (Misk school-wide restriction) -- runs on EVERY
+    // suggestion regardless of how well the prompt/system instruction in
+    // suggest-dish-ingredients/index.ts was followed, since an LLM instruction is never a hard
+    // guarantee on its own. See lib/nutFilter.js for the full blocklist/false-positive reasoning.
+    // Applied to BOTH the ingredients string and the allergens string (same reasoning as
+    // ALLERGEN_RULE's own comment in index.ts -- "nut"/"sesame" must never surface as a flagged
+    // allergen either, even if a stray one slips past the prompt). Never applied to Recipe
+    // Extractor (extract-recipe) -- that transcribes a REAL recipe, so stripping a genuine
+    // nut/sesame mention there would hide a true ingredient rather than block a fabricated one.
     const removedByName = new Map();
     batchNames.forEach((name, idx) => {
       const est = byIndex.get(idx);
@@ -1301,6 +1309,58 @@ ipcMain.handle('export-menu-ingredients', async (e, { rows, savePath, uploadToke
 const RECIPE_GEN_BATCH_SIZE = 8;
 let recipeGenToken = null;
 
+// Layout-agnostic fallback for a menu file that isn't one of this app's own exports (see
+// lib/menuIngredients.js's flattenSheetForAI and supabase/functions/extract-menu-dishes/index.ts
+// for the full reasoning) -- only reached from parse-and-generate-recipes below when
+// parseWorkbookDishes' strict marker-based pass finds zero rows. Batches at 50 rows per call
+// (same size every other lightweight per-item AI batch in this file uses --
+// CALORIE_ESTIMATE_BATCH_SIZE/AM_SNACK_STYLE_BATCH_SIZE/MENU_INGREDIENTS_BATCH_SIZE), chunked
+// PER SHEET (never spanning a sheet boundary) so every returned row can be tagged with the right
+// sheetName, and run sequentially rather than in parallel, same reasoning as those three -- one
+// slow/rate-limited call shouldn't fan out into a burst of concurrent ones. Returns the SAME
+// `{ sheetName, rowNumber, date, weekday, category, dishName }` row shape parseWorkbookDishes
+// returns (date/weekday just come back null -- confirmed neither parse-and-generate-recipes nor
+// parse-and-suggest-menu-ingredients ever reads those two fields for anything but a warning
+// message string), so nothing downstream of the parse step needs to know or care which pass
+// actually produced a given row.
+const DISH_EXTRACTION_BATCH_SIZE = 50;
+
+async function extractDishesWithAI(workbook, onProgress) {
+  function chunk(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  const rows = [];
+  const warnings = [];
+  for (const sheet of workbook.worksheets) {
+    if (sheet.name === '_Lists' || HIDDEN_SHEET_STATES.has(sheet.state)) continue;
+    const sheetRows = flattenSheetForAI(sheet);
+    if (sheetRows.length === 0) continue;
+
+    const batches = chunk(sheetRows, DISH_EXTRACTION_BATCH_SIZE);
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batch = batches[bi];
+      onProgress(`AI-reading "${sheet.name}" (rows ${batch[0].rowNumber}-${batch[batch.length - 1].rowNumber})…`);
+      let dishes;
+      try {
+        dishes = await extractMenuDishesAI({ rows: batch.map((r) => ({ i: r.rowNumber, c: r.cells })) });
+      } catch (err) {
+        warnings.push(`${sheet.name} rows ${batch[0].rowNumber}-${batch[batch.length - 1].rowNumber}: AI extraction failed (${err.message}) -- these rows were skipped.`);
+        continue;
+      }
+      for (const d of dishes) {
+        rows.push({
+          sheetName: sheet.name, rowNumber: d.i, date: null, weekday: null,
+          category: d.category || null, dishName: d.name.trim(),
+        });
+      }
+    }
+  }
+  return { rows, warnings };
+}
+
 // Resolves an AI-proposed waste (name/percent/matchedExisting, from generate-dish-recipes) to a
 // real waste_types id -- creating a new catalog row directly when genuinely nothing matches, no
 // chef interaction and no scoped-impact modal (there's nothing to reconcile yet: this is the
@@ -1342,8 +1402,14 @@ async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
 // normalizeProcessesToGrams's own comment on why this happens here, mathematically, rather than
 // being asked of the model directly), then writes the recipe/processes/ingredients/wastes as one
 // new draft row. `sourceMenuLabel`/`dish.name` back this recipe's traceability fields
-// (requirement 6). `wasteTypeCache` -- see resolveWasteTypeId above.
-async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTypeCache }) {
+// (requirement 6). `wasteTypeCache` -- see resolveWasteTypeId above. `photoPath` is optional --
+// the caller (parse-and-generate-recipes) already uploaded the AI-generated photo to the
+// generated-recipe-photos bucket via the SAME uploadGeneratedRecipePhoto helper the manual-upload
+// path uses, before calling this, and passes null when that generation/upload failed (image
+// failure is never fatal to the recipe itself -- see that call site's own comment). This is the
+// ONLY place `photo_path` is set for a freshly-generated draft; the manual upload/replace/remove
+// UI already covers changing it afterward via save-generated-recipe.
+async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTypeCache, photoPath }) {
   const processesRaw = (gen.processes && gen.processes.length > 0 ? gen.processes : [{ name: gen.name || dish.name, ingredients: [], method_steps: [], wastes: [] }])
     .map((proc) => ({
       name: proc.name || dish.name,
@@ -1369,6 +1435,7 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
       date_created: new Date().toISOString().slice(0, 10),
       source_menu_label: sourceMenuLabel,
       source_dish_name: dish.name,
+      photo_path: photoPath || null,
       created_at: new Date().toISOString(),
     })
     .select('id')
@@ -1414,6 +1481,38 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
   return recipeId;
 }
 
+// Shared manual "Generate Photo" button for Recipe Book, Recipe Extractor, AND Recipe Generator's
+// own edit forms (not just the automatic batch flow above) -- one handler, since generating a
+// photo from a name/category/ingredients/method has nothing recipe-type-specific about it: it
+// touches no recipe table at all, just returns base64 image bytes for the renderer to drop into
+// whichever photo slot (single pendingPhoto or the gallery's pendingPhotos) that recipe type's
+// OWN existing manual-upload code already populates -- the existing Save button then uploads it
+// through that recipe type's own existing photo-upload path, completely unchanged. Never touches
+// the recipe's actual saved ingredient list either way (see the nut-filter comment below).
+//
+// `ingredients` here is the RAW list straight from whatever's currently in the form (including
+// unsaved edits, per the chef's own request) -- filtered through matchNutTerms before ever
+// reaching the image prompt, the exact same check the automatic batch flow applies above. This is
+// NOT the same thing as lib/nutFilter.js's own documented scope note that Recipe Book/Extractor's
+// SAVED ingredients are deliberately never nut-filtered (those are real, manually-verified
+// ingredients -- filtering them would falsely hide a genuine one from the recipe card). Filtering
+// only what's sent to this transient, non-persisted image prompt doesn't touch that saved data at
+// all -- a real Baklava recipe keeps its real walnuts on the card; the generated photo just isn't
+// told to depict them.
+ipcMain.handle('generate-recipe-photo', async (e, { dishName, category, ingredients, method }) => {
+  const filteredIngredients = (Array.isArray(ingredients) ? ingredients : [])
+    .filter((name) => matchNutTerms(name).length === 0)
+    .slice(0, 12);
+  // dishName ALSO goes through stripNutTermsFromText, not just the ingredient list -- a dish
+  // literally named "Walnut Baklava" still leaked a nut-textured result even with "walnuts"
+  // correctly removed from ingredients, confirmed by a real test generation (see that helper's
+  // own comment). The RECIPE's real saved name is completely untouched by this -- only the copy
+  // handed to the image prompt is sanitized.
+  return generateDishImage({
+    dishName: stripNutTermsFromText(dishName) || dishName, category, ingredients: filteredIngredients, method,
+  });
+});
+
 ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fileName }) => {
   recipeGenToken = uploadToken;
 
@@ -1434,12 +1533,27 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
   if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
 
   e.sender.send('recipe-generator-progress', { message: 'Parsing menu structure…' });
-  const { rows } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  let { rows } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  const failures = [];
+  // Strict pass found nothing -- this isn't necessarily one of this app's own exports (a
+  // real school-provided menu file has none of the RC/"Quantity"/"Weight/Unit" markers
+  // parseWorkbookDishes looks for at all). Rather than fail outright, fall back to the
+  // AI-assisted, layout-agnostic pass (requirement 2) -- only reached here, so a file that DOES
+  // match this app's own layout still takes the fast, free, marker-based path with no AI call.
   if (rows.length === 0) {
-    return {
-      success: false,
-      error: "No recognizable menu rows found in this file. Make sure it's an export from Generate Menu, Build Menu, or Export All Sections.",
-    };
+    e.sender.send('recipe-generator-progress', { message: "This file doesn't match our own export layout -- reading it with AI instead…" });
+    const aiResult = await extractDishesWithAI(workbook, (message) => {
+      e.sender.send('recipe-generator-progress', { message });
+    });
+    if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+    rows = aiResult.rows;
+    failures.push(...aiResult.warnings);
+    if (rows.length === 0) {
+      return {
+        success: false,
+        error: "Couldn't find any recognizable dish rows in this file, even with AI-assisted reading. Make sure it's a real menu spreadsheet (dish names alongside day/category labels).",
+      };
+    }
   }
   if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
 
@@ -1448,9 +1562,14 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
   // only needs one generated recipe, same dedup convention parse-and-suggest-menu-ingredients
   // already uses. Keeps the FIRST category text seen for a given dish name (they should agree
   // whenever the same dish repeats, but a real spreadsheet inconsistency shouldn't crash this).
+  // isReadyMadeItem is a SECOND, independent check applied identically regardless of which parser
+  // produced `rows` -- see its own comment for the real bug (a plain milk item sharing an "AM
+  // Snack" category label with a genuine snack dish, on a real school file parsed via the AI
+  // fallback) that made category-text matching alone insufficient.
   const seen = new Map(); // dishName -> category
   for (const r of rows) {
     if (!matchesGeneratorCategory(r.category)) continue;
+    if (isReadyMadeItem(r.dishName)) continue;
     if (!seen.has(r.dishName)) seen.set(r.dishName, r.category);
   }
   const uniqueDishes = [...seen.entries()].map(([name, category]) => ({ name, category }));
@@ -1459,20 +1578,34 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
     return { success: false, error: 'No dishes in the AM Snack, PM Snack, Soup, Appetizers, or Main Course categories were found in this file.' };
   }
 
-  e.sender.send('recipe-generator-progress', {
-    message: `Found ${uniqueDishes.length} eligible dish(es) -- starting AI recipe generation…`,
-  });
+  // Skip a dish that already has a recipe -- draft OR confirmed, from ANY menu ever uploaded
+  // (global on purpose: a dish having a reviewed/confirmed recipe already doesn't depend on
+  // which menu introduced it) -- BEFORE the expensive generate-dish-recipes AI call, so a skip
+  // costs nothing. See lib/recipeGenerator.js's findDuplicateMatch for the exact/near-duplicate
+  // matching rules.
+  e.sender.send('recipe-generator-progress', { message: `Checking ${uniqueDishes.length} eligible dish(es) against existing recipes…` });
+  const existingNameRows = await fetchAllRowsMain(() => supabase
+    .from('generated_recipes').select('name').in('status', ['draft', 'confirmed']))
+    .catch((err) => { throw supaFail('parse-and-generate-recipes: load existing recipe names', err); });
+  const existingDishIndex = buildExistingDishIndex(existingNameRows.map((r) => r.name));
 
-  // Fetched ONCE for the whole upload, not per batch -- the Edge Function has no DB access of
-  // its own (see generate-dish-recipes' header comment), so this is how it learns what already
-  // exists to match against. wasteTypeCache is pre-seeded from this same fetch and extended by
-  // resolveWasteTypeId as new types are created during this run, so it's shared across every
-  // dish in every batch (not reset per batch) -- two dishes independently proposing the same new
-  // waste name only ever create one new catalog row between them.
-  const { data: wasteTypesCatalog, error: wasteTypesErr } = await supabase.from('waste_types').select('id, name');
-  if (wasteTypesErr) throw supaFail('parse-and-generate-recipes: load waste_types', wasteTypesErr);
-  const existingWasteTypeNames = wasteTypesCatalog.map((w) => w.name);
-  const wasteTypeCache = new Map(wasteTypesCatalog.map((w) => [w.name.trim().toLowerCase(), w.id]));
+  const toGenerate = [];
+  const skipped = [];
+  for (const dish of uniqueDishes) {
+    const match = findDuplicateMatch(dish.name, existingDishIndex);
+    if (match) skipped.push({ ...dish, ...match });
+    else toGenerate.push(dish);
+  }
+  if (skipped.length) {
+    log.warn(`[recipe-generator] ${skipped.length} dish(es) skipped -- already have a recipe:`,
+      skipped.map((s) => `"${s.name}" ~ "${s.matchedName}" (${s.matchType})`));
+  }
+
+  e.sender.send('recipe-generator-progress', {
+    message: skipped.length > 0
+      ? `${uniqueDishes.length} eligible dish(es) found -- ${skipped.length} already have a recipe, generating ${toGenerate.length} new one(s)…`
+      : `Found ${uniqueDishes.length} eligible dish(es) -- starting AI recipe generation…`,
+  });
 
   function chunk(arr, size) {
     const out = [];
@@ -1480,53 +1613,110 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
     return out;
   }
 
-  async function generateBatch(batchDishes) {
-    const payloadItems = batchDishes.map((d, idx) => ({ index: idx, name: d.name, category: d.category || undefined }));
-    let recipes;
-    try {
-      recipes = await generateDishRecipes({ items: payloadItems, existingWasteTypeNames });
-    } catch (err) {
-      return { created: [], missing: batchDishes, error: err.message };
-    }
-    const byIndex = new Map(recipes.map((r) => [r.index, r]));
-    const created = [];
-    const missing = [];
-    for (let idx = 0; idx < batchDishes.length; idx++) {
-      const dish = batchDishes[idx];
-      const gen = byIndex.get(idx);
-      if (!gen) { missing.push(dish); continue; }
-      created.push({ dish, gen });
-    }
-    return { created, missing, error: null };
-  }
-
-  const batches = chunk(uniqueDishes, RECIPE_GEN_BATCH_SIZE);
   let createdCount = 0;
-  const failures = [];
-  for (let b = 0; b < batches.length; b++) {
-    if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
-    const batch = batches[b];
-    e.sender.send('recipe-generator-progress', {
-      message: `Generating recipes: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length,
-    });
-    const result = await generateBatch(batch);
-    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
-    let toPersist = result.created;
-    if (result.missing.length) {
-      e.sender.send('recipe-generator-progress', { message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
-      const retry = await generateBatch(result.missing);
-      toPersist = [...toPersist, ...retry.created];
-      if (retry.missing.length) {
-        failures.push(`${retry.missing.length} dish(es) still missing a recipe after retry -- skipped: ${retry.missing.map((d) => d.name).slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
+  let batchCount = 0;
+  if (toGenerate.length > 0) {
+    // Fetched ONCE for the whole upload, not per batch -- the Edge Function has no DB access of
+    // its own (see generate-dish-recipes' header comment), so this is how it learns what already
+    // exists to match against. wasteTypeCache is pre-seeded from this same fetch and extended by
+    // resolveWasteTypeId as new types are created during this run, so it's shared across every
+    // dish in every batch (not reset per batch) -- two dishes independently proposing the same new
+    // waste name only ever create one new catalog row between them.
+    const { data: wasteTypesCatalog, error: wasteTypesErr } = await supabase.from('waste_types').select('id, name');
+    if (wasteTypesErr) throw supaFail('parse-and-generate-recipes: load waste_types', wasteTypesErr);
+    const existingWasteTypeNames = wasteTypesCatalog.map((w) => w.name);
+    const wasteTypeCache = new Map(wasteTypesCatalog.map((w) => [w.name.trim().toLowerCase(), w.id]));
+
+    async function generateBatch(batchDishes) {
+      const payloadItems = batchDishes.map((d, idx) => ({ index: idx, name: d.name, category: d.category || undefined }));
+      let recipes;
+      try {
+        recipes = await generateDishRecipes({ items: payloadItems, existingWasteTypeNames });
+      } catch (err) {
+        return { created: [], missing: batchDishes, error: err.message };
       }
+      const byIndex = new Map(recipes.map((r) => [r.index, r]));
+      const created = [];
+      const missing = [];
+      for (let idx = 0; idx < batchDishes.length; idx++) {
+        const dish = batchDishes[idx];
+        const gen = byIndex.get(idx);
+        if (!gen) { missing.push(dish); continue; }
+        created.push({ dish, gen });
+      }
+      return { created, missing, error: null };
     }
 
-    for (const { dish, gen } of toPersist) {
-      try {
-        await persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel: fileName, wasteTypeCache });
-        createdCount++;
-      } catch (err) {
-        failures.push(`"${dish.name}": ${err.message}`);
+    const batches = chunk(toGenerate, RECIPE_GEN_BATCH_SIZE);
+    batchCount = batches.length;
+    for (let b = 0; b < batches.length; b++) {
+      if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+      const batch = batches[b];
+      e.sender.send('recipe-generator-progress', {
+        message: `Generating recipes: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length,
+      });
+      const result = await generateBatch(batch);
+      if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
+      let toPersist = result.created;
+      if (result.missing.length) {
+        e.sender.send('recipe-generator-progress', { message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
+        const retry = await generateBatch(result.missing);
+        toPersist = [...toPersist, ...retry.created];
+        if (retry.missing.length) {
+          failures.push(`${retry.missing.length} dish(es) still missing a recipe after retry -- skipped: ${retry.missing.map((d) => d.name).slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
+        }
+      }
+
+      // Photos are generated CONCURRENTLY across this one batch (bounded to RECIPE_GEN_BATCH_SIZE
+      // at once, same as the text-generation batch itself) -- OpenAI's Images API has no
+      // multi-prompt batch primitive, so this is the only way to avoid serializing every single
+      // dish's photo one after another, which would multiply this run's wall-clock time badly at
+      // a realistic 100-300 dish scale. Promise.allSettled, not Promise.all -- one dish's image
+      // failing must never affect any other dish's image or recipe (see generateDishImage.js's
+      // own comment: a photo failure is never fatal to the recipe).
+      if (toPersist.length > 0) {
+        e.sender.send('recipe-generator-progress', { message: `Generating photos for batch ${b + 1} of ${batches.length}…` });
+      }
+      // Filtered through the SAME matchNutTerms check persistGeneratedRecipeDraft applies before
+      // saving -- gen.processes here is the raw, not-yet-filtered model output, and the nut/sesame
+      // restriction is a "never present, full stop" policy (see lib/nutFilter.js): a banned
+      // ingredient must never even reach the image prompt as a visual instruction, not just get
+      // silently dropped from the saved recipe afterward. Belt-and-suspenders with the prompt's
+      // own "no nuts/seeds/sesame garnish" line, not a replacement for it. dishName is ALSO run
+      // through stripNutTermsFromText -- confirmed by a real test that a name like "Walnut
+      // Baklava" still visually leaked nuts into the image even with "walnuts" removed from the
+      // ingredient list; the recipe's own SAVED name (gen.name/dish.name below) is untouched.
+      const photoResults = await Promise.allSettled(toPersist.map(({ dish, gen }) => generateDishImage({
+        dishName: stripNutTermsFromText(gen.name || dish.name) || gen.name || dish.name,
+        category: dish.category || undefined,
+        ingredients: (gen.processes || [])
+          .flatMap((p) => (p.ingredients || []).map((ing) => ing.name))
+          .filter((name) => matchNutTerms(name).length === 0)
+          .slice(0, 12),
+        method: (gen.processes || []).flatMap((p) => p.method_steps || []).join('; ') || undefined,
+      })));
+
+      for (let idx = 0; idx < toPersist.length; idx++) {
+        const { dish, gen } = toPersist[idx];
+        const photoResult = photoResults[idx];
+        let photoPath = null;
+        if (photoResult.status === 'fulfilled') {
+          try {
+            photoPath = await uploadGeneratedRecipePhoto(photoResult.value.b64, photoResult.value.ext);
+          } catch (err) {
+            failures.push(`"${dish.name}": photo upload failed (${err.message}) -- recipe saved without a photo.`);
+          }
+        } else {
+          failures.push(`"${dish.name}": image generation failed (${photoResult.reason.message}) -- recipe saved without a photo.`);
+        }
+        try {
+          await persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel: fileName, wasteTypeCache, photoPath });
+          createdCount++;
+        } catch (err) {
+          failures.push(`"${dish.name}": ${err.message}`);
+          // The recipe row was never created -- don't leave an orphaned photo behind in Storage.
+          if (photoPath) await deleteGeneratedRecipePhoto(photoPath).catch(() => {});
+        }
       }
     }
   }
@@ -1534,11 +1724,14 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
   if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
 
   e.sender.send('recipe-generator-progress', {
-    message: `Done -- generated ${createdCount} of ${uniqueDishes.length} recipe(s).`, current: batches.length, total: batches.length,
+    message: `Done -- generated ${createdCount} of ${toGenerate.length} new recipe(s)${skipped.length ? ` (${skipped.length} already had one)` : ''}.`,
+    current: batchCount, total: batchCount,
   });
   if (failures.length) log.warn(`[recipe-generator] ${failures.length} warning(s) from this upload:`, failures);
 
-  return { success: true, createdCount, dishCount: uniqueDishes.length, failures };
+  return {
+    success: true, createdCount, dishCount: uniqueDishes.length, existingCount: skipped.length, failures,
+  };
 });
 
 async function fetchGeneratedRecipeWithProcesses(id) {
@@ -3749,11 +3942,15 @@ ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekd
   return { success: true, path: savePath, warningsBySection };
 });
 
-ipcMain.handle('export-all-sections-to-excel', async (e, { menuIdsBySection, savePath }) => {
+// `label` is the Workbook Name she typed in on whichever screen triggered this (Build Menu's own
+// export button, or History's re-export of a saved batch, both of which combine all 5 sections
+// into one workbook the same way generate-and-export-all's own Export All Sections view does) --
+// falls back to the old fixed name only when a caller genuinely has none to offer.
+ipcMain.handle('export-all-sections-to-excel', async (e, { menuIdsBySection, savePath, label }) => {
   if (!savePath) {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Combined Menu Workbook',
-      defaultPath: 'All_Sections_Menu.xlsx',
+      defaultPath: label ? `${label.replace(/\s+/g, '_')}.xlsx` : 'All_Sections_Menu.xlsx',
       filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
     });
     if (result.canceled || !result.filePath) return { success: false, cancelled: true };

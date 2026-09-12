@@ -60,8 +60,10 @@ const SUGGEST_SCHEMA = {
 // guards against exactly the kind of instruction the model might otherwise treat as lower
 // priority than the surrounding task description). This is still only half the safety story --
 // see lib/nutFilter.js for the mandatory post-processing scan every suggestion goes through
-// regardless of how well the model followed this.
-const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly prohibits ALL nuts and nut-derived ingredients, with zero exceptions. Never include any tree nut (almond, cashew, walnut, pistachio, hazelnut, pecan, macadamia, pine nut, brazil nut, chestnut, etc.), peanut, or nut-derived product (nut butter, nut milk, nut oil, marzipan, praline, nutella, nougat, etc.) in ANY suggested ingredient list -- even if the dish traditionally or typically includes one. If a dish's most natural ingredients would normally include a nut, substitute a safe non-nut alternative that fits the dish (e.g. sunflower seed butter instead of peanut butter) or simply omit that component -- never include the nut itself. Treat this with the same seriousness as an allergy-critical instruction, because it is one.`;
+// regardless of how well the model followed this. Sesame/tahini carry the exact same "never
+// present" severity as nuts here -- NOT a lesser "flag it as an allergen" treatment, which is why
+// ALLERGEN_VOCAB below no longer lists sesame at all (same reasoning nuts were never in that list).
+const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly prohibits ALL nuts, sesame, and their derived ingredients, with zero exceptions. Never include any tree nut (almond, cashew, walnut, pistachio, hazelnut, pecan, macadamia, pine nut, brazil nut, chestnut, etc.), peanut, sesame in any form (sesame seeds, sesame oil, tahini/sesame paste, halva, za'atar, benne, gomashio, etc.), or nut/sesame-derived product (nut butter, nut milk, nut oil, marzipan, praline, nutella, nougat, etc.) in ANY suggested ingredient list -- even if the dish traditionally or typically includes one. If a dish's most natural ingredients would normally include a nut or sesame product, substitute a safe alternative that fits the dish (e.g. sunflower seed butter instead of peanut butter, or instead of tahini in a dish like hummus; extra olive oil and lemon juice instead of tahini; a plain breadcrumb or herb crust instead of a sesame crust; a sesame-free herb blend -- thyme, sumac, oregano -- instead of za'atar) or simply omit that component -- never include the nut or sesame itself. Treat this with the same seriousness as an allergy-critical instruction, because it is one.`;
 
 // The model's laziest failure mode: naming a sub-preparation itself ("dough", "filling", "sauce")
 // as if it were an ingredient, instead of decomposing it into what it's actually made of. Broken
@@ -92,13 +94,17 @@ Example -- RIGHT (the bread is decomposed into its real base ingredients too, sa
 // "mozzarella cheese" into the ingredients string, so reading gluten/dairy back off of that is a
 // much more grounded inference than a second blind guess would be. Closed vocabulary (not
 // freeform) so the output stays consistent and filterable across dishes -- the FDA "big 9" minus
-// the two nut categories, which NUT_RESTRICTION already forbids as ingredients and which must
-// ALSO never appear here as a flagged allergen (a dish can't truthfully claim to contain a nut
-// that was never allowed into its ingredient list in the first place).
-const ALLERGEN_VOCAB = ["egg", "gluten", "dairy", "soy", "shellfish", "fish", "sesame"];
+// the two nut categories AND sesame, all three of which NUT_RESTRICTION already forbids as
+// ingredients and which must ALSO never appear here as a flagged allergen (a dish can't
+// truthfully claim to contain a nut or sesame that was never allowed into its ingredient list in
+// the first place). Sesame IS technically one of the FDA's "big 9" allergens and would normally
+// belong in this vocabulary the same way gluten/dairy/soy do -- it's deliberately excluded here
+// because this school's policy treats it like a nut (never present at all), not like a
+// still-permitted allergen that just needs flagging.
+const ALLERGEN_VOCAB = ["egg", "gluten", "dairy", "soy", "shellfish", "fish"];
 const ALLERGEN_RULE = `For each dish, also identify which common allergens it contains, based ONLY on the ingredients you actually listed for it (e.g. "all-purpose flour" -> gluten, "milk"/"butter"/"mozzarella cheese" -> dairy, "egg" -> egg, "soy sauce" -> soy). Choose ONLY from this fixed list, using these exact lowercase words: ${ALLERGEN_VOCAB.join(", ")}. Format as a SINGLE string of the applicable allergen words (from that list only) separated by " - ", ordered in the same order as the list above, e.g. "gluten - dairy - egg" for a dish containing flour, butter, and egg. If none of these allergens apply, return an empty string. Do not invent allergen categories outside this list, and do not explain your reasoning -- just the dash-separated word list.
 
-CRITICAL: nuts and peanuts are NEVER a valid entry here, under any circumstance -- they are not even in the list above. Never write "nut", "nuts", "tree nut", "peanut", or any variant as an allergen, even if you think the dish traditionally contains one; per the restriction at the top of this prompt, a nut should never have been in the ingredients list to begin with, so there is nothing to flag.
+CRITICAL: nuts, peanuts, and sesame are NEVER a valid entry here, under any circumstance -- they are not even in the list above. Never write "nut", "nuts", "tree nut", "peanut", "sesame", "tahini", or any variant as an allergen, even if you think the dish traditionally contains one; per the restriction at the top of this prompt, a nut or sesame product should never have been in the ingredients list to begin with, so there is nothing to flag.
 
 Example (matches the Pizza example above):
 "Pizza" ingredients "all-purpose flour - sugar - salt - butter - milk - yeast - olive oil - tomato sauce - mozzarella cheese" -> allergens "gluten - dairy"`;
@@ -164,12 +170,17 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // No thinking/effort -- Haiku 4.5 doesn't support effort, and this is a single-shot
-    // structured suggestion with no need for extended reasoning. Text-only, so cheaper/faster
-    // than extract-recipe's image calls, same as estimate-calories/estimate-am-snack-style.
+    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
+    // explicitly disabled: this is still a single-shot structured suggestion with no need for
+    // extended reasoning, and Sonnet 5 runs ADAPTIVE (on) thinking by default when the param is
+    // omitted, unlike Haiku 4.5 where omitting it meant off -- leaving it unset here would
+    // silently add latency/cost on top of the higher per-token price already accepted for this
+    // upgrade. {type:"disabled"} is fully supported on Sonnet 5 (unlike Opus 5, which has its own
+    // tool-call-leaks-into-text-instead-of-tool_use pitfall when thinking is off).
     const response = await client.messages.create({
-      model: "claude-haiku-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 8192,
+      thinking: { type: "disabled" },
       // A system prompt (unique to this function -- no other Edge Function here uses one) is
       // weighted more heavily by the model than the same instruction inline in the user message,
       // which is exactly what a hard safety constraint like this needs. Repeated inline in

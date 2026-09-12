@@ -108,9 +108,12 @@ const RECIPE_SCHEMA = {
 
 // Identical wording to suggest-dish-ingredients/index.ts's own NUT_RESTRICTION -- same policy,
 // same reasoning (repeated in both the system prompt and inline, belt-and-suspenders), applied
-// here too since a full generated recipe is just as capable of naming a nut ingredient as a
-// suggested ingredient list is.
-const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly prohibits ALL nuts and nut-derived ingredients, with zero exceptions. Never include any tree nut (almond, cashew, walnut, pistachio, hazelnut, pecan, macadamia, pine nut, brazil nut, chestnut, etc.), peanut, or nut-derived product (nut butter, nut milk, nut oil, marzipan, praline, nutella, nougat, etc.) in ANY generated recipe -- even if the dish traditionally or typically includes one. If a dish's most natural recipe would normally include a nut, substitute a safe non-nut alternative that fits the dish (e.g. sunflower seed butter instead of peanut butter) or simply omit that component -- never include the nut itself. Treat this with the same seriousness as an allergy-critical instruction, because it is one.`;
+// here too since a full generated recipe is just as capable of naming a nut or sesame ingredient
+// as a suggested ingredient list is. This function has no separate "allergens" field the way
+// suggest-dish-ingredients does -- ingredients are the only place a nut/sesame violation could
+// surface here, and lib/nutFilter.js's matchNutTerms scans every generated ingredient name as the
+// code-level backstop regardless of how well this prompt was followed.
+const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly prohibits ALL nuts, sesame, and their derived ingredients, with zero exceptions. Never include any tree nut (almond, cashew, walnut, pistachio, hazelnut, pecan, macadamia, pine nut, brazil nut, chestnut, etc.), peanut, sesame in any form (sesame seeds, sesame oil, tahini/sesame paste, halva, za'atar, benne, gomashio, etc.), or nut/sesame-derived product (nut butter, nut milk, nut oil, marzipan, praline, nutella, nougat, etc.) in ANY generated recipe -- even if the dish traditionally or typically includes one. If a dish's most natural recipe would normally include a nut or sesame product, substitute a safe alternative that fits the dish (e.g. sunflower seed butter instead of peanut butter, or instead of tahini in a dish like hummus; extra olive oil and lemon juice instead of tahini; a plain breadcrumb or herb crust instead of a sesame crust; a sesame-free herb blend -- thyme, sumac, oregano -- instead of za'atar) or simply omit that component -- never include the nut or sesame itself. Treat this with the same seriousness as an allergy-critical instruction, because it is one.`;
 
 // Shorter version of suggest-dish-ingredients' own DECOMPOSITION_RULE -- a full recipe's
 // ingredient list is inherently more decomposed than a bare ingredient-name suggestion (you
@@ -166,7 +169,7 @@ ${buildWasteRule(existingWasteTypeNames)}
 
 Each item carries its own "index" number and may carry a "category" (the menu category this dish was listed under, for context on what kind of dish this is -- e.g. a "Soup" category item should be a soup, an "AM Snack" item should be breakfast/snack-appropriate). Return exactly one recipe entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate recipe. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
 
-Remember: absolutely no nuts or nut-derived ingredients anywhere in your output, per the restriction stated at the top. Per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients as their own rows. And per the units rule above, every single quantity is in grams ("g") only -- never "ml" or any other unit, even for a liquid, oil, sauce, or count-based ingredient.
+Remember: absolutely no nuts, sesame, or their derived ingredients anywhere in your output, per the restriction stated at the top. Per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients as their own rows. And per the units rule above, every single quantity is in grams ("g") only -- never "ml" or any other unit, even for a liquid, oil, sauce, or count-based ingredient.
 
 Items (JSON array): ${JSON.stringify(items)}`;
 }
@@ -217,13 +220,23 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // No thinking/effort -- Haiku 4.5 doesn't support effort. max_tokens well above
+    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
+    // explicitly disabled for consistency with every other Edge Function here (Sonnet 5 runs
+    // ADAPTIVE (on) thinking by default when the param is omitted, unlike Haiku 4.5 where omitting
+    // it meant off, and leaving it unset would silently add latency/cost on top of the higher
+    // per-token price already accepted). Of all seven AI-calling functions in this app, this is
+    // the one most likely to actually benefit from thinking being turned back on -- generating a
+    // coherent multi-process recipe (ingredients that need to add up sensibly, method steps that
+    // need to match them) is a meaningfully harder task than the single-field
+    // classification/extraction the other six do, so it's worth trying `{type:"adaptive"}` here
+    // first if recipe quality ever needs a boost. max_tokens stays well above
     // suggest-dish-ingredients' 8192 -- a full recipe (ingredients + method steps) per item is
     // much larger than one short ingredient string, and this batch is already sized down (15
     // ceiling, ~8 intended) specifically to fit within a single response reliably.
     const response = await client.messages.create({
-      model: "claude-haiku-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 16000,
+      thinking: { type: "disabled" },
       system: NUT_RESTRICTION,
       messages: [
         { role: "user", content: buildPrompt(items, existingWasteTypeNames) },

@@ -107,15 +107,19 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // No thinking/effort -- Haiku 4.5 doesn't support effort, and this is a single-shot
-    // structured estimation with no need for extended reasoning. Text-only, so cheaper/faster
-    // than extract-recipe's image calls, same as translate-recipe. 8192 is generous headroom for
-    // even a full 150-item MAX_ITEMS batch's worth of short `{"index":N,"calories_per_100g":N}`
-    // entries -- kept high from an earlier (mistaken) max_tokens-truncation theory; harmless to
-    // leave generous even though the real fix turned out to be the index-tagging above.
+    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
+    // explicitly disabled: this is still a single-shot structured estimation with no need for
+    // extended reasoning, and Sonnet 5 runs ADAPTIVE (on) thinking by default when the param is
+    // omitted, unlike Haiku 4.5 where omitting it meant off -- leaving it unset would silently add
+    // latency/cost on top of the higher per-token price already accepted for this upgrade. 8192 is
+    // generous headroom for even a full 150-item MAX_ITEMS batch's worth of short
+    // `{"index":N,"calories_per_100g":N}` entries -- kept high from an earlier (mistaken)
+    // max_tokens-truncation theory; harmless to leave generous even though the real fix turned
+    // out to be the index-tagging above, and unrelated to the model swap.
     const response = await client.messages.create({
-      model: "claude-haiku-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 8192,
+      thinking: { type: "disabled" },
       messages: [
         { role: "user", content: buildPrompt(items) },
       ],

@@ -62,6 +62,12 @@ const state = {
     presentationMode: null, presentationText: '', presentationItems: [],
     importedRecipe: null,
     activeTab: 'drafts', fileName: '', uploadToken: null,
+    // Drafts are grouped into per-menu "folders" by source_menu_label (see
+    // renderGeneratedDraftsList) -- null shows the folder list, a label string shows just that
+    // menu's own drafts. Persists across tab switches the same way activeTab does, so leaving and
+    // returning to Drafts keeps her place; reset to null on a fresh upload so a new generation
+    // run always lands on the folder list rather than some other menu's folder she had open.
+    draftFolder: null,
   },
   // Materials/Trays catalog -- same list<->form drill-down shape as recipes/extractor above
   // (view/formId), single-photo model like Recipe Book (pendingPhoto/removePhoto). shapeType and
@@ -1181,7 +1187,7 @@ async function renderHistoryView(main) {
       btn.textContent = 'Exporting…';
       try {
         const result = entry.isBatch
-          ? await window.api.exportAllSectionsToExcel({ menuIdsBySection: entry.menuIdsBySection })
+          ? await window.api.exportAllSectionsToExcel({ menuIdsBySection: entry.menuIdsBySection, label: entry.label })
           : await window.api.exportMenuToExcel({ generatedMenuId: entry.menuIds[0] });
         if (result.success) alert(`Exported to ${result.path}`);
         else if (!result.cancelled) alert('Export failed.');
@@ -1534,7 +1540,7 @@ async function exportBuilderMenu() {
     menuIdsBySection[code] = menuId;
   }
 
-  const result = await window.api.exportAllSectionsToExcel({ menuIdsBySection });
+  const result = await window.api.exportAllSectionsToExcel({ menuIdsBySection, label });
   if (result.success) {
     statusEl.textContent = `Exported to ${result.path}`;
   } else if (!result.cancelled) {
@@ -3216,6 +3222,66 @@ function showCreateWasteTypeForm(proc, wasteTypes, onChange) {
   });
 }
 
+// Full-size photo viewer -- shared by every recipe photo preview (Recipe Book/Generator's single
+// preview, Recipe Extractor's gallery thumbnails), whether the photo was manually uploaded or AI-
+// generated (see wireGeneratePhotoButton below): clicking a preview thumbnail (capped at 220px)
+// currently has no way to see the photo any larger. Reuses .modal-overlay's own backdrop/z-index
+// for visual consistency with every other overlay in this app, but skips the .modal card chrome
+// entirely -- just the image itself, sized up to 90vw/90vh. Same backdrop-click-to-close
+// convention openRecipePreviewModal already uses, plus Escape (nothing else in this app currently
+// needs Escape-to-close, since every other modal has an explicit Close/Cancel button, but a
+// full-bleed image viewer with no visible chrome besides one small × button benefits from it).
+function openPhotoLightbox(src) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <button type="button" class="photo-lightbox-close" aria-label="Close">×</button>
+    <img class="photo-lightbox-img" src="${src}" />
+  `;
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKeyDown); };
+  function onKeyDown(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKeyDown);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.photo-lightbox-close').addEventListener('click', close);
+}
+
+// Shared "Generate Photo" wiring for Recipe Book, Recipe Extractor, and Recipe Generator's edit
+// forms -- all three call this the same way: read whatever's CURRENTLY in the form (including
+// unsaved edits, per the chef's own request -- `getRecipeInfo` reads live DOM/state, never a
+// re-fetch of the saved recipe), ask the shared generate-recipe-photo IPC channel for a photo,
+// and hand the result to `onGenerated` to drop into that form's own pending-photo slot -- the
+// EXACT same slot manual upload already populates, so the existing Save button uploads it through
+// that recipe type's own existing photo-upload path with zero changes there, and nothing is
+// persisted until she actually clicks Save (same rule as any other form edit).
+//
+// Indeterminate progress panel (createProgressPanel), not a plain "Generating…" label -- a real
+// call measured at ~138s end to end (see generateDishImage.js's own comment), so this needs to
+// read as "working", not "stuck", the same way Recipe Extractor's own photo-extraction call
+// already handles its own multi-second wait.
+function wireGeneratePhotoButton({ buttonId, progressWrapId, getRecipeInfo, onGenerated }) {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const info = getRecipeInfo();
+    if (!info) return; // getRecipeInfo already alerted (e.g. missing recipe name)
+    btn.disabled = true;
+    const progressWrap = document.getElementById(progressWrapId);
+    const panel = createProgressPanel(progressWrap, { label: 'Generating photo… this can take a couple of minutes.' });
+    try {
+      const result = await window.api.generateRecipePhoto(info);
+      const mime = result.ext === 'png' ? 'image/png' : 'image/jpeg';
+      const dataUrl = `data:${mime};base64,${result.b64}`;
+      onGenerated({ dataUrl, base64: result.b64, ext: result.ext });
+    } catch (err) {
+      alert(`Couldn't generate a photo: ${err.message}`);
+    } finally {
+      panel.destroy();
+      if (document.body.contains(btn)) btn.disabled = false;
+    }
+  });
+}
+
 async function renderRecipeFormView(main, ns) {
   const s = state[ns.stateKey];
   const editing = !!s.formId;
@@ -3303,14 +3369,22 @@ async function renderRecipeFormView(main, ns) {
     <div class="field" style="margin-bottom:20px;">
       <label>Photos (up to 10)</label>
       <div id="rf-photo-gallery" class="photo-gallery"></div>
-      <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" multiple />
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" multiple />
+        <button type="button" class="secondary" id="rf-generate-photo-btn">Generate Photo</button>
+      </div>
+      <div id="rf-generate-photo-progress-wrap" style="margin-top:8px;"></div>
     </div>
     ` : `
     <div class="field" style="margin-bottom:16px; max-width:320px;">
       <label>Upload Photo</label>
-      <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" />
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <input type="file" id="rf-photo-input" accept="image/jpeg,image/png" />
+        <button type="button" class="secondary" id="rf-generate-photo-btn">Generate Photo</button>
+      </div>
+      <div id="rf-generate-photo-progress-wrap" style="margin-top:8px;"></div>
       <div id="rf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
-        <img id="rf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <img id="rf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block; cursor:zoom-in;" title="Click to view full size" />
         <button type="button" class="secondary" id="rf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
       </div>
     </div>
@@ -3323,6 +3397,23 @@ async function renderRecipeFormView(main, ns) {
     <button class="primary" id="rf-save-btn">${editing ? 'Save Changes' : 'Save Recipe'}</button>
     <span id="rf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
   `;
+
+  // Reads live form state, including any unsaved edits -- s.processes is the same in-memory array
+  // saveProcessRecipeForm itself reads from, kept in sync with every ingredient/method input's own
+  // 'input' listener as she types (see renderProcessCards below), so this never needs a re-fetch.
+  function getRecipeInfoForPhoto() {
+    const name = document.getElementById('rf-name').value.trim();
+    if (!name) { alert('Please enter a recipe name first.'); return null; }
+    const category = document.getElementById('rf-category').value.trim() || undefined;
+    const ingredients = s.processes.flatMap(proc => proc.ingredientRows
+      .filter(r => r.name.trim() !== '')
+      .map(r => r.name.trim()));
+    const method = s.processes
+      .map(proc => collectTextListFieldValue(proc, makeProcessMethodCfg(proc)))
+      .filter(Boolean)
+      .join('; ') || undefined;
+    return { dishName: name, category, ingredients, method };
+  }
 
   if (ns.photoModel === 'gallery') {
     function totalPhotoCount() {
@@ -3341,9 +3432,9 @@ async function renderRecipeFormView(main, ns) {
         ...s.pendingPhotos.map(p => ({ kind: 'pending', key: p.localId, src: p.dataUrl })),
       ];
       gallery.innerHTML = tiles.length > 0
-        ? tiles.map(t => `
+        ? tiles.map((t, i) => `
             <div class="photo-thumb">
-              <img src="${t.src}" />
+              <img src="${t.src}" data-lightbox-index="${i}" style="cursor:zoom-in;" title="Click to view full size" />
               <button type="button" class="photo-thumb-remove" data-remove-photo="${t.kind}:${t.key}" title="Remove photo">×</button>
             </div>
           `).join('')
@@ -3359,6 +3450,9 @@ async function renderRecipeFormView(main, ns) {
           }
           renderPhotoGallery();
         });
+      });
+      gallery.querySelectorAll('[data-lightbox-index]').forEach(img => {
+        img.addEventListener('click', () => openPhotoLightbox(tiles[parseInt(img.dataset.lightboxIndex, 10)].src));
       });
     }
 
@@ -3392,6 +3486,17 @@ async function renderRecipeFormView(main, ns) {
       if (hitCap) alert('You can attach up to 10 photos per recipe.');
     });
 
+    wireGeneratePhotoButton({
+      buttonId: 'rf-generate-photo-btn',
+      progressWrapId: 'rf-generate-photo-progress-wrap',
+      getRecipeInfo: getRecipeInfoForPhoto,
+      onGenerated: ({ dataUrl, base64, ext }) => {
+        if (totalPhotoCount() >= 10) { alert('You can attach up to 10 photos per recipe.'); return; }
+        s.pendingPhotos.push({ localId: ++_recipeRowLocalIdCounter, dataUrl, base64, ext });
+        renderPhotoGallery();
+      },
+    });
+
     renderPhotoGallery();
   } else {
     function updatePhotoPreview() {
@@ -3401,6 +3506,10 @@ async function renderRecipeFormView(main, ns) {
       document.getElementById('rf-photo-preview-wrap').style.display = src ? '' : 'none';
       document.getElementById('rf-photo-preview').src = src || '';
     }
+    document.getElementById('rf-photo-preview').addEventListener('click', () => {
+      const src = document.getElementById('rf-photo-preview').src;
+      if (src) openPhotoLightbox(src);
+    });
 
     document.getElementById('rf-photo-input').addEventListener('change', (e) => {
       const file = e.target.files[0];
@@ -3432,6 +3541,17 @@ async function renderRecipeFormView(main, ns) {
       s.removePhoto = true;
       document.getElementById('rf-photo-input').value = '';
       updatePhotoPreview();
+    });
+
+    wireGeneratePhotoButton({
+      buttonId: 'rf-generate-photo-btn',
+      progressWrapId: 'rf-generate-photo-progress-wrap',
+      getRecipeInfo: getRecipeInfoForPhoto,
+      onGenerated: ({ dataUrl, base64, ext }) => {
+        s.pendingPhoto = { dataUrl, base64, ext };
+        s.removePhoto = false;
+        updatePhotoPreview();
+      },
     });
   }
 
@@ -3830,8 +3950,22 @@ async function renderRecipeGeneratorTabs(main, ns) {
       s.fileName = file.name;
       const warningNote = result.failures && result.failures.length
         ? `\n\n${result.failures.length} warning(s) -- see the app logs for details.` : '';
-      alert(`Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s). Review them in the Drafts tab.${warningNote}`);
+      // existingCount is how many eligible dishes already had a recipe (draft or confirmed, from
+      // any menu) and were skipped before ever calling the AI -- see parse-and-generate-recipes'
+      // own dedup step. Phrased separately from the plain case so "all skipped" doesn't read as
+      // if 0 were generated out of 0 attempted.
+      const existingCount = result.existingCount || 0;
+      let summary;
+      if (existingCount === 0) {
+        summary = `Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s).`;
+      } else if (result.dishCount === existingCount) {
+        summary = `All ${result.dishCount} eligible dish(es) already have a recipe -- nothing new to generate.`;
+      } else {
+        summary = `${result.dishCount} eligible dish(es) found -- ${existingCount} already have a recipe (skipped), generated ${result.createdCount} of ${result.dishCount - existingCount} new one(s).`;
+      }
+      alert(`${summary} Review them in the Drafts tab.${warningNote}`);
       s.activeTab = 'drafts';
+      s.draftFolder = null;
       renderRecipeGeneratorTabs(main, ns);
     } catch (err) {
       alert(`Couldn't process this file: ${err.message}`);
@@ -3855,18 +3989,95 @@ async function renderRecipeGeneratorTabs(main, ns) {
   else await renderGeneratedConfirmedList(content, ns, main);
 }
 
+// Drafts are grouped into per-menu "folders" (requirement: don't mix every upload's drafts into
+// one flat list) keyed by source_menu_label -- a pure client-side grouping of whatever
+// listGeneratedRecipeDrafts() currently returns, not a separately persisted entity (there's no
+// "folder" row anywhere in the schema). state[ns.stateKey].draftFolder is null for the folder
+// list, or a label string to drill into that one menu's own drafts -- same list<->detail idiom
+// the review form's own back button already uses one level up, not a new interaction style.
 async function renderGeneratedDraftsList(container, ns, main) {
+  const s = state[ns.stateKey];
   container.innerHTML = 'Loading…';
   const drafts = await window.api.listGeneratedRecipeDrafts();
+  if (s.draftFolder !== null) return renderDraftFolderContents(container, ns, main, drafts, s.draftFolder);
+  return renderDraftFolderList(container, ns, main, drafts);
+}
+
+// One row per source_menu_label present among today's drafts, with a live count of how many of
+// its rows are still pending review. Every row listGeneratedRecipeDrafts() returns already has
+// status='draft' (its own query filters to that), so "pending" and "present in this list" are the
+// same thing -- no separate reviewed/unreviewed sub-state needed, the count is just the group's
+// size. A folder that empties out (every draft inside it confirmed or deleted) simply stops
+// appearing here on the next render -- same as how a single confirmed draft already vanishes from
+// the old flat list today; there's no persisted folder to separately hide/keep around.
+function renderDraftFolderList(container, ns, main, drafts) {
   if (drafts.length === 0) {
     container.innerHTML = `<div class="empty-state"><div class="display">No drafts yet</div>Click "Upload Menu File" above to generate recipes from a menu.</div>`;
     return;
   }
+  const bySource = new Map();
+  for (const d of drafts) {
+    const key = d.source_menu_label || 'Unknown source';
+    if (!bySource.has(key)) bySource.set(key, []);
+    bySource.get(key).push(d);
+  }
+  // Most recently generated menu first -- same recency ordering the old flat list's own
+  // `order('created_at', { ascending: false })` gave, just applied per-group.
+  const folders = [...bySource.entries()]
+    .map(([label, rows]) => ({ label, rows, latest: Math.max(...rows.map(r => new Date(r.created_at).getTime())) }))
+    .sort((a, b) => b.latest - a.latest);
+
   container.innerHTML = `
+    <table class="recipes-table rg-drafts-table">
+      <thead><tr><th>Source Menu</th><th>Pending Review</th><th></th></tr></thead>
+      <tbody>
+        ${folders.map((f, i) => `
+          <tr>
+            <td>${f.label}</td>
+            <td>${f.rows.length} to review</td>
+            <td style="text-align:right"><button class="icon-btn" data-rg-open-folder="${i}">Open</button></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  container.querySelectorAll('[data-rg-open-folder]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state[ns.stateKey].draftFolder = folders[parseInt(btn.dataset.rgOpenFolder, 10)].label;
+      renderRecipeGeneratorTabs(main, ns);
+    });
+  });
+}
+
+// One menu's own drafts -- identical row markup/Review/Delete actions the old flat list always
+// had, just pre-filtered to one source_menu_label, fronted by a back link that plays the same
+// role as the review form's own "<- Back to Recipe Generator" button.
+function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
+  const rows = drafts.filter(d => (d.source_menu_label || 'Unknown source') === folderLabel);
+  const backBtn = `<button class="secondary" id="rg-drafts-back-btn" style="margin-bottom:14px;">← Back to Drafts</button>`;
+
+  function wireBack() {
+    document.getElementById('rg-drafts-back-btn').addEventListener('click', () => {
+      state[ns.stateKey].draftFolder = null;
+      renderRecipeGeneratorTabs(main, ns);
+    });
+  }
+
+  // Every draft in this folder was just confirmed/deleted elsewhere (or this is the last one and
+  // she just acted on it) -- same calm, in-place empty state the top-level list already uses,
+  // rather than yanking her back to the folder list without warning.
+  if (rows.length === 0) {
+    container.innerHTML = `${backBtn}<div class="empty-state"><div class="display">No more drafts here</div>Every dish from "${folderLabel}" has been reviewed.</div>`;
+    wireBack();
+    return;
+  }
+
+  container.innerHTML = `
+    ${backBtn}
     <table class="recipes-table rg-drafts-table">
       <thead><tr><th>Dish</th><th>Category</th><th>Source Menu</th><th>Generated</th><th></th></tr></thead>
       <tbody>
-        ${drafts.map(d => `
+        ${rows.map(d => `
           <tr>
             <td>${d.name}</td>
             <td>${d.category || '–'}</td>
@@ -3881,12 +4092,13 @@ async function renderGeneratedDraftsList(container, ns, main) {
       </tbody>
     </table>
   `;
+  wireBack();
   container.querySelectorAll('[data-rg-review]').forEach(btn => {
     btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.rgReview, 10)));
   });
   container.querySelectorAll('[data-rg-delete]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      const d = drafts.find(x => x.id === parseInt(btn.dataset.rgDelete, 10));
+      const d = rows.find(x => x.id === parseInt(btn.dataset.rgDelete, 10));
       if (!confirm(`Delete the draft "${d.name}"? This cannot be undone.`)) return;
       await window.api.deleteGeneratedRecipe(d.id);
       renderRecipeGeneratorTabs(main, ns);
@@ -4260,9 +4472,13 @@ async function renderGeneratedRecipeFormView(main, ns) {
     </div>
     <div class="field" style="margin-bottom:16px; max-width:320px;">
       <label>Upload Photo</label>
-      <input type="file" id="rg-photo-input" accept="image/jpeg,image/png" />
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <input type="file" id="rg-photo-input" accept="image/jpeg,image/png" />
+        <button type="button" class="secondary" id="rg-generate-photo-btn">Generate Photo</button>
+      </div>
+      <div id="rg-generate-photo-progress-wrap" style="margin-top:8px;"></div>
       <div id="rg-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
-        <img id="rg-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <img id="rg-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block; cursor:zoom-in;" title="Click to view full size" />
         <button type="button" class="secondary" id="rg-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
       </div>
     </div>
@@ -4283,6 +4499,10 @@ async function renderGeneratedRecipeFormView(main, ns) {
     document.getElementById('rg-photo-preview-wrap').style.display = src ? '' : 'none';
     document.getElementById('rg-photo-preview').src = src || '';
   }
+  document.getElementById('rg-photo-preview').addEventListener('click', () => {
+    const src = document.getElementById('rg-photo-preview').src;
+    if (src) openPhotoLightbox(src);
+  });
 
   document.getElementById('rg-photo-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -4314,6 +4534,32 @@ async function renderGeneratedRecipeFormView(main, ns) {
     s.removePhoto = true;
     document.getElementById('rg-photo-input').value = '';
     updatePhotoPreview();
+  });
+
+  // Same live-form-state read as Recipe Book/Extractor's own getRecipeInfoForPhoto -- s.processes
+  // is kept in sync with every ingredient/method input's own 'input' listener as she edits, so
+  // this reflects unsaved changes without needing a re-fetch or an intermediate save.
+  wireGeneratePhotoButton({
+    buttonId: 'rg-generate-photo-btn',
+    progressWrapId: 'rg-generate-photo-progress-wrap',
+    getRecipeInfo: () => {
+      const name = document.getElementById('rg-name').value.trim();
+      if (!name) { alert('Please enter a recipe name first.'); return null; }
+      const category = document.getElementById('rg-category').value.trim() || undefined;
+      const ingredients = s.processes.flatMap(proc => proc.ingredientRows
+        .filter(r => r.name.trim() !== '')
+        .map(r => r.name.trim()));
+      const method = s.processes
+        .map(proc => collectTextListFieldValue(proc, makeProcessMethodCfg(proc)))
+        .filter(Boolean)
+        .join('; ') || undefined;
+      return { dishName: name, category, ingredients, method };
+    },
+    onGenerated: ({ dataUrl, base64, ext }) => {
+      s.pendingPhoto = { dataUrl, base64, ext };
+      s.removePhoto = false;
+      updatePhotoPreview();
+    },
   });
 
   function renderProcessCards() {

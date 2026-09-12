@@ -725,6 +725,20 @@ table.materials-table td.cat-cell {
 .portion-cell { display: flex; flex-direction: row; align-items: center; gap: 7px; font-size: 13px; }
 .portion-cell input[type="checkbox"] { width: auto; }
 
+/* ---------------- Photo lightbox ---------------- */
+/* Reuses .modal-overlay's own backdrop/z-index -- just a bare full-size image instead of a
+   .modal card, since there's no form chrome to fit here, only the photo itself. */
+.photo-lightbox-img {
+  max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+  cursor: default;
+}
+.photo-lightbox-close {
+  position: fixed; top: 20px; right: 28px; width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(30,42,36,0.55); color: white; border: none; font-size: 22px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.photo-lightbox-close:hover { background: rgba(30,42,36,0.75); }
+
 /* ---------------- Export preview modal ---------------- */
 /* Reuses .modal's own scroll behavior (max-height: 84vh; overflow-y: auto) unchanged -- a long
    recipe (multi-process Extractor card, long method list) just scrolls, same as every other
