@@ -28,12 +28,14 @@ const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 // intended batch size, same relationship MAX_TEXTS has to translate-recipe's actual usage.
 const MAX_ITEMS = 150;
 const MAX_NAME_LENGTH = 200;
+const MAX_INGREDIENTS_LENGTH = 1000;
 
 interface EstimateItem {
   index: number;
   name: string;
   category?: string | null;
   protein?: string | null;
+  ingredients?: string | null;
 }
 
 const ESTIMATE_SCHEMA = {
@@ -57,7 +59,9 @@ const ESTIMATE_SCHEMA = {
 };
 
 function buildPrompt(items: EstimateItem[]): string {
-  return `For each school/staff cafeteria menu item below, estimate a typical calories-per-100g value (kcal per 100 grams of the prepared, as-served dish) for that item. Base the estimate on its name, category, and protein type when given -- use general nutrition knowledge of similar dishes, since no recipe or ingredient list is provided.
+  return `For each school/staff cafeteria menu item below, estimate a typical calories-per-100g value (kcal per 100 grams of the prepared, as-served dish) for that item.
+
+Some items carry an "ingredients" field -- a real ingredient list (with quantities, when known) from an actual recipe for that exact dish. When present, base your estimate primarily on THAT real composition (it's much more reliable than guessing from the name alone), not on generic assumptions about what a dish with that name usually contains. When "ingredients" is absent, fall back to the item's name, category, and protein type, using general nutrition knowledge of similar dishes -- this is a genuinely less reliable basis, so lean on realistic ranges for the dish TYPE rather than anchoring on one specific guessed preparation (e.g. a fried, oil-heavy version vs. a plain steamed one can differ by several hundred kcal/100g for the same dish name).
 
 Each item carries its own "index" number. Return exactly one estimate object per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct catalog entries and each needs its own separate estimate. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
 
@@ -102,6 +106,9 @@ Deno.serve(async (req) => {
     }
     if (it.name.length > MAX_NAME_LENGTH) {
       return ok({ success: false, error: `An item name exceeds ${MAX_NAME_LENGTH} characters` });
+    }
+    if (it.ingredients != null && (typeof it.ingredients !== "string" || it.ingredients.length > MAX_INGREDIENTS_LENGTH)) {
+      return ok({ success: false, error: `An item's ingredients field exceeds ${MAX_INGREDIENTS_LENGTH} characters` });
     }
   }
 

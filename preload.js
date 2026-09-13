@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld('api', {
   // Generator's edit forms all call this same channel (see main.js's own comment on why one
   // handler covers all three).
   generateRecipePhoto: (payload) => ipcRenderer.invoke('generate-recipe-photo', payload),
+  savePhotoToComputer: (payload) => ipcRenderer.invoke('save-photo-to-computer', payload),
   onRecipeGeneratorProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('recipe-generator-progress', listener);

@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path = require('path');
+const fs = require('fs/promises');
 const crypto = require('crypto');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log/main');
@@ -487,7 +488,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, am_snack_style')
+    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style')
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
 
@@ -506,6 +507,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         protein_code: pt?.code ?? null,
         protein_name: pt?.name ?? null,
         calories_per_100g: mi.calories_per_100g,
+        calories_unverified: mi.calories_unverified,
         am_snack_style: mi.am_snack_style,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
@@ -686,6 +688,14 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
       is_daily_repeating: isDailyRepeating ? 1 : 0,
       is_active: isActive ? 1 : 0,
       calories_per_100g: caloriesPer100g ?? null,
+      // A manual save through this modal always overwrites every field with its current form
+      // value regardless of whether she actually touched it (same as name/category/protein
+      // always have) -- so a save here always clears calories_unverified too, on the same
+      // "this is the state she's now confirming" logic. If she re-saves without noticing an
+      // unverified AI estimate, that's a real limitation (the flag currently only shows in the
+      // Dish Catalog list, not inside this modal) -- flagged as a judgment call, not silently
+      // decided.
+      calories_unverified: false,
       am_snack_style: resolvedAmSnackStyle,
     })
     .eq('id', id);
@@ -777,6 +787,130 @@ ipcMain.handle('update-item-rc', async (e, { id, rcCode }) => {
 const CALORIE_ESTIMATE_IN_SCOPE_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
 const CALORIE_ESTIMATE_BATCH_SIZE = 50;
 
+// Joins a Dish Catalog item's ROWS (recipe_ingredients/generated_recipe_ingredients/
+// extracted_recipe_ingredients) into one compact "name (qty unit), name (qty unit), ..." string
+// for the calorie prompt -- `rows` already carries a real ingredient name per entry by the time
+// it gets here (each of the three lookup functions below resolves that differently, since Book/
+// Extractor store ingredients by catalog FK while Generator stores free text -- see each one's
+// own comment).
+function formatIngredientDescription(rows) {
+  const parts = (rows || [])
+    .filter((r) => r.name)
+    .map((r) => (r.quantity != null && r.unit ? `${r.name} (${r.quantity}${r.unit})` : r.name));
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+// Recipe Book stores ingredients by ingredient_id (a real ingredients-catalog FK), not free text
+// -- resolve names via that catalog after collecting every process's ingredient rows.
+async function describeBookRecipeIngredients(recipeId) {
+  const { data: procs } = await supabase.from('recipe_processes').select('id').eq('recipe_id', recipeId);
+  if (!procs?.length) return null;
+  const { data: rows } = await supabase.from('recipe_ingredients')
+    .select('ingredient_id, quantity, unit').in('process_id', procs.map((p) => p.id));
+  if (!rows?.length) return null;
+  const ingredientIds = [...new Set(rows.map((r) => r.ingredient_id).filter(Boolean))];
+  if (ingredientIds.length === 0) return null;
+  const { data: names } = await supabase.from('ingredients').select('id, name').in('id', ingredientIds);
+  const nameById = new Map((names || []).map((n) => [n.id, n.name]));
+  return formatIngredientDescription(rows.map((r) => ({ name: nameById.get(r.ingredient_id), quantity: r.quantity, unit: r.unit })));
+}
+
+// Recipe Extractor's own separate ingredient catalog (extracted_ingredients, EX-IN- prefixed) --
+// same FK-lookup shape as Book above, just its own tables throughout.
+async function describeExtractedRecipeIngredients(recipeId) {
+  const { data: procs } = await supabase.from('extracted_recipe_processes').select('id').eq('extracted_recipe_id', recipeId);
+  if (!procs?.length) return null;
+  const { data: rows } = await supabase.from('extracted_recipe_ingredients')
+    .select('extracted_ingredient_id, quantity, unit').in('extracted_recipe_process_id', procs.map((p) => p.id));
+  if (!rows?.length) return null;
+  const ingredientIds = [...new Set(rows.map((r) => r.extracted_ingredient_id).filter(Boolean))];
+  if (ingredientIds.length === 0) return null;
+  const { data: names } = await supabase.from('extracted_ingredients').select('id, name').in('id', ingredientIds);
+  const nameById = new Map((names || []).map((n) => [n.id, n.name]));
+  return formatIngredientDescription(rows.map((r) => ({ name: nameById.get(r.extracted_ingredient_id), quantity: r.quantity, unit: r.unit })));
+}
+
+// Recipe Generator stores ingredients as free text directly (no catalog FK -- "pure free text,
+// forever", see that migration's own comment), so no name-resolution join is needed here.
+async function describeGeneratedRecipeIngredients(recipeId) {
+  const { data: procs } = await supabase.from('generated_recipe_processes').select('id').eq('generated_recipe_id', recipeId);
+  if (!procs?.length) return null;
+  const { data: rows } = await supabase.from('generated_recipe_ingredients')
+    .select('name, quantity, unit').in('process_id', procs.map((p) => p.id));
+  return formatIngredientDescription(rows);
+}
+
+// Looks up a real recipe sharing this Dish Catalog item's EXACT name (case-insensitive, via
+// ilike with no wildcard) across all three recipe systems -- Book, then Generator, then
+// Extractor, first match wins. Deliberately an EXACT match only, never a fuzzy/similarity one:
+// unlike Recipe Generator's own dedup matching (where a near-miss just costs one skipped
+// generation), feeding a calorie estimate ingredients from a merely similarly-named DIFFERENT
+// dish would make the estimate worse, not better -- confirmed with a real example: "Vegetables
+// Chips" and "Natural Mixed Vegetables Chips" are different catalog items with very different
+// real compositions, not safe to conflate. Returns a compact ingredient description, or null
+// when no recipe anywhere shares this exact name -- callers fall back to name/category/protein-
+// only estimation in that case, exactly as before this existed. Sequential, short-circuited on
+// first match, not batched across a whole estimation run -- this only runs for items that
+// currently have no calorie value at all (a backfill, not a hot path), so the extra few queries
+// per item are a non-issue at the scale this table actually reaches.
+async function findRecipeIngredientsForDishName(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return null;
+
+  const { data: bookMatch } = await supabase.from('recipes').select('id').ilike('name', trimmed).limit(1);
+  if (bookMatch?.length) {
+    const desc = await describeBookRecipeIngredients(bookMatch[0].id);
+    if (desc) return desc;
+  }
+  const { data: genMatch } = await supabase.from('generated_recipes').select('id').ilike('name', trimmed).limit(1);
+  if (genMatch?.length) {
+    const desc = await describeGeneratedRecipeIngredients(genMatch[0].id);
+    if (desc) return desc;
+  }
+  const { data: exMatch } = await supabase.from('extracted_recipes').select('id').ilike('name', trimmed).limit(1);
+  if (exMatch?.length) {
+    const desc = await describeExtractedRecipeIngredients(exMatch[0].id);
+    if (desc) return desc;
+  }
+  return null;
+}
+
+// Category names whose real per-100g calorie count should essentially never exceed a rich,
+// well-dressed version of a light/plain dish -- an UPPER-bound plausibility check only, not a
+// guess at the "correct" value. "Dessert" is deliberately NOT included -- a legitimately rich
+// dessert item can genuinely exceed this.
+const LIGHT_CALORIE_CATEGORY_NAMES = new Set([
+  'Fruit Basket', 'AM Snack', 'Milk', 'Salad Bar', 'Fruit Bar', 'Juice', 'PM Snack',
+  'Staff Fruit Basket', 'Staff Juice', 'Staff Breakfast Juice', 'CEO Raw Vegetables',
+  'CEO Breakfast Juice', 'CEO Fruits', 'CEO Lunch Juice', 'Salad Option',
+  'Lunch Vegetable Side', 'Lunch SALAD Side',
+]);
+const LIGHT_CALORIE_MAX = 450;
+
+// Protein types that are always real meat/fish -- 'Vegetarian' is deliberately excluded from this
+// LOWER-bound check, since a genuinely very-low-calorie vegetarian dish (a clear broth, a plain
+// salad) is entirely plausible.
+const MEAT_PROTEIN_NAMES = new Set(['Chicken', 'Beef', 'Lamb', 'Fish']);
+const MEAT_CALORIE_MIN = 50;
+
+// A basic sanity backstop, not a precision nutrition check -- catches a value that's implausible
+// on its face regardless of how it was produced. Confirmed necessary with a real example: "Baked
+// Chicken Strips" came back at 20 kcal/100g even with a real matching recipe available (chicken
+// breast, flour, egg, panko, oil), while its near-identical catalog siblings ("Baked Chicken
+// Strips and Fries", "Oven Baked Chicken Strips with Wedges") sat at 160-180 -- a model can still
+// occasionally produce an implausible number even with good context, so this check runs
+// regardless of whether ingredient context was available for that item. Returns a short reason
+// string when implausible, else null.
+function checkCaloriePlausibility({ calories, categoryName, proteinName }) {
+  if (proteinName && MEAT_PROTEIN_NAMES.has(proteinName) && calories < MEAT_CALORIE_MIN) {
+    return `a ${proteinName} item under ${MEAT_CALORIE_MIN} kcal/100g is implausible`;
+  }
+  if (categoryName && LIGHT_CALORIE_CATEGORY_NAMES.has(categoryName) && calories > LIGHT_CALORIE_MAX) {
+    return `a ${categoryName} item over ${LIGHT_CALORIE_MAX} kcal/100g is implausible`;
+  }
+  return null;
+}
+
 ipcMain.handle('estimate-missing-calories', async (e) => {
   const ageGroupIds = CALORIE_ESTIMATE_IN_SCOPE_SECTIONS
     .map(code => getSectionByCode(code))
@@ -801,6 +935,14 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   if (itemsErr) throw supaFail('estimate-missing-calories: load menu_items', itemsErr);
   if (items.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
 
+  // Looked up ONCE per item, before any batch/retry attempt (not re-queried on a retry) -- a real
+  // matching recipe's ingredients when one exists, so the prompt has actual composition to reason
+  // from instead of guessing from name/category/protein alone. See
+  // findRecipeIngredientsForDishName's own comment for why this is an exact-name match only.
+  for (const it of items) {
+    it.ingredientsDescription = await findRecipeIngredientsForDishName(it.name);
+  }
+
   // Tags each item with its own positional `index` and reconciles the response by that index
   // rather than by array position/length -- a live run proved Haiku doesn't reliably preserve
   // exact 1:1 correspondence over a batch of many short, structurally similar {name, category,
@@ -808,12 +950,18 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   // that just came back with the wrong count -- see estimate-calories/index.ts's own comment).
   // Returns which items in THIS batch got a usable estimate written vs which didn't (a failed
   // Edge Function call puts the whole batch in `missing`; a partial response puts only the actual
-  // gaps there), so the caller can retry just the gaps instead of the whole batch.
+  // gaps there), so the caller can retry just the gaps instead of the whole batch. An item whose
+  // returned value fails checkCaloriePlausibility is treated the SAME as "missing" -- eligible for
+  // the same one retry pass -- but carries its rejected `lastImplausible` value/reason along so a
+  // still-implausible result after retry can be reported distinctly rather than silently written.
   async function estimateAndWriteBatch(batch) {
     const payloadItems = batch.map((it, idx) => {
       const cat = getCategoryById(it.category_id);
       const pt = it.protein_type_id ? getProteinById(it.protein_type_id) : null;
-      return { index: idx, name: it.name, category: cat?.name ?? null, protein: pt?.name ?? null };
+      return {
+        index: idx, name: it.name, category: cat?.name ?? null, protein: pt?.name ?? null,
+        ingredients: it.ingredientsDescription || undefined,
+      };
     });
 
     let estimates;
@@ -828,12 +976,19 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
     const missing = [];
     batch.forEach((it, idx) => {
       const value = byIndex.get(idx);
-      if (value == null || isNaN(value)) missing.push(it);
-      else toWrite.push({ it, value });
+      if (value == null || isNaN(value)) { missing.push(it); return; }
+      const cat = getCategoryById(it.category_id);
+      const pt = it.protein_type_id ? getProteinById(it.protein_type_id) : null;
+      const implausibleReason = checkCaloriePlausibility({ calories: value, categoryName: cat?.name, proteinName: pt?.name });
+      if (implausibleReason) {
+        missing.push({ ...it, lastImplausible: { value, reason: implausibleReason } });
+        return;
+      }
+      toWrite.push({ it, value });
     });
 
     const writeResults = await Promise.all(toWrite.map(({ it, value }) =>
-      supabase.from('menu_items').update({ calories_per_100g: value }).eq('id', it.id)
+      supabase.from('menu_items').update({ calories_per_100g: value, calories_unverified: false }).eq('id', it.id)
         .then(({ error }) => ({ ok: !error, it }))
     ));
     writeResults.filter(r => !r.ok).forEach(r => missing.push(r.it));
@@ -848,6 +1003,7 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   }
 
   let estimated = 0;
+  let flagged = 0;
   const failures = [];
   let stillMissing = [];
 
@@ -882,13 +1038,45 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
       retryMissing.push(...result.missing);
     }
     if (retryMissing.length > 0) {
-      const names = retryMissing.slice(0, 10).map(it => it.name).join(', ');
-      failures.push(`${retryMissing.length} item(s) still missing an estimate after retry: ${names}${retryMissing.length > 10 ? '…' : ''}`);
+      // Split by WHY it's still missing. A generic "no estimate came back at all" (a malformed
+      // response, an index that never showed up) still has nothing to write and stays a real
+      // failure. An IMPLAUSIBLE value is different -- per the chef's own instruction, this now
+      // still gets written (never left blank), just tagged calories_unverified: true so the Dish
+      // Catalog can show it's an unconfirmed AI guess rather than a grounded estimate, instead of
+      // the two looking identical. One retry already happened before landing here (see
+      // checkCaloriePlausibility/estimateAndWriteBatch above) -- this is the value from whichever
+      // attempt it came from, written as-is now that a second chance didn't produce a better one.
+      const implausible = retryMissing.filter(it => it.lastImplausible);
+      const trulyMissing = retryMissing.filter(it => !it.lastImplausible);
+      if (implausible.length > 0) {
+        const writeResults = await Promise.all(implausible.map((it) =>
+          supabase.from('menu_items')
+            .update({ calories_per_100g: it.lastImplausible.value, calories_unverified: true })
+            .eq('id', it.id)
+            .then(({ error }) => ({ ok: !error, it }))
+        ));
+        const written = writeResults.filter((r) => r.ok);
+        const failedWrites = writeResults.filter((r) => !r.ok);
+        estimated += written.length;
+        flagged += written.length;
+        if (failedWrites.length > 0) {
+          const names = failedWrites.slice(0, 10).map((r) => r.it.name).join(', ');
+          failures.push(`${failedWrites.length} item(s) had an unverified estimate ready but failed to save: ${names}${failedWrites.length > 10 ? '…' : ''}`);
+        }
+        const details = written.slice(0, 10)
+          .map((r) => `"${r.it.name}" (${r.it.lastImplausible.value} kcal/100g -- ${r.it.lastImplausible.reason})`)
+          .join('; ');
+        failures.push(`${written.length} item(s) got an implausible estimate on both attempts -- written anyway, flagged unverified for review: ${details}${written.length > 10 ? '…' : ''}`);
+      }
+      if (trulyMissing.length > 0) {
+        const names = trulyMissing.slice(0, 10).map(it => it.name).join(', ');
+        failures.push(`${trulyMissing.length} item(s) still missing an estimate after retry: ${names}${trulyMissing.length > 10 ? '…' : ''}`);
+      }
     }
   }
 
-  e.sender.send('calorie-estimate-progress', { message: `Done -- ${estimated} of ${items.length} items updated.`, current: batches.length, total: batches.length });
-  return { success: true, estimated, totalMissing: items.length, failures };
+  e.sender.send('calorie-estimate-progress', { message: `Done -- ${estimated} of ${items.length} items updated (${flagged} flagged unverified).`, current: batches.length, total: batches.length });
+  return { success: true, estimated, flagged, totalMissing: items.length, failures };
 });
 
 // AM Snack Pastry/Cold-Kitchen weekly rotation, Phase 1 -- backfills am_snack_style for every
@@ -1402,14 +1590,12 @@ async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
 // normalizeProcessesToGrams's own comment on why this happens here, mathematically, rather than
 // being asked of the model directly), then writes the recipe/processes/ingredients/wastes as one
 // new draft row. `sourceMenuLabel`/`dish.name` back this recipe's traceability fields
-// (requirement 6). `wasteTypeCache` -- see resolveWasteTypeId above. `photoPath` is optional --
-// the caller (parse-and-generate-recipes) already uploaded the AI-generated photo to the
-// generated-recipe-photos bucket via the SAME uploadGeneratedRecipePhoto helper the manual-upload
-// path uses, before calling this, and passes null when that generation/upload failed (image
-// failure is never fatal to the recipe itself -- see that call site's own comment). This is the
-// ONLY place `photo_path` is set for a freshly-generated draft; the manual upload/replace/remove
-// UI already covers changing it afterward via save-generated-recipe.
-async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTypeCache, photoPath }) {
+// (requirement 6). `wasteTypeCache` -- see resolveWasteTypeId above. No photo is ever set here --
+// a freshly-generated draft always starts with photo_path null; a photo only ever gets attached
+// afterward, either by hand or via the review form's manual "Generate Photo" button, both through
+// save-generated-recipe (see that handler's own comment on why automatic per-dish generation here
+// was tried and reverted).
+async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTypeCache }) {
   const processesRaw = (gen.processes && gen.processes.length > 0 ? gen.processes : [{ name: gen.name || dish.name, ingredients: [], method_steps: [], wastes: [] }])
     .map((proc) => ({
       name: proc.name || dish.name,
@@ -1435,7 +1621,6 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
       date_created: new Date().toISOString().slice(0, 10),
       source_menu_label: sourceMenuLabel,
       source_dish_name: dish.name,
-      photo_path: photoPath || null,
       created_at: new Date().toISOString(),
     })
     .select('id')
@@ -1511,6 +1696,37 @@ ipcMain.handle('generate-recipe-photo', async (e, { dishName, category, ingredie
   return generateDishImage({
     dishName: stripNutTermsFromText(dishName) || dishName, category, ingredients: filteredIngredients, method,
   });
+});
+
+// Strips filesystem-invalid characters from a recipe name to make a safe suggested filename --
+// deliberately NOT lib/export.js's sanitizeSheetName, which truncates to 31 characters for
+// Excel's own sheet-name limit (far too aggressive for a real filename -- "Chicken Piccata With
+// Butter Creamy Sauce" would get chopped mid-word). A generous 150-char cap is plenty safe across
+// every real filesystem this app runs on.
+function sanitizePhotoFilename(name) {
+  const cleaned = (name || 'Recipe Photo').replace(/[\\/?*<>|"[\]:]/g, '').trim();
+  return (cleaned || 'Recipe Photo').slice(0, 150);
+}
+
+// Shared "Save to Computer" download for the photo lightbox (Recipe Book/Extractor/Generator's
+// edit forms -- see renderer.js's openPhotoLightbox) -- one handler regardless of which recipe
+// type or photo it came from, same "this operation has nothing recipe-type-specific about it"
+// reasoning generate-recipe-photo above already established. `base64`/`ext` are parsed straight
+// out of the lightbox's own <img> data: URL in the renderer (already-decoded image bytes sitting
+// in memory -- manually uploaded or AI-generated, doesn't matter, both end up as the same data:
+// URL), so this never re-fetches or re-derives the image, just writes what's already there to
+// disk. Same dialog.showSaveDialog + write pattern every Excel export in this app already uses.
+ipcMain.handle('save-photo-to-computer', async (e, { base64, ext, suggestedName }) => {
+  const extension = ext === 'png' ? 'png' : 'jpg';
+  const filterName = extension === 'png' ? 'PNG Image' : 'JPEG Image';
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Photo',
+    defaultPath: `${sanitizePhotoFilename(suggestedName)}.${extension}`,
+    filters: [{ name: filterName, extensions: [extension] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+  await fs.writeFile(result.filePath, Buffer.from(base64, 'base64'));
+  return { success: true, path: result.filePath };
 });
 
 ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fileName }) => {
@@ -1667,55 +1883,19 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
         }
       }
 
-      // Photos are generated CONCURRENTLY across this one batch (bounded to RECIPE_GEN_BATCH_SIZE
-      // at once, same as the text-generation batch itself) -- OpenAI's Images API has no
-      // multi-prompt batch primitive, so this is the only way to avoid serializing every single
-      // dish's photo one after another, which would multiply this run's wall-clock time badly at
-      // a realistic 100-300 dish scale. Promise.allSettled, not Promise.all -- one dish's image
-      // failing must never affect any other dish's image or recipe (see generateDishImage.js's
-      // own comment: a photo failure is never fatal to the recipe).
-      if (toPersist.length > 0) {
-        e.sender.send('recipe-generator-progress', { message: `Generating photos for batch ${b + 1} of ${batches.length}…` });
-      }
-      // Filtered through the SAME matchNutTerms check persistGeneratedRecipeDraft applies before
-      // saving -- gen.processes here is the raw, not-yet-filtered model output, and the nut/sesame
-      // restriction is a "never present, full stop" policy (see lib/nutFilter.js): a banned
-      // ingredient must never even reach the image prompt as a visual instruction, not just get
-      // silently dropped from the saved recipe afterward. Belt-and-suspenders with the prompt's
-      // own "no nuts/seeds/sesame garnish" line, not a replacement for it. dishName is ALSO run
-      // through stripNutTermsFromText -- confirmed by a real test that a name like "Walnut
-      // Baklava" still visually leaked nuts into the image even with "walnuts" removed from the
-      // ingredient list; the recipe's own SAVED name (gen.name/dish.name below) is untouched.
-      const photoResults = await Promise.allSettled(toPersist.map(({ dish, gen }) => generateDishImage({
-        dishName: stripNutTermsFromText(gen.name || dish.name) || gen.name || dish.name,
-        category: dish.category || undefined,
-        ingredients: (gen.processes || [])
-          .flatMap((p) => (p.ingredients || []).map((ing) => ing.name))
-          .filter((name) => matchNutTerms(name).length === 0)
-          .slice(0, 12),
-        method: (gen.processes || []).flatMap((p) => p.method_steps || []).join('; ') || undefined,
-      })));
-
-      for (let idx = 0; idx < toPersist.length; idx++) {
-        const { dish, gen } = toPersist[idx];
-        const photoResult = photoResults[idx];
-        let photoPath = null;
-        if (photoResult.status === 'fulfilled') {
-          try {
-            photoPath = await uploadGeneratedRecipePhoto(photoResult.value.b64, photoResult.value.ext);
-          } catch (err) {
-            failures.push(`"${dish.name}": photo upload failed (${err.message}) -- recipe saved without a photo.`);
-          }
-        } else {
-          failures.push(`"${dish.name}": image generation failed (${photoResult.reason.message}) -- recipe saved without a photo.`);
-        }
+      // Text-only -- no automatic photo generation in this batch loop. That was tried and
+      // reverted: a real image call measured at ~138s each, so generating one per dish here would
+      // turn a single upload of 100-300+ dishes into HOURS of extra wall-clock time just for
+      // photos, on top of recipe generation's own real cost. A photo is now only ever created via
+      // the manual "Generate Photo" button on the review form (renderGeneratedRecipeFormView,
+      // same generate-recipe-photo IPC channel Recipe Book/Extractor use) -- she generates one
+      // only for the specific recipes she actually wants a photo for.
+      for (const { dish, gen } of toPersist) {
         try {
-          await persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel: fileName, wasteTypeCache, photoPath });
+          await persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel: fileName, wasteTypeCache });
           createdCount++;
         } catch (err) {
           failures.push(`"${dish.name}": ${err.message}`);
-          // The recipe row was never created -- don't leave an orphaned photo behind in Storage.
-          if (photoPath) await deleteGeneratedRecipePhoto(photoPath).catch(() => {});
         }
       }
     }
@@ -1857,10 +2037,15 @@ ipcMain.handle('list-generated-recipe-drafts', async () => {
 // ready (see Recipe Calculator's third-source integration), so they're deliberately invisible
 // to both the "Recipe Generated" list screen and Calculator's recipe picker; list-generated-
 // recipe-drafts above is the only way to see a draft, via its own Drafts tab.
+// source_menu_label is set once at draft creation (persistGeneratedRecipeDraft) and never
+// touched by save-generated-recipe's own update, so it survives unchanged through confirm --
+// selected here so the renderer can group this list by source menu (renderGeneratedConfirmedList/
+// groupRecipesBySourceMenu) instead of the calendar-month grouping Recipe Book/Extractor's own
+// list uses; no schema change needed, this column already existed on every row.
 ipcMain.handle('list-generated-recipes', async () => {
   const { data, error } = await supabase
     .from('generated_recipes')
-    .select('id, code, name, category, prepared_by, date_created, quantity_produced')
+    .select('id, code, name, category, prepared_by, date_created, quantity_produced, source_menu_label')
     .eq('status', 'confirmed')
     .order('id', { ascending: false });
   if (error) throw supaFail('list-generated-recipes', error);

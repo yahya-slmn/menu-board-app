@@ -557,6 +557,7 @@ function renderView() {
   if (state.currentView === 'extractor') return renderExtractorView(main);
   if (state.currentView === 'recipeGenerator') return renderRecipeGeneratorView(main);
   if (state.currentView === 'calculator') return renderCalculatorView(main);
+  if (state.currentView === 'recipeOnFire') return renderRecipeOnFireView(main);
   if (state.currentView === 'ingredients') return renderIngredientsView(main);
   if (state.currentView === 'extractedIngredients') return renderExtractedIngredientsView(main);
   if (state.currentView === 'materials') return renderMaterialsView(main);
@@ -662,7 +663,10 @@ async function renderItemsView(main) {
           <tr>
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${catName}</td>` : ''}
             <td>${it.name}</td>
-            <td>${it.calories_per_100g != null ? it.calories_per_100g : '—'}</td>
+            <td>
+              ${it.calories_per_100g != null ? it.calories_per_100g : '—'}
+              ${it.calories_unverified ? `<span class="chip unverified" title="AI estimate -- flagged as implausible for this item's category/protein, no real recipe was available to ground it. Worth a manual check, or add a real recipe so re-estimating can use its actual ingredients.">unverified</span>` : ''}
+            </td>
             <td>
               ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
               ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
@@ -1991,6 +1995,30 @@ function groupRecipesByMonth(list) {
   return sorted;
 }
 
+// Recipe Generator-only counterpart to groupRecipesByMonth above -- same {key, label, recipes}
+// shape (so renderGeneratedConfirmedList's rendering/select-all/Export-Selected markup, copied
+// from Recipe Book/Extractor's own month-grouped template, works completely unchanged), just
+// grouped by source_menu_label instead of calendar month. A calendar month means little for
+// Recipe Generator's own recipes -- they're always produced in one batch per menu upload, so the
+// upload they came from is the far more useful grouping dimension here; Book/Extractor keep
+// month-grouping since recipes there accumulate by hand over time instead. Re-uploading and
+// confirming from an identically-named file lands in the same group -- a pure string match on
+// whatever's already in source_menu_label, no separate persisted "folder" entity, same "reuse the
+// value as-is" convention the Drafts tab's own folder view already established. No explicit sort
+// (unlike groupRecipesByMonth's own key-string sort) -- `recipes` arrives already newest-first
+// (list-generated-recipes orders by id desc), and a plain Map preserves that same first-seen
+// order per group, so the group containing the most recently confirmed recipe naturally sorts
+// first.
+function groupRecipesBySourceMenu(list) {
+  const groups = new Map();
+  for (const r of list) {
+    const key = r.source_menu_label || 'Unknown source';
+    if (!groups.has(key)) groups.set(key, { key, label: key, recipes: [] });
+    groups.get(key).recipes.push(r);
+  }
+  return [...groups.values()];
+}
+
 async function renderRecipeListView(main, ns) {
   main.innerHTML = `
     <div class="topbar">
@@ -3222,6 +3250,16 @@ function showCreateWasteTypeForm(proc, wasteTypes, onChange) {
   });
 }
 
+// Parses the data: URL every photo preview in this app already holds in memory (manually
+// uploaded or AI-generated -- both end up in this exact shape) back into raw base64 + a file
+// extension, for handing to save-photo-to-computer. Returns null for anything unexpected rather
+// than guessing, since a malformed parse would otherwise silently save a corrupt file.
+function parseImageDataUrl(dataUrl) {
+  const match = /^data:image\/(png|jpeg);base64,(.+)$/.exec(dataUrl || '');
+  if (!match) return null;
+  return { ext: match[1] === 'png' ? 'png' : 'jpg', base64: match[2] };
+}
+
 // Full-size photo viewer -- shared by every recipe photo preview (Recipe Book/Generator's single
 // preview, Recipe Extractor's gallery thumbnails), whether the photo was manually uploaded or AI-
 // generated (see wireGeneratePhotoButton below): clicking a preview thumbnail (capped at 220px)
@@ -3231,11 +3269,15 @@ function showCreateWasteTypeForm(proc, wasteTypes, onChange) {
 // convention openRecipePreviewModal already uses, plus Escape (nothing else in this app currently
 // needs Escape-to-close, since every other modal has an explicit Close/Cancel button, but a
 // full-bleed image viewer with no visible chrome besides one small × button benefits from it).
-function openPhotoLightbox(src) {
+//
+// `suggestedName` (typically the recipe's own current name, read live at click time by each
+// call site) only backs the save dialog's default filename -- purely cosmetic, never required.
+function openPhotoLightbox(src, suggestedName) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <button type="button" class="photo-lightbox-close" aria-label="Close">×</button>
+    <button type="button" class="photo-lightbox-save">Save to Computer</button>
     <img class="photo-lightbox-img" src="${src}" />
   `;
   document.body.appendChild(overlay);
@@ -3244,6 +3286,26 @@ function openPhotoLightbox(src) {
   document.addEventListener('keydown', onKeyDown);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   overlay.querySelector('.photo-lightbox-close').addEventListener('click', close);
+
+  const saveBtn = overlay.querySelector('.photo-lightbox-save');
+  saveBtn.addEventListener('click', async () => {
+    const parsed = parseImageDataUrl(src);
+    if (!parsed) { alert("Couldn't read this photo's data."); return; }
+    saveBtn.disabled = true;
+    const originalText = saveBtn.textContent;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const result = await window.api.savePhotoToComputer({
+        base64: parsed.base64, ext: parsed.ext, suggestedName,
+      });
+      if (!result.success && !result.cancelled) alert('Failed to save photo.');
+    } catch (err) {
+      alert(`Failed to save photo: ${err.message}`);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalText;
+    }
+  });
 }
 
 // Shared "Generate Photo" wiring for Recipe Book, Recipe Extractor, and Recipe Generator's edit
@@ -3452,7 +3514,10 @@ async function renderRecipeFormView(main, ns) {
         });
       });
       gallery.querySelectorAll('[data-lightbox-index]').forEach(img => {
-        img.addEventListener('click', () => openPhotoLightbox(tiles[parseInt(img.dataset.lightboxIndex, 10)].src));
+        img.addEventListener('click', () => openPhotoLightbox(
+          tiles[parseInt(img.dataset.lightboxIndex, 10)].src,
+          document.getElementById('rf-name').value.trim(),
+        ));
       });
     }
 
@@ -3508,7 +3573,7 @@ async function renderRecipeFormView(main, ns) {
     }
     document.getElementById('rf-photo-preview').addEventListener('click', () => {
       const src = document.getElementById('rf-photo-preview').src;
-      if (src) openPhotoLightbox(src);
+      if (src) openPhotoLightbox(src, document.getElementById('rf-name').value.trim());
     });
 
     document.getElementById('rf-photo-input').addEventListener('change', (e) => {
@@ -4156,7 +4221,11 @@ async function renderGeneratedConfirmedList(container, ns, main) {
       return;
     }
 
-    const groups = groupRecipesByMonth(filtered);
+    // Grouped by source menu, not calendar month -- see groupRecipesBySourceMenu's own comment
+    // for why that's the more useful dimension for Recipe Generator's own confirmed recipes.
+    // The .recipe-month-group/.month-select-all classes below are reused as-is (same styling
+    // wanted either way) even though the label no longer literally means "month" here.
+    const groups = groupRecipesBySourceMenu(filtered);
     content.innerHTML = groups.map(group => `
       <div class="recipe-month-group">
         <div class="recipe-month-head">
@@ -4501,7 +4570,7 @@ async function renderGeneratedRecipeFormView(main, ns) {
   }
   document.getElementById('rg-photo-preview').addEventListener('click', () => {
     const src = document.getElementById('rg-photo-preview').src;
-    if (src) openPhotoLightbox(src);
+    if (src) openPhotoLightbox(src, document.getElementById('rg-name').value.trim());
   });
 
   document.getElementById('rg-photo-input').addEventListener('change', (e) => {
@@ -6970,6 +7039,65 @@ function createMaterialPreview3D(canvasEl) {
   scene.add(ground);
 
   let group = null;
+  // Second, independent slot alongside `group` -- e.g. Recipe on Fire's dough-fill mesh sitting
+  // inside a tray's own group. Deliberately NOT touched by setShape (below), so swapping the
+  // overlay never disposes/rebuilds the tray itself and vice versa; each is disposed only by its
+  // own setter (called with null) or by dispose() below.
+  let overlay = null;
+  // Third, independent slot -- pure measurement geometry (dimension lines/tick marks, see
+  // buildDimensionLine below), never a real tray/dough mesh. Kept separate from `overlay` so a
+  // caller can swap the dough fill and its dimension line on different triggers without one
+  // clobbering the other, though in practice Recipe on Fire currently updates both together.
+  let annotations = null;
+
+  // Text labels anchored to a 3D world position (e.g. "66 x 46 cm" sitting just outside a tray's
+  // edge) -- no CSS2DRenderer available (three.js here is a plain classic <script> global build,
+  // not an ES-module bundle, so the addons under three/examples/jsm/ aren't reachable without a
+  // much bigger module-loading change), so this hand-rolls the same idea: real DOM text, absolutely
+  // positioned over the canvas, re-projected from its 3D anchor point into 2D screen space on every
+  // render() call below -- which already fires on every pointer drag/wheel/rebuild, so labels track
+  // the model from any angle/zoom for free, with no separate render loop of their own.
+  const labelsContainer = document.createElement('div');
+  labelsContainer.style.cssText = 'position:absolute; inset:0; pointer-events:none; overflow:hidden;';
+  canvasEl.parentElement.appendChild(labelsContainer);
+  const labelEls = new Map(); // id -> { el, worldPos: THREE.Vector3 }
+
+  function updateLabelPositions() {
+    const w = canvasEl.clientWidth || 1, h = canvasEl.clientHeight || 1;
+    labelEls.forEach(({ el, worldPos }) => {
+      const p = worldPos.clone().project(camera);
+      const behind = p.z > 1 || p.z < -1;
+      el.style.display = behind ? 'none' : '';
+      if (behind) return;
+      const x = (p.x * 0.5 + 0.5) * w;
+      const y = (-p.y * 0.5 + 0.5) * h;
+      el.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
+    });
+  }
+
+  // Replaces the full label set in one call -- defs: [{ id, worldPos: THREE.Vector3, text }].
+  // Reuses an existing element by `id` (just updates its text/position) rather than tearing down
+  // and recreating every label on every recompute, and removes whichever ids are no longer present.
+  function setLabels(defs) {
+    const seen = new Set();
+    (defs || []).forEach(d => {
+      seen.add(d.id);
+      let entry = labelEls.get(d.id);
+      if (!entry) {
+        const el = document.createElement('div');
+        el.className = 'material-preview-dim-label';
+        labelsContainer.appendChild(el);
+        entry = { el, worldPos: new THREE.Vector3() };
+        labelEls.set(d.id, entry);
+      }
+      entry.el.textContent = d.text;
+      entry.worldPos.copy(d.worldPos);
+    });
+    [...labelEls.keys()].forEach(id => {
+      if (!seen.has(id)) { labelEls.get(id).el.remove(); labelEls.delete(id); }
+    });
+    updateLabelPositions();
+  }
   // Orbit target -- the built shape's own bounding-box center, not a hardcoded (0,0,0). The
   // hollow shapes below aren't built symmetric around the origin (each sits with its floor at
   // y=0, same convention a real tray "resting on a surface" would use), so orbiting around a
@@ -6986,7 +7114,7 @@ function createMaterialPreview3D(canvasEl) {
     camera.lookAt(target);
   }
 
-  function render() { renderer.render(scene, camera); }
+  function render() { renderer.render(scene, camera); updateLabelPositions(); }
 
   let dragging = false, lastX = 0, lastY = 0;
   function onPointerDown(e) { dragging = true; lastX = e.clientX; lastY = e.clientY; canvasEl.setPointerCapture(e.pointerId); }
@@ -7064,8 +7192,29 @@ function createMaterialPreview3D(canvasEl) {
 
   positionCamera();
 
+  // Adds/replaces/clears (pass null) a second group alongside the tray, without touching `group`
+  // or re-framing the camera -- the tray's own setShape call already framed the camera to the
+  // tray's size, and the overlay (e.g. a dough-fill mesh) is always smaller than/contained within
+  // it, so no re-framing is needed here.
+  function setOverlay(builtGroup) {
+    if (overlay) { scene.remove(overlay); disposeGroup(overlay); overlay = null; }
+    if (builtGroup) { overlay = builtGroup; scene.add(overlay); }
+    render();
+  }
+
+  // Same independent-slot treatment as setOverlay, for measurement-line geometry instead of a
+  // real mesh -- see `annotations` above.
+  function setAnnotations(builtGroup) {
+    if (annotations) { scene.remove(annotations); disposeGroup(annotations); annotations = null; }
+    if (builtGroup) { annotations = builtGroup; scene.add(annotations); }
+    render();
+  }
+
   return {
     setShape,
+    setOverlay,
+    setAnnotations,
+    setLabels,
     resize,
     dispose() {
       canvasEl.removeEventListener('pointerdown', onPointerDown);
@@ -7073,6 +7222,11 @@ function createMaterialPreview3D(canvasEl) {
       canvasEl.removeEventListener('pointermove', onPointerMove);
       canvasEl.removeEventListener('wheel', onWheel);
       if (group) disposeGroup(group);
+      if (overlay) disposeGroup(overlay);
+      if (annotations) disposeGroup(annotations);
+      labelEls.forEach(({ el }) => el.remove());
+      labelEls.clear();
+      labelsContainer.remove();
       ground.geometry.dispose();
       ground.material.dispose();
       renderer.dispose();
@@ -7410,6 +7564,655 @@ function buildMaterialGroup(shapeType, dims, category) {
   }
 
   return group;
+}
+
+// ---- Recipe on Fire (Phase 1) support -------------------------------------------------------
+// Interior usable footprint (area, cm^2) and usable height (cm) for a tray/pan Material's
+// dimensions -- mirrors buildMaterialGroup's own wall/floor-thickness formulas above exactly, so
+// the dough-fill visual below always lines up with what that function actually renders. Can't just
+// call buildMaterialGroup and read its geometry back out (it builds meshes as a side effect, no
+// numeric return), so these are kept as a second copy of the same handful of one-line clamp
+// formulas -- if those change up there, update the matching branch here too.
+function trayInteriorFootprint(shapeType, dims) {
+  if (shapeType === 'round') {
+    const { diameterCm: d, heightCm: h } = dims;
+    if (!(d > 0) || !(h > 0)) return null;
+    const outerR = d / 2;
+    const wallT = Math.min(Math.max(outerR * 0.07, 0.3), 1.8, outerR * 0.4);
+    const innerR = Math.max(outerR - wallT, 0.05);
+    const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+    return { areaCm2: Math.PI * innerR * innerR, usableHeightCm: Math.max(h - floorT, 0.1), floorT, innerR };
+  }
+  if (shapeType === 'rectangular') {
+    const { lengthCm: l, widthCm: w, heightCm: h } = dims;
+    if (!(l > 0) || !(w > 0) || !(h > 0)) return null;
+    const wallT = Math.min(Math.max(Math.min(l, w) * 0.045, 0.3), 2, Math.min(l, w) * 0.4);
+    const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+    const innerL = Math.max(l - 2 * wallT, 0.1);
+    const innerW = Math.max(w - 2 * wallT, 0.1);
+    return { areaCm2: innerL * innerW, usableHeightCm: Math.max(h - floorT, 0.1), floorT, innerL, innerW };
+  }
+  if (shapeType === 'triangle') {
+    const { baseCm: b, triHeightCm: triH, heightCm: h } = dims;
+    if (!(b > 0) || !(triH > 0) || !(h > 0)) return null;
+    const outerPts = [[-b / 2, 0], [0, triH], [b / 2, 0]];
+    const wallT = Math.min(Math.max(Math.min(b, triH) * 0.05, 0.3), 2, Math.min(b, triH) * 0.4);
+    const innerPts = insetPolygon(outerPts, wallT);
+    const floorT = Math.min(Math.max(h * 0.15, 0.3), 1.5, h * 0.6);
+    // Shoelace formula -- exact area for any simple polygon, not just an isosceles triangle, so
+    // this stays correct even if insetPolygon's own offset math shifts the inner points slightly.
+    let area2 = 0;
+    for (let i = 0; i < innerPts.length; i++) {
+      const [x1, y1] = innerPts[i];
+      const [x2, y2] = innerPts[(i + 1) % innerPts.length];
+      area2 += x1 * y2 - x2 * y1;
+    }
+    return { areaCm2: Math.abs(area2) / 2, usableHeightCm: Math.max(h - floorT, 0.1), floorT, innerPts };
+  }
+  if (shapeType === 'muffin_tray') {
+    const { heightCm: h, cupDiameterCm: cd, cupDepthCm: cdepth, cupRows: rows, cupColumns: cols } = dims;
+    if (!(cd > 0) || !(cdepth > 0) || !(rows > 0) || !(cols > 0) || !(h > 0)) return null;
+    // Ignores the real cup's tapered wall/rounded-fillet bottom (see buildMaterialGroup's own
+    // muffin_tray branch) -- a plain cylinder per cup is a deliberate simplification, good enough
+    // for a capacity estimate/visual without replicating that geometry's frustum math here.
+    const cupAreaCm2 = Math.PI * (cd / 2) * (cd / 2);
+    const floorY = Math.max(h - cdepth, 0.05);
+    return { areaCm2: cupAreaCm2 * rows * cols, usableHeightCm: cdepth, cupAreaCm2, floorY, rows, cols };
+  }
+  return null;
+}
+
+// Plain configurable number, not a per-ingredient/per-recipe density catalog -- dough density
+// varies a lot by type (bread vs. choux vs. cookie) and there's no reliable per-recipe source for
+// it today, so this is a single sensible default (mid-range bread/pastry dough) with a per-bake
+// override field in the UI (see renderRecipeOnFireView), same treatment as the Bake step's rise %
+// will get in a later phase.
+const ROF_DEFAULT_DOUGH_DENSITY_G_CM3 = 0.65;
+
+const ROF_DOUGH_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xE3C592, roughness: 0.9, metalness: 0.02 });
+
+// Builds the visual dough-fill mesh sitting inside a tray's interior -- a plain, undivided slab/
+// cylinder/prism, not a real dough-surface simulation (no sag, no rounded top). `fillHeightCm` is
+// already capped at footprint.usableHeightCm by the caller (see renderRecipeOnFireView); this
+// function only draws whatever height it's given. Positions match buildMaterialGroup's own
+// per-shape interior-floor convention exactly (see each branch above) so the fill sits flush on a
+// tray's real interior floor with no visible gap or clipping.
+function buildDoughFillGroup(shapeType, dims, footprint, fillHeightCm) {
+  const group = new THREE.Group();
+  if (!(fillHeightCm > 0)) return group;
+
+  if (shapeType === 'round') {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(footprint.innerR, footprint.innerR, fillHeightCm, 48), ROF_DOUGH_MATERIAL);
+    mesh.position.y = footprint.floorT + fillHeightCm / 2;
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    group.add(mesh);
+  } else if (shapeType === 'rectangular') {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(footprint.innerL, fillHeightCm, footprint.innerW), ROF_DOUGH_MATERIAL);
+    mesh.position.y = footprint.floorT + fillHeightCm / 2;
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    group.add(mesh);
+  } else if (shapeType === 'triangle') {
+    const shape = new THREE.Shape();
+    shape.moveTo(footprint.innerPts[0][0], footprint.innerPts[0][1]);
+    footprint.innerPts.slice(1).forEach(([x, y]) => shape.lineTo(x, y));
+    shape.closePath();
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: fillHeightCm, bevelEnabled: false, curveSegments: 1 });
+    const mesh = new THREE.Mesh(geo, ROF_DOUGH_MATERIAL);
+    mesh.rotateX(-Math.PI / 2); // same local-Z-becomes-world-Y convention as buildMaterialGroup's own triangle ring
+    mesh.position.y = footprint.floorT;
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    group.add(mesh);
+  } else if (shapeType === 'muffin_tray') {
+    const { lengthCm: l, widthCm: w, cupRows: rows, cupColumns: cols, cupDiameterCm: cd } = dims;
+    const cupX = (c) => -l / 2 + (l / (cols + 1)) * (c + 1);
+    const cupZ = (r) => -w / 2 + (w / (rows + 1)) * (r + 1);
+    // 0.9x the cup diameter -- sits just inside the real tapered/rounded cup wall (see
+    // buildMaterialGroup's own muffin cup profile) rather than clipping through it.
+    const cupR = (cd / 2) * 0.9;
+    const geo = new THREE.CylinderGeometry(cupR, cupR, fillHeightCm, 24);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const mesh = new THREE.Mesh(geo, ROF_DOUGH_MATERIAL);
+        mesh.position.set(cupX(c), footprint.floorY + fillHeightCm / 2, cupZ(r));
+        mesh.castShadow = true; mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+    }
+  }
+  return group;
+}
+
+const ROF_DIM_LINE_MATERIAL = new THREE.LineBasicMaterial({ color: 0x2A2A2A });
+
+// A straight horizontal dimension line between two ground-plane (XZ) points, with a short
+// perpendicular tick mark at each end -- the standard CAD "witness line" convention, so it reads
+// as a measurement rather than a stray line. `tickLength` is in the same cm units as everything
+// else built in this file.
+function buildDimensionLine(p1, p2, tickLength) {
+  const group = new THREE.Group();
+  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, p2]), ROF_DIM_LINE_MATERIAL));
+  const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
+  const perp = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(tickLength / 2);
+  [p1, p2].forEach(p => {
+    const a = new THREE.Vector3().addVectors(p, perp);
+    const b = new THREE.Vector3().subVectors(p, perp);
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), ROF_DIM_LINE_MATERIAL));
+  });
+  return group;
+}
+
+// Same idea, vertical -- used for the dough fill-height line. Ticks run horizontally instead of
+// perpendicular-in-plane since the line itself is already vertical.
+function buildVerticalDimensionLine(x, z, yBottom, yTop, tickLength) {
+  const group = new THREE.Group();
+  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x, yBottom, z), new THREE.Vector3(x, yTop, z),
+  ]), ROF_DIM_LINE_MATERIAL));
+  [yBottom, yTop].forEach(y => {
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(x - tickLength / 2, y, z), new THREE.Vector3(x + tickLength / 2, y, z),
+    ]), ROF_DIM_LINE_MATERIAL));
+  });
+  return group;
+}
+
+// Builds Recipe on Fire's 3D measurement overlay -- the tray's own outer length/width (or
+// diameter/base) labeled just outside its edge, plus the dough fill height labeled as a vertical
+// dimension line right next to the dough itself. Returns { group, labels } for
+// preview3D.setAnnotations/setLabels. `fillHeightCm` of 0 (no dough yet) skips the fill-height
+// line/label -- nothing meaningful to measure. Deliberately a simplified reading of each shape's
+// "outer size" (a single representative line per dimension, not a full technical-drawing callout
+// set) -- good enough for a chef to sanity-check the fill number at a glance, which is the actual
+// goal here, not CAD-grade documentation.
+// Each labeled dimension gets its OWN side of the tray, far enough apart that they can't collide
+// in screen space from a typical viewing angle -- Length on the front edge (+Z), Width on the
+// right edge (+X), fill Height on the LEFT edge (-X), as three distinct witness lines rather than
+// three lines competing for the same corner. An earlier version anchored the fill-height line near
+// the tray's own +X/interior edge, which put it almost on top of the Width label (also on +X) --
+// that's the exact "66 cm and 1.47 cm cramped together" overlap this layout fixes.
+function buildTrayDimensionAnnotations(shapeType, dims, footprint, fillHeightCm) {
+  const group = new THREE.Group();
+  const labels = [];
+  const fillTopY = footprint.floorT != null ? footprint.floorT + fillHeightCm : (footprint.floorY ?? 0) + fillHeightCm;
+  const fillBottomY = footprint.floorT != null ? footprint.floorT : (footprint.floorY ?? 0);
+
+  function addFillHeightLine(x, z) {
+    if (!(fillHeightCm > 0)) return;
+    const tick = Math.max(fillHeightCm * 0.15, 0.4);
+    group.add(buildVerticalDimensionLine(x, z, fillBottomY, fillTopY, tick));
+    labels.push({
+      id: 'rof-fill-height',
+      worldPos: new THREE.Vector3(x, (fillBottomY + fillTopY) / 2, z),
+      text: `H: ${roundNice(fillHeightCm)} cm`,
+    });
+  }
+
+  if (shapeType === 'round') {
+    const { diameterCm: d } = dims;
+    const outerR = d / 2;
+    const margin = Math.max(d * 0.18, 2);
+    const tick = Math.max(d * 0.04, 0.4);
+    // Diameter on the front edge (+Z)...
+    group.add(buildDimensionLine(
+      new THREE.Vector3(-outerR, 0, outerR + margin),
+      new THREE.Vector3(outerR, 0, outerR + margin),
+      tick
+    ));
+    labels.push({ id: 'rof-outer-dim', worldPos: new THREE.Vector3(0, 0, outerR + margin), text: `⌀: ${d} cm` });
+    // ...fill height on the LEFT edge (-X), a fully separate side.
+    addFillHeightLine(-(outerR + margin), 0);
+  } else if (shapeType === 'rectangular' || shapeType === 'muffin_tray') {
+    const { lengthCm: l, widthCm: w } = dims;
+    const margin = Math.max(Math.max(l, w) * 0.16, 2);
+    const tick = Math.max(Math.max(l, w) * 0.03, 0.4);
+    // Length on the front edge (+Z).
+    group.add(buildDimensionLine(
+      new THREE.Vector3(-l / 2, 0, w / 2 + margin),
+      new THREE.Vector3(l / 2, 0, w / 2 + margin),
+      tick
+    ));
+    labels.push({ id: 'rof-outer-dim-l', worldPos: new THREE.Vector3(0, 0, w / 2 + margin), text: `L: ${l} cm` });
+    // Width on the right edge (+X).
+    group.add(buildDimensionLine(
+      new THREE.Vector3(l / 2 + margin, 0, -w / 2),
+      new THREE.Vector3(l / 2 + margin, 0, w / 2),
+      tick
+    ));
+    labels.push({ id: 'rof-outer-dim-w', worldPos: new THREE.Vector3(l / 2 + margin, 0, 0), text: `W: ${w} cm` });
+    // Fill height on the LEFT edge (-X) -- the third, otherwise-unused side.
+    addFillHeightLine(-(l / 2 + margin), 0);
+  } else if (shapeType === 'triangle') {
+    const { baseCm: b, triHeightCm: triH } = dims;
+    const margin = Math.max(Math.max(b, triH) * 0.16, 2);
+    const tick = Math.max(Math.max(b, triH) * 0.03, 0.4);
+    // Base sits along world Z=0 (see buildMaterialGroup's own triangle branch -- local (x,y) shape
+    // points map to world (x, -z) after the rotateX(-90deg) extrude), body extends toward -Z, so
+    // "outside" the base is +Z. Fill height goes on the LEFT side (-X), clear of the base label.
+    group.add(buildDimensionLine(
+      new THREE.Vector3(-b / 2, 0, margin),
+      new THREE.Vector3(b / 2, 0, margin),
+      tick
+    ));
+    labels.push({ id: 'rof-outer-dim', worldPos: new THREE.Vector3(0, 0, margin), text: `L: ${b} cm` });
+    addFillHeightLine(-(b / 2 + margin), -triH / 2);
+  }
+
+  return { group, labels };
+}
+
+// ---- Recipe on Fire (Phase 1: process + tray selection, static 3D dough-fill visualization) ----
+// New multi-phase feature, built and confirmed one phase at a time per the chef's own request.
+// Phase 1 only: pick a recipe + exactly ONE of its processes (never "All Processes" -- Recipe on
+// Fire always operates on a single process's dough), pick a tray/pan Material, and see that
+// process's current Net Weight rendered as a dough-fill mesh inside the tray's own 3D model. Bake
+// (proofing %), cutter layout/packing, manual drag-adjust, and confirm/persist are later phases --
+// none of that exists yet, on purpose.
+function renderRecipeOnFireView(main) {
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Recipe on Fire</h1><span class="section-pill">Pick the process(es) going into one tray, then the tray itself</span></div>
+    </div>
+
+    <div class="generate-controls">
+      <div class="field" style="max-width:220px;">
+        <label>Source</label>
+        <div class="mode-toggle">
+          <button type="button" class="mode-toggle-btn active" data-rof-source="book">Recipe Book</button>
+          <button type="button" class="mode-toggle-btn" data-rof-source="extractor">Recipe Extractor</button>
+          <button type="button" class="mode-toggle-btn" data-rof-source="generated">Recipe Generator</button>
+        </div>
+      </div>
+      <div class="field" style="min-width:260px;">
+        <label>Recipe Name</label>
+        <div class="autocomplete-wrap">
+          <input id="rof-recipe-name" autocomplete="off" style="padding-right:28px; width:100%;" />
+          <button type="button" class="autocomplete-browse-btn" id="rof-recipe-browse-btn" aria-label="Browse recipes" title="Browse all recipes">▾</button>
+          <div class="autocomplete-list" id="rof-recipe-list" hidden></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="field" style="max-width:520px; display:none; margin-bottom:14px;" id="rof-process-field">
+      <label>Process(es) going into this tray <span title="Check more than one when separate processes (e.g. a biga and a final dough) get combined into one dough before baking. Leave a process unchecked if it's a separate component (e.g. a filling) that isn't going into this tray." style="cursor:help; color:var(--neutral); font-weight:normal;">ⓘ</span></label>
+      <div id="rof-process-checks" style="display:flex; flex-direction:column; gap:6px; margin-top:4px;"></div>
+    </div>
+
+    <div id="rof-process-summary"></div>
+    <div id="rof-tray-section" style="display:none;">
+      <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:8px;">
+        <div style="flex:1 1 280px; min-width:260px;">
+          <h3 style="margin-bottom:10px;">Tray</h3>
+          <div class="generate-controls" style="margin-bottom:12px;">
+            <div class="field" style="max-width:260px;">
+              <label>Tray / Pan</label>
+              <select id="rof-material-select" class="builder-select">
+                <option value="">— Select a tray —</option>
+              </select>
+            </div>
+            <div class="field" style="max-width:160px;">
+              <label>Dough Density (g/cm³)</label>
+              <input id="rof-density" type="number" min="0.05" step="0.01" value="${ROF_DEFAULT_DOUGH_DENSITY_G_CM3}" />
+            </div>
+          </div>
+          <div id="rof-fill-summary"></div>
+        </div>
+        <div style="flex:1 1 340px; min-width:300px;">
+          <h3 style="margin-bottom:10px;">3D Preview</h3>
+          <div class="material-preview-wrap">
+            <canvas id="rof-preview-canvas"></canvas>
+            <div class="material-preview-empty" id="rof-preview-empty">Pick a tray to see the dough fill.</div>
+            <div class="material-preview-hint">Drag to rotate · Scroll to zoom</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const sourceButtons = document.querySelectorAll('.generate-controls [data-rof-source]');
+  const nameInput = document.getElementById('rof-recipe-name');
+  const listEl = document.getElementById('rof-recipe-list');
+  const browseBtn = document.getElementById('rof-recipe-browse-btn');
+  const processField = document.getElementById('rof-process-field');
+  const processChecksEl = document.getElementById('rof-process-checks');
+  const summaryEl = document.getElementById('rof-process-summary');
+  const traySection = document.getElementById('rof-tray-section');
+  const materialSelect = document.getElementById('rof-material-select');
+  const densityInput = document.getElementById('rof-density');
+  const fillSummaryEl = document.getElementById('rof-fill-summary');
+  const previewEmptyEl = document.getElementById('rof-preview-empty');
+
+  const materialsPromise = window.api.listMaterials();
+
+  let source = 'book';
+  let selectedRecipe = null;
+  let workingProcesses = [];
+  let selectedProcessLocalIds = new Set();
+  let browseListShowing = false;
+  let trayMaterials = []; // tray_pan-only, refreshed by populateMaterialSelect each time it runs
+
+  function currentNs() {
+    if (source === 'book') return RECIPE_NS.book;
+    if (source === 'extractor') return RECIPE_NS.extractor;
+    return RECIPE_NS.generated;
+  }
+
+  // The process(es) actually feeding this tray -- 1 in the common case, 2+ when separate
+  // components (a biga + a final dough, e.g. Ciabatta) get combined into one dough before baking.
+  // Always an explicit chef choice (see the checkbox list below), never an automatic "combine
+  // every process in the recipe" -- a cake's filling process must stay excludable.
+  function selectedProcesses() {
+    // selectedProcessLocalIds holds checkbox VALUES, always strings -- p.localId is a number
+    // (++_recipeRowLocalIdCounter), so this must compare as strings on both sides or Set.has()
+    // never matches anything (the bug behind an earlier "summary panel and 3D preview both went
+    // blank" report: this always silently returned [], which both renderProcessSummary and
+    // updateFillPreview treat identically to "nothing selected yet").
+    return workingProcesses.filter(p => selectedProcessLocalIds.has(String(p.localId)));
+  }
+
+  // Same WebGLRenderer-per-visit pattern as Materials' own createMaterialPreview3D call -- and the
+  // same gap: neither this view nor Materials' form disposes it on a sidebar click to a DIFFERENT
+  // view (only Materials' form has an explicit in-view Back/Save to hook into; this is a top-level
+  // nav item with no such exit). No generic "leaving this view" hook exists anywhere in renderer.js
+  // to fix that properly without touching renderView() itself, which is out of scope for this
+  // phase -- accepted for now, same as the pre-existing case.
+  const preview3D = createMaterialPreview3D(document.getElementById('rof-preview-canvas'));
+  // The canvas starts inside #rof-tray-section, which is display:none until at least one process
+  // is checked -- a `display:none` ancestor collapses clientWidth/clientHeight to 0 for every
+  // descendant regardless of its own CSS (.material-preview-wrap's height:300px included), so THIS
+  // initial resize() (still fired, for symmetry with Materials' own preview3D setup) would lock the
+  // WebGLRenderer's internal draw buffer at 1x1px if nothing ever resized it again. The real fix is
+  // the second resize() call in updateProcessCheckboxes/onProcessCheckChanged below, right after
+  // the section becomes visible -- that one measures the section's REAL, now-laid-out size. Without
+  // it the tray/dough mesh still gets built and added to the scene correctly, it just renders into
+  // a 1x1 buffer stretched over the visible canvas, i.e. the exact "3D Preview panel stays
+  // completely blank no matter which tray is picked" symptom this comment is here to prevent a
+  // repeat of.
+  requestAnimationFrame(() => preview3D.resize());
+  const onWindowResize = () => preview3D.resize();
+  window.addEventListener('resize', onWindowResize);
+
+  function clearSelection() {
+    selectedRecipe = null;
+    workingProcesses = [];
+    selectedProcessLocalIds = new Set();
+    processField.style.display = 'none';
+    processChecksEl.innerHTML = '';
+    summaryEl.innerHTML = '';
+    traySection.style.display = 'none';
+    materialSelect.innerHTML = '<option value="">— Select a tray —</option>';
+    fillSummaryEl.innerHTML = '';
+    previewEmptyEl.style.display = '';
+    preview3D.setShape(null, {}, 'tray_pan');
+    preview3D.setOverlay(null);
+    preview3D.setAnnotations(null);
+    preview3D.setLabels([]);
+  }
+
+  function combinedTotalQuantity(processes) {
+    return roundNice(processes.reduce((sum, p) => sum + sumIngredientQuantities(p.ingredientRows), 0));
+  }
+
+  // Structural rebuild -- called on checkbox change / recipe pick, i.e. whenever the SET of
+  // processes shown changes. Waste % edits and removes (see renderWasteRowsFor) deliberately do
+  // NOT go through this again for a plain % edit -- only refreshComputedNumbers, so a keystroke in
+  // the % input never wipes the input's own focus mid-type. Wastes[] mutated here is each
+  // process's own LOCAL, unsaved copy (from buildProcessFromSaved) -- this view has no Save action
+  // at all, so nothing typed or removed here ever reaches the real recipe.
+  function renderProcessSummary() {
+    const procs = selectedProcesses();
+    if (procs.length === 0) { summaryEl.innerHTML = ''; return; }
+    summaryEl.innerHTML = `
+      <div class="computed-value-box" style="max-width:640px; margin:4px 0 18px;">
+        ${procs.map(p => `
+          <div style="${procs.length > 1 ? 'margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line);' : ''}">
+            <div style="margin-bottom:6px;"><strong>${p.name || '(untitled process)'}</strong> — Total Quantity: <span id="rof-total-${p.localId}"></span> g</div>
+            <div style="margin:6px 0;">
+              <div style="font-size:11.5px; color:var(--neutral); margin-bottom:3px;">Wastage Applied</div>
+              <div id="rof-wastes-${p.localId}"></div>
+            </div>
+            <div><strong>Net Weight:</strong> <span id="rof-net-${p.localId}"></span> g</div>
+          </div>
+        `).join('')}
+        ${procs.length > 1 ? `<div><strong>Combined Total Quantity:</strong> <span id="rof-combined-total"></span> g &nbsp;·&nbsp; <strong>Combined Net Weight:</strong> <span id="rof-combined-net"></span> g</div>` : ''}
+      </div>
+    `;
+    procs.forEach(p => renderWasteRowsFor(p));
+    refreshComputedNumbers();
+  }
+
+  // Rebuilds one process's own waste rows -- called on structural change only (initial summary
+  // render, or a Remove click here). A plain % edit never calls this, only refreshComputedNumbers,
+  // so the input the chef is actively typing into is never torn down mid-edit.
+  function renderWasteRowsFor(proc) {
+    const el = document.getElementById(`rof-wastes-${proc.localId}`);
+    if (!el) return;
+    el.innerHTML = proc.wastes.length > 0
+      ? proc.wastes.map(w => `
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+          <span style="min-width:130px; font-size:13px;">${w.name || 'Waste'}</span>
+          <input type="number" min="0" max="100" step="0.1" value="${w.percent ?? 0}" style="width:70px;" data-rof-waste-input="${w.localId}" />
+          <span style="font-size:11px; color:var(--neutral);">% (recipe default: ${w.originalPercent ?? 0}%)</span>
+          <button type="button" class="icon-btn danger" data-rof-waste-remove="${w.localId}" title="Remove for this tray session only">✕</button>
+        </div>
+      `).join('')
+      : `<div style="font-size:12px; color:var(--neutral);">None applied.</div>`;
+
+    el.querySelectorAll('[data-rof-waste-input]').forEach(input => {
+      input.addEventListener('input', () => {
+        const localId = parseInt(input.dataset.rofWasteInput, 10);
+        const w = proc.wastes.find(w => w.localId === localId);
+        if (w) w.percent = input.value;
+        refreshComputedNumbers();
+      });
+    });
+    el.querySelectorAll('[data-rof-waste-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const localId = parseInt(btn.dataset.rofWasteRemove, 10);
+        proc.wastes = proc.wastes.filter(w => w.localId !== localId);
+        renderWasteRowsFor(proc);
+        refreshComputedNumbers();
+      });
+    });
+  }
+
+  // Writes only the numeric spans (Total Quantity/Net Weight per process, plus the combined line)
+  // and refreshes the fill preview -- never touches the waste input rows themselves, see
+  // renderWasteRowsFor's own comment on why that split matters.
+  function refreshComputedNumbers() {
+    const procs = selectedProcesses();
+    procs.forEach(p => {
+      const totalQty = sumIngredientQuantities(p.ingredientRows);
+      const netWeight = compoundWasteYield(totalQty, p.wastes);
+      const totalEl = document.getElementById(`rof-total-${p.localId}`);
+      const netEl = document.getElementById(`rof-net-${p.localId}`);
+      if (totalEl) totalEl.textContent = roundNice(totalQty);
+      if (netEl) netEl.textContent = netWeight;
+    });
+    if (procs.length > 1) {
+      const combinedTotalEl = document.getElementById('rof-combined-total');
+      const combinedNetEl = document.getElementById('rof-combined-net');
+      if (combinedTotalEl) combinedTotalEl.textContent = combinedTotalQuantity(procs);
+      if (combinedNetEl) combinedNetEl.textContent = originalCombinedNetWeight(procs);
+    }
+    updateFillPreview();
+  }
+
+  function updateFillPreview() {
+    const procs = selectedProcesses();
+    const materialId = materialSelect.value;
+    const material = trayMaterials.find(m => String(m.id) === String(materialId));
+    if (procs.length === 0 || !material) {
+      previewEmptyEl.style.display = '';
+      fillSummaryEl.innerHTML = '';
+      preview3D.setShape(null, {}, 'tray_pan');
+      preview3D.setOverlay(null);
+      preview3D.setAnnotations(null);
+      preview3D.setLabels([]);
+      return;
+    }
+
+    const dims = materialDimsFromRow(material);
+    const footprint = trayInteriorFootprint(material.shape_type, dims);
+    preview3D.setShape(material.shape_type, dims, 'tray_pan');
+
+    if (!footprint) {
+      previewEmptyEl.textContent = 'This tray is missing some dimensions.';
+      previewEmptyEl.style.display = '';
+      fillSummaryEl.innerHTML = '';
+      preview3D.setOverlay(null);
+      preview3D.setAnnotations(null);
+      preview3D.setLabels([]);
+      return;
+    }
+    previewEmptyEl.style.display = 'none';
+
+    const netWeight = originalCombinedNetWeight(procs);
+    const density = parseFloat(densityInput.value);
+    const validDensity = density > 0 ? density : ROF_DEFAULT_DOUGH_DENSITY_G_CM3;
+
+    const trayCapacityGrams = footprint.areaCm2 * footprint.usableHeightCm * validDensity;
+    const sessionsNeeded = trayCapacityGrams > 0 ? Math.ceil(netWeight / trayCapacityGrams) : 0;
+    // This session's own share -- the first tray-full when the batch needs more than one; the
+    // "repeat this same session N times" workflow itself (looping back for session 2, 3, ...) is
+    // a later phase, this just shows the chef up front how many she'll need.
+    const thisSessionGrams = sessionsNeeded > 1 ? trayCapacityGrams : netWeight;
+    const fillHeightCm = validDensity > 0 && footprint.areaCm2 > 0
+      ? Math.min(thisSessionGrams / (footprint.areaCm2 * validDensity), footprint.usableHeightCm)
+      : 0;
+
+    preview3D.setOverlay(buildDoughFillGroup(material.shape_type, dims, footprint, fillHeightCm));
+    const annotated = buildTrayDimensionAnnotations(material.shape_type, dims, footprint, fillHeightCm);
+    preview3D.setAnnotations(annotated.group);
+    preview3D.setLabels(annotated.labels);
+
+    const fillPct = footprint.usableHeightCm > 0 ? Math.round((fillHeightCm / footprint.usableHeightCm) * 100) : 0;
+    fillSummaryEl.innerHTML = `
+      <div class="computed-value-box" style="max-width:340px; margin-bottom:14px;">
+        <div><strong>Fill Height:</strong> ${roundNice(fillHeightCm)} cm (${fillPct}% of usable ${roundNice(footprint.usableHeightCm)} cm)</div>
+        ${sessionsNeeded > 1
+          ? `<div style="margin-top:6px; color:var(--danger, #c0392b);"><strong>Overflow:</strong> this batch's ${netWeight} g needs ~${sessionsNeeded} tray sessions at this density (this tray holds ~${roundNice(trayCapacityGrams)} g per session).</div>`
+          : `<div style="margin-top:6px; color:var(--neutral);">Fits in one session (tray holds ~${roundNice(trayCapacityGrams)} g at this density).</div>`}
+      </div>
+    `;
+  }
+
+  async function populateMaterialSelect() {
+    trayMaterials = (await materialsPromise).filter(m => m.category === 'tray_pan');
+    materialSelect.innerHTML = [
+      `<option value="">— Select a tray —</option>`,
+      ...trayMaterials.map(m => `<option value="${m.id}">${m.code} — ${m.name} (${formatMaterialDimensions(m)})</option>`),
+    ].join('');
+    // Default from the first selected process that already has a tray/pan linked (its own recipe
+    // form's Material/Tray field, see buildProcessFromSaved) -- only when nothing's been picked
+    // here yet, so toggling which processes are checked never clobbers a tray the chef already
+    // chose by hand in this view.
+    if (!materialSelect.value) {
+      const defaultId = selectedProcesses().map(p => p.materialId).find(id => id && trayMaterials.some(m => String(m.id) === String(id)));
+      if (defaultId) materialSelect.value = String(defaultId);
+    }
+    updateFillPreview();
+  }
+
+  function onProcessCheckChanged() {
+    selectedProcessLocalIds = new Set(
+      [...processChecksEl.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value)
+    );
+    renderProcessSummary();
+    const hasSelection = selectedProcessLocalIds.size > 0;
+    traySection.style.display = hasSelection ? '' : 'none';
+    if (hasSelection) {
+      // Section just went from display:none to visible -- resize AFTER layout settles to this
+      // frame's real box (see the long comment on the initial resize() above for why this call,
+      // not that one, is what actually makes the tray/preview appear).
+      requestAnimationFrame(() => preview3D.resize());
+      populateMaterialSelect();
+    } else {
+      fillSummaryEl.innerHTML = '';
+      preview3D.setShape(null, {}, 'tray_pan');
+      preview3D.setOverlay(null);
+      preview3D.setAnnotations(null);
+      preview3D.setLabels([]);
+    }
+  }
+
+  function populateProcessChecks() {
+    if (workingProcesses.length === 0) { processField.style.display = 'none'; return; }
+    processField.style.display = 'flex';
+    processChecksEl.innerHTML = workingProcesses.map(p => {
+      const netWeight = compoundWasteYield(sumIngredientQuantities(p.ingredientRows), p.wastes);
+      return `
+        <label style="display:flex; align-items:center; gap:8px; font-weight:normal; font-size:13px;">
+          <input type="checkbox" value="${p.localId}" data-rof-process-check />
+          ${p.name || '(untitled process)'} <span style="color:var(--neutral); font-size:12px;">(Net ${netWeight} g)</span>
+        </label>
+      `;
+    }).join('');
+    processChecksEl.querySelectorAll('[data-rof-process-check]').forEach(cb => {
+      cb.addEventListener('change', onProcessCheckChanged);
+    });
+    // A single-process recipe has nothing to choose -- auto-check it. 2+ processes start
+    // unchecked, forcing the chef to explicitly pick which one(s) go into this tray rather than
+    // silently defaulting to "just the first" and looking already-correct when it isn't (the
+    // whole point of this being a manual choice, not an automatic "combine everything").
+    if (workingProcesses.length === 1) {
+      const onlyCb = processChecksEl.querySelector('[data-rof-process-check]');
+      onlyCb.checked = true;
+      onProcessCheckChanged();
+    } else {
+      onProcessCheckChanged();
+    }
+  }
+
+  async function onRecipePicked(recipe) {
+    selectedRecipe = recipe;
+    nameInput.value = recipe.name;
+    browseListShowing = false;
+    traySection.style.display = 'none';
+    summaryEl.innerHTML = '';
+
+    const full = await currentNs().api.get(recipe.id);
+    if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
+
+    workingProcesses = (full.processes || []).map(proc => buildProcessFromSaved(proc));
+    populateProcessChecks();
+  }
+
+  sourceButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.rofSource === source) return;
+      source = btn.dataset.rofSource;
+      sourceButtons.forEach(b => b.classList.toggle('active', b.dataset.rofSource === source));
+      nameInput.value = '';
+      listEl.hidden = true;
+      listEl.innerHTML = '';
+      clearSelection();
+    });
+  });
+
+  nameInput.addEventListener('input', () => {
+    clearSelection();
+    browseListShowing = false;
+  });
+
+  wireRecipeAutocomplete(nameInput, listEl, onRecipePicked, (q) => currentNs().api.search(q));
+
+  browseBtn.addEventListener('mousedown', async (e) => {
+    e.preventDefault();
+    if (browseListShowing && !listEl.hidden) {
+      listEl.hidden = true;
+      listEl.innerHTML = '';
+      browseListShowing = false;
+      return;
+    }
+    const all = await currentNs().api.list();
+    const sorted = [...all].sort((a, b) => a.name.localeCompare(b.name));
+    renderRecipeAutocompleteList(listEl, sorted, nameInput, onRecipePicked, 'No recipes yet');
+    browseListShowing = true;
+    nameInput.focus();
+  });
+
+  materialSelect.addEventListener('change', updateFillPreview);
+  densityInput.addEventListener('input', updateFillPreview);
 }
 
 function renderMaterialsView(main) {

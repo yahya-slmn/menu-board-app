@@ -316,6 +316,10 @@ table.items-table td.cat-cell {
 .chip.daily { background: var(--neutral); }
 .chip.pastry { background: var(--pastry); }
 .chip.cold-kitchen { background: var(--cold-kitchen); }
+/* Same "needs a look" amber tone as .rc-missing, not .chip's other danger-red-adjacent uses --
+   an unverified calorie estimate isn't necessarily WRONG, just an unconfirmed AI guess with no
+   real recipe to ground it (see main.js's checkCaloriePlausibility/calories_unverified). */
+.chip.unverified { background: var(--gold); color: var(--ink); }
 
 .icon-btn {
   background: none; border: none; cursor: pointer; color: var(--neutral); font-size: 13px;
@@ -705,6 +709,11 @@ table.materials-table td.cat-cell {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: var(--neutral); font-size: 12.5px; text-align: center; padding: 0 20px;
 }
+.material-preview-dim-label {
+  position: absolute; top: 0; left: 0; font-size: 11px; font-weight: 600; color: var(--ink);
+  background: rgba(251,248,242,0.92); border: 1px solid var(--line); border-radius: 4px;
+  padding: 2px 6px; white-space: nowrap; pointer-events: none;
+}
 
 /* ---------------- Modal ---------------- */
 .modal-overlay {
@@ -738,6 +747,17 @@ table.materials-table td.cat-cell {
   cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
 .photo-lightbox-close:hover { background: rgba(30,42,36,0.75); }
+/* Fixed bottom-center, independent of the image's own size/aspect ratio -- a card-bottom
+   .actions row (the rest of this app's usual button placement) doesn't apply here since the
+   lightbox has no card, just the bare image. */
+.photo-lightbox-save {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: white; color: var(--ink); border: none; border-radius: 24px;
+  padding: 10px 22px; font-size: 13px; font-weight: 600; cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+.photo-lightbox-save:hover { background: var(--paper-dim); }
+.photo-lightbox-save:disabled { opacity: 0.6; cursor: default; }
 
 /* ---------------- Export preview modal ---------------- */
 /* Reuses .modal's own scroll behavior (max-height: 84vh; overflow-y: auto) unchanged -- a long
