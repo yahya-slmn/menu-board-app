@@ -39,6 +39,12 @@ contextBridge.exposeInMainWorld('api', {
 
   parseAndSuggestMenuIngredients: (payload) => ipcRenderer.invoke('parse-and-suggest-menu-ingredients', payload),
   exportMenuIngredients: (payload) => ipcRenderer.invoke('export-menu-ingredients', payload),
+  cleanMenusForSharing: (payload) => ipcRenderer.invoke('clean-menus-for-sharing', payload),
+  onCleanMenuProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('clean-menu-progress', listener);
+    return () => ipcRenderer.removeListener('clean-menu-progress', listener);
+  },
   onMenuIngredientsProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('menu-ingredients-progress', listener);
@@ -62,6 +68,17 @@ contextBridge.exposeInMainWorld('api', {
   saveMaterial: (payload) => ipcRenderer.invoke('save-material', payload),
   deleteMaterial: (id) => ipcRenderer.invoke('delete-material', id),
   getMaterialPhoto: (photoPath) => ipcRenderer.invoke('get-material-photo', photoPath),
+
+  listDoughShapes: () => ipcRenderer.invoke('list-dough-shapes'),
+  createDoughShape: (payload) => ipcRenderer.invoke('create-dough-shape', payload),
+  deleteDoughShape: (id) => ipcRenderer.invoke('delete-dough-shape', id),
+  getDoughShapePhoto: (photoPath) => ipcRenderer.invoke('get-dough-shape-photo', photoPath),
+  onDoughShapeGenerateProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('dough-shape-generate-progress', listener);
+    return () => ipcRenderer.removeListener('dough-shape-generate-progress', listener);
+  },
+
   listRecipes: () => ipcRenderer.invoke('list-recipes'),
   searchRecipes: (query) => ipcRenderer.invoke('search-recipes', query),
   getRecipe: (id) => ipcRenderer.invoke('get-recipe', id),

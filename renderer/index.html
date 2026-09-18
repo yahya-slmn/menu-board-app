@@ -10,6 +10,12 @@
     <button class="secondary refresh-btn" id="refresh-btn" title="Reload sections/categories/protein types from Supabase">
       <span class="refresh-icon">⟳</span><span class="refresh-label">Refresh</span>
     </button>
+    <!-- Global, not per-view -- same reasoning as Refresh above. Backed by localStorage (see
+         wireSoundToggleButton/isSoundMuted in renderer.js), not Supabase: sound on/off is a
+         personal device preference, not shared state that needs to sync across chefs/sessions. -->
+    <button class="secondary sound-toggle-btn" id="sound-toggle-btn" title="Mute/unmute sound effects">
+      <span id="sound-toggle-icon">🔊</span>
+    </button>
   </div>
   <div id="app">
     <nav class="sidebar">
@@ -25,6 +31,7 @@
         <button class="nav-btn" data-view="build">Build Menu</button>
         <button class="nav-btn" data-view="exportAll">Export All Sections</button>
         <button class="nav-btn" data-view="menuIngredients">Menu Ingredients Generator</button>
+        <button class="nav-btn" data-view="cleanMenu">Clean Menu for Sharing</button>
       </div>
       <button class="nav-btn" data-view="history">History</button>
 
@@ -37,6 +44,7 @@
       <button class="nav-btn" data-view="extractedIngredients">Extracted Ingredients</button>
       <button class="nav-btn" data-view="ingredients">Ingredients</button>
       <button class="nav-btn" data-view="materials">Materials</button>
+      <button class="nav-btn" data-view="doughShapes">Dough Shapes</button>
 
       <div class="sidebar-footer">Developed by Yahya Sleiman</div>
     </nav>

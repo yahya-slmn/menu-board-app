@@ -1,18 +1,24 @@
 // Supabase Edge Function: generate-dish-recipes
 //
 // Backs the Recipe Generator screen: given a batch of dish names pulled from an uploaded menu
-// file (AM Snack/PM Snack/Soup/Appetizer/Main Course dishes only -- filtered by the caller,
-// lib/recipeGenerator.js), generates a FULL reference recipe per dish -- name, one or more
-// named processes each with ingredients (name/quantity/unit/method), a method, and (optionally,
-// only where genuinely applicable) a waste % per process -- at a natural/realistic scale. Waste
-// matching against the existing waste_types catalog is a semantic decision handed to the model
-// (see buildWasteRule) since this function has no DB access to do string matching itself; main.js
-// resolves the model's answer against the real catalog afterward. This is deliberately NOT the
-// same call as suggest-dish-ingredients: that
+// file (every dish EXCEPT Bread/Milk/Juice/CEO -- filtered by the caller, lib/recipeGenerator.js),
+// generates a FULL reference recipe per dish -- name, one or more named processes each with
+// ingredients (name/quantity/unit/method), a method, and (optionally, only where genuinely
+// applicable) a waste % per process -- at a natural/realistic scale. Waste matching against the
+// existing waste_types catalog is a semantic decision handed to the model (see buildWasteRule)
+// since this function has no DB access to do string matching itself; main.js resolves the
+// model's answer against the real catalog afterward. This is deliberately NOT the same call as
+// suggest-dish-ingredients: that
 // function returns one short dash-separated ingredient string per dish (a much smaller, more
 // frequent ask); this one returns a full nested recipe structure per dish, a categorically
 // bigger structured-output request that would otherwise inflate suggest-dish-ingredients'
 // latency/token budget for its own, far more common, ingredients-only path.
+//
+// Each item also carries "seafoodAllowed" (see SEAFOOD_RESTRICTION below) -- a school-policy
+// restriction, section-conditional unlike the universal nut/sesame one, with its own "skipReason"
+// escape hatch for a dish that's genuinely, unambiguously seafood-based landing in a section
+// where that's not permitted (main.js treats a set skipReason as a deliberate decline, not a
+// failure -- it's logged as a warning, never persisted, and never retried).
 //
 // Batch size is intentionally much smaller than suggest-dish-ingredients' 50 (main.js sends
 // ~8 per call) given how much larger a full recipe is than one ingredient string -- see
@@ -45,6 +51,11 @@ interface DishItem {
   index: number;
   name: string;
   category?: string;
+  // Computed in main.js from the dish's own resolved menu section, never left for this model to
+  // infer from a section name string itself -- see SEAFOOD_RESTRICTION below and
+  // lib/recipeGenerator.js's isStudentSection/resolveSectionFromSheetName. true only for Staff;
+  // every student section (and an unresolvable/unknown section) is false.
+  seafoodAllowed: boolean;
 }
 
 const RECIPE_SCHEMA = {
@@ -57,6 +68,11 @@ const RECIPE_SCHEMA = {
         properties: {
           index: { type: "integer" },
           name: { type: "string" },
+          // Set to a short explanation (and leave "processes" empty) ONLY when this dish is
+          // genuinely, unambiguously seafood-based and its item carried seafoodAllowed: false --
+          // see SEAFOOD_RESTRICTION. null for every normal item, including a shape-named dish
+          // (e.g. a fish-shaped sandwich) that correctly generates with no real seafood.
+          skipReason: { anyOf: [{ type: "string" }, { type: "null" }] },
           processes: {
             type: "array",
             items: {
@@ -97,7 +113,7 @@ const RECIPE_SCHEMA = {
             },
           },
         },
-        required: ["index", "name", "processes"],
+        required: ["index", "name", "skipReason", "processes"],
         additionalProperties: false,
       },
     },
@@ -115,6 +131,28 @@ const RECIPE_SCHEMA = {
 // code-level backstop regardless of how well this prompt was followed.
 const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly prohibits ALL nuts, sesame, and their derived ingredients, with zero exceptions. Never include any tree nut (almond, cashew, walnut, pistachio, hazelnut, pecan, macadamia, pine nut, brazil nut, chestnut, etc.), peanut, sesame in any form (sesame seeds, sesame oil, tahini/sesame paste, halva, za'atar, benne, gomashio, etc.), or nut/sesame-derived product (nut butter, nut milk, nut oil, marzipan, praline, nutella, nougat, etc.) in ANY generated recipe -- even if the dish traditionally or typically includes one. If a dish's most natural recipe would normally include a nut or sesame product, substitute a safe alternative that fits the dish (e.g. sunflower seed butter instead of peanut butter, or instead of tahini in a dish like hummus; extra olive oil and lemon juice instead of tahini; a plain breadcrumb or herb crust instead of a sesame crust; a sesame-free herb blend -- thyme, sumac, oregano -- instead of za'atar) or simply omit that component -- never include the nut or sesame itself. Treat this with the same seriousness as an allergy-critical instruction, because it is one.`;
 
+// UNLIKE the nut restriction above, this is NOT universal -- it is a school POLICY restriction
+// (seafood/fish banned for student sections, permitted for Staff), computed per-item as the
+// "seafoodAllowed" flag on each item (see the DishItem interface) rather than something this
+// model decides from a section name itself -- main.js already resolved that. The genuinely hard
+// part is telling apart a dish name that merely describes a SHAPE (a common kid-presentation
+// style -- a sandwich or snack cut into a fish/crab shape) from a dish that IS actually seafood-
+// based, since only the model has the semantic judgment to tell those apart; the "skipReason"
+// escape hatch exists specifically for the one case a code-level filter cannot safely resolve on
+// its own -- a genuinely seafood-based dish that shouldn't exist in a student section at all
+// (a real menu-planning mistake). Confirmed with the chef: skip and flag that case, don't invent
+// a substitute-protein version of it (unlike the nut restriction above, which DOES substitute).
+const SEAFOOD_RESTRICTION = `Each item below also carries a "seafoodAllowed" flag -- follow it per item, since a single batch can mix items with different flags:
+
+When "seafoodAllowed" is false (a Misk student section -- Daycare/KG-LP/MS-UP -- where seafood/fish is strictly prohibited by school policy):
+- If the dish name merely describes a SHAPE or cutting/presentation style referencing a fish, crab, shrimp, etc. (a common kid-presentation style, e.g. a sandwich or snack CUT INTO a fish or crab shape, with no seafood actually involved) -- generate the recipe NORMALLY with its real ingredients (e.g. a grilled cheese sandwich, a fruit platter) and include ZERO real seafood/fish ingredients. The shape is purely cosmetic, not a preparation instruction -- do not add fish, shrimp, crab, or any other seafood just because the name mentions one.
+- If the dish is GENUINELY, unambiguously a seafood-based dish by its own name/concept (e.g. "Grilled Salmon", "Shrimp Scampi", an actual tuna sandwich) -- this is a real menu-planning mistake, since such a dish should never be placed in a student section -- do NOT generate a recipe for it, and do NOT substitute a different protein to force one through anyway. Instead set "skipReason" to a brief explanation (e.g. "Genuinely a seafood dish; not permitted for this student section") and leave "processes" as an empty array.
+- If you are genuinely unsure whether a name describes a shape or an actual seafood dish, treat it as the second case above (skip and explain) rather than guessing either way.
+
+When "seafoodAllowed" is true (a Staff dish): seafood/fish is fully permitted. Generate real seafood ingredients normally for a genuinely seafood-based dish, exactly as you would any other protein -- no special handling needed.
+
+For every item you do NOT skip, set "skipReason" to null.`;
+
 // Shorter version of suggest-dish-ingredients' own DECOMPOSITION_RULE -- a full recipe's
 // ingredient list is inherently more decomposed than a bare ingredient-name suggestion (you
 // can't write a real method step around "dough" without saying what's in it), but the same
@@ -131,6 +169,16 @@ const DECOMPOSITION_RULE = `Every ingredient name must be a real base ingredient
 // directly regardless of unit -- a stray "ml" or "pc" silently corrupts every one of those totals
 // exactly like a wrong gram figure would, just less visibly.
 const UNITS_RULE = `Every ingredient's quantity MUST be expressed in grams ("g") -- with zero exceptions. This applies to liquids, oils, sauces, melted or liquid ingredients, and count-based items (a whole egg, a garlic clove, a single fruit) just as much as dry/solid ingredients -- there is no "grams genuinely doesn't apply" case. Never use "ml", any other volume unit, or any non-gram unit ("pc", "piece", "cup", "tbsp", "tsp", etc.) anywhere in your output, even for an ingredient that would naturally be measured that way in a real kitchen. Convert to its gram equivalent using standard culinary density/weight knowledge instead (e.g. water/milk/stock ~1g per ml, olive oil ~0.92g per ml, "1 egg" -> ~50g, "1 garlic clove" -> ~5g) -- never report the ingredient in its natural unit.`;
+
+// Chef-reported failure mode: a plain, unqualified staple name (their concrete example was
+// "White Rice" on a school lunch menu) is genuinely ambiguous to a model working from general
+// culinary knowledge alone -- "rice" has many popular preparations (fried, pilaf, biryani, ...),
+// and nothing in the bare dish name signals which one a school-cafeteria menu actually means.
+// Stated as a general rule (not hardcoded to rice alone) since the same ambiguity applies to any
+// plain staple name; the item payload has no per-dish section/context field to key off of, so
+// this can't be scoped to "only Daycare" the way the chef's own example was framed -- it applies
+// uniformly, which is fine since a plain staple name means the same simple thing in any section.
+const PLAIN_STAPLE_RULE = `When a dish name is a plain, unqualified staple with no preparation style stated (e.g. "White Rice", "Rice", "Pasta", "Potatoes"), assume the SIMPLEST, most standard preparation -- e.g. "White Rice" means plain white STEAMED (or boiled) rice, not fried rice, rice pilaf, biryani, or any other elaborate preparation. Only generate a fancier preparation when the dish name itself actually says so (e.g. "Fried Rice", "Rice Pilaf", "Biryani").`;
 
 // Waste has no DB access here (this function is Anthropic-only, no Supabase client) -- the
 // matching decision is inherently semantic ("Baking Waste" and "Oven Loss" might mean the same
@@ -158,18 +206,23 @@ ${DECOMPOSITION_RULE}
 
 ${UNITS_RULE}
 
+${PLAIN_STAPLE_RULE}
+
+${SEAFOOD_RESTRICTION}
+
 For each dish, generate:
 - "name": the dish name (use the given name, cleaned up if needed).
-- "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish. Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen.
+- "skipReason": see the seafood restriction above -- null unless you are genuinely declining this specific item.
+- "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish. Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen. Empty array only when "skipReason" is set.
 - Each process's "ingredients": every real base ingredient it needs, each with a realistic quantity for a normal/standard batch of this dish (NOT scaled to any particular total -- just a natural, realistic recipe). See the units rule above for how quantity/unit must be expressed -- it applies to every ingredient, no exceptions. "method" on an ingredient is a short prep note (e.g. "diced", "melted"), or null if none.
 - Each process's "method_steps": one array entry per distinct preparation step, in order.
 - Each process's "wastes": see the rule below.
 
 ${buildWasteRule(existingWasteTypeNames)}
 
-Each item carries its own "index" number and may carry a "category" (the menu category this dish was listed under, for context on what kind of dish this is -- e.g. a "Soup" category item should be a soup, an "AM Snack" item should be breakfast/snack-appropriate). Return exactly one recipe entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate recipe. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
+Each item carries its own "index" number, may carry a "category" (the menu category this dish was listed under, for context on what kind of dish this is -- e.g. a "Soup" category item should be a soup, an "AM Snack" item should be breakfast/snack-appropriate), and always carries "seafoodAllowed" (see the seafood restriction above -- apply it per item, since one batch can mix items with different flags). Return exactly one recipe entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate recipe. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries -- a genuinely declined item (per the seafood restriction) still needs its own entry, just with "skipReason" set and "processes" empty, not omitted.
 
-Remember: absolutely no nuts, sesame, or their derived ingredients anywhere in your output, per the restriction stated at the top. Per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients as their own rows. And per the units rule above, every single quantity is in grams ("g") only -- never "ml" or any other unit, even for a liquid, oil, sauce, or count-based ingredient.
+Remember: absolutely no nuts, sesame, or their derived ingredients anywhere in your output, per the restriction stated at the top. Per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients as their own rows. And per the units rule above, every single quantity is in grams ("g") only -- never "ml" or any other unit, even for a liquid, oil, sauce, or count-based ingredient. And per the plain-staple rule above, a bare staple name with no preparation stated means its SIMPLEST standard form (plain "White Rice" is steamed rice, not fried rice or pilaf) -- never assume a fancier preparation the name itself didn't ask for. And per the seafood restriction above, a fish/crab/shrimp-SHAPED dish for a student section still gets zero real seafood ingredients, while a genuinely seafood-based dish for a student section gets skipped entirely, never substituted.
 
 Items (JSON array): ${JSON.stringify(items)}`;
 }
@@ -196,7 +249,13 @@ Deno.serve(async (req) => {
     return ok({ success: false, error: "Invalid request body" });
   }
 
-  const items = body.items;
+  // Coerced rather than validated-and-rejected: a missing/malformed seafoodAllowed should fail
+  // SAFE (treated as false, the restricted default), never fail the whole batch outright, same
+  // "unknown means restricted, never permitted" principle main.js's own resolveSectionFromSheetName
+  // caller already applies before this ever gets sent.
+  const items = Array.isArray(body.items)
+    ? body.items.map((it) => ({ ...it, seafoodAllowed: it?.seafoodAllowed === true }))
+    : body.items;
   const existingWasteTypeNames = Array.isArray(body.existingWasteTypeNames)
     ? body.existingWasteTypeNames.filter((n): n is string => typeof n === "string")
     : [];

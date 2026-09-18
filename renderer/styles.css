@@ -45,6 +45,7 @@ h1, h2, h3, .display {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  gap: 8px;
   padding: 8px 16px;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
@@ -53,6 +54,7 @@ h1, h2, h3, .display {
 .refresh-icon { display: inline-block; font-size: 13px; line-height: 1; }
 .refresh-btn.spinning .refresh-icon { animation: refresh-spin 0.8s linear infinite; }
 @keyframes refresh-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.sound-toggle-btn { display: inline-flex; align-items: center; justify-content: center; padding: 6px 10px; font-size: 14px; line-height: 1; }
 
 /* ---------------- Shared progress panel -- every AI-Edge-Function-calling flow (Recipe
    Extractor upload, Export Selected x2, Calculator export x2, Menu Ingredients Generator, and
@@ -632,6 +634,24 @@ table.materials-table td.cat-cell {
 }
 .mode-toggle-btn + .mode-toggle-btn { border-left: 1px solid var(--line); }
 .mode-toggle-btn.active { background: var(--sage); color: white; }
+
+/* Recipe on Fire's Setup -> Bake -> Trim step breadcrumb. */
+.rof-steps { display: flex; gap: 8px; margin-bottom: 16px; }
+.rof-step-pill {
+  padding: 5px 14px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line);
+  color: var(--neutral); background: white;
+}
+.rof-step-pill.active { background: var(--sage); color: white; border-color: var(--sage); }
+.rof-step-pill.disabled { opacity: 0.5; }
+
+/* The tray/dough canvas is the dominant visual on every step (Setup/Dough/Baked/Cut) -- a compact
+   horizontal control strip (Tray select, dough/cutter palette, step buttons) on top, with the 2D
+   tray canvas taking the clear majority of the available width/height below it, rather than a
+   50/50 side-by-side split. */
+.rof-control-strip { max-width: 900px; margin: 0 auto 18px; }
+.rof-control-strip .generate-controls { margin-bottom: 0; }
+.rof-preview-hero { display: flex; justify-content: center; }
+.rof-preview-hero .material-preview-wrap { width: 100%; max-width: 900px; height: min(62vh, 620px); }
 
 .text-list { display: flex; flex-direction: column; gap: 6px; }
 .text-list-row { display: flex; align-items: center; gap: 8px; }

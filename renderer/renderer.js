@@ -77,6 +77,13 @@ const state = {
   // exist at all for view/formId/pendingPhoto/removePhoto, the same three things every other
   // list<->form screen's own state slice needs.
   materials: { view: 'list', formId: null, pendingPhoto: null, removePhoto: false },
+  // Dough Shapes catalog (Recipe on Fire pivot, Phase A) -- same list<->form drill-down shape as
+  // Materials above, but simpler (no photo upload of her own -- every photo here is AI-generated
+  // as a full 9-image set at creation time, never edited afterward; deleting and re-creating is
+  // the whole "edit" story for now, matching how small/rare this catalog is expected to stay).
+  // 'gallery' is a third view mode (list -> add-shape-form, or list -> gallery for an existing
+  // shape's own full 9-photo set) -- galleryShapeId only matters while view === 'gallery'.
+  doughShapes: { view: 'list', galleryShapeId: null },
 };
 
 // Recipe Book and Recipe Extractor are two fully separate tables (see CLAUDE.md-equivalent
@@ -401,6 +408,7 @@ async function init() {
   renderSectionNav();
   wireNav();
   wireRefreshButton();
+  wireSoundToggleButton();
   renderView();
 }
 
@@ -470,6 +478,101 @@ function wireRefreshButton() {
       label.textContent = originalText;
     }
   });
+}
+
+// ---- Procedurally-synthesized sound effects (Web Audio API) -----------------------------------
+// This app's first audio of any kind -- deliberately no sample files at all (not even CC0/
+// royalty-free ones): every effect below is generated in-code from oscillators and filtered
+// noise, so there's no third-party licensing to source, vet, or bundle, consistent with this
+// app's no-bundler/minimal-deps approach. Kept as one small app-level module (not scoped to
+// Recipe on Fire specifically) since a future feature could reuse the same AudioContext/mute
+// state. Mute is a personal device preference (localStorage), not synced via Supabase -- unlike
+// everything else in this app, there's no reason sound-on/off should follow a chef between
+// devices or be visible to other chefs.
+const SOUND_MUTE_STORAGE_KEY = 'menuBoardSoundMuted';
+let _audioCtx = null;
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+
+function isSoundMuted() {
+  try { return localStorage.getItem(SOUND_MUTE_STORAGE_KEY) === '1'; } catch { return false; }
+}
+function setSoundMuted(muted) {
+  try { localStorage.setItem(SOUND_MUTE_STORAGE_KEY, muted ? '1' : '0'); } catch { /* private window etc -- just doesn't persist */ }
+}
+
+function wireSoundToggleButton() {
+  const btn = document.getElementById('sound-toggle-btn');
+  const icon = document.getElementById('sound-toggle-icon');
+  const refresh = () => { icon.textContent = isSoundMuted() ? '🔇' : '🔊'; };
+  refresh();
+  btn.addEventListener('click', () => {
+    setSoundMuted(!isSoundMuted());
+    refresh();
+  });
+}
+
+// Shared filtered-noise basis for the whoosh/sizzle/slice effects below -- plain white noise
+// through a BiquadFilter reads convincingly as fire/cutting texture without needing any sample.
+function makeNoiseBuffer(ctx, durationSec) {
+  const buffer = ctx.createBuffer(1, Math.max(1, Math.round(ctx.sampleRate * durationSec)), ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  return buffer;
+}
+
+// Ignite/whoosh burst -- filtered noise sweeping high->low plus a quick pitch-down oscillator,
+// played once on Recipe on Fire's "Bake ->" click (see startBaking).
+function playIgniteSound() {
+  if (isSoundMuted()) return;
+  const ctx = getAudioCtx();
+  const now = ctx.currentTime;
+
+  const noise = ctx.createBufferSource();
+  noise.buffer = makeNoiseBuffer(ctx, 0.6);
+  const noiseFilter = ctx.createBiquadFilter();
+  noiseFilter.type = 'bandpass';
+  noiseFilter.frequency.setValueAtTime(1800, now);
+  noiseFilter.frequency.exponentialRampToValueAtTime(300, now + 0.5);
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(0.0001, now);
+  noiseGain.gain.linearRampToValueAtTime(0.5, now + 0.05);
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+  noise.connect(noiseFilter).connect(noiseGain).connect(ctx.destination);
+  noise.start(now);
+  noise.stop(now + 0.6);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(220, now);
+  osc.frequency.exponentialRampToValueAtTime(60, now + 0.4);
+  const oscGain = ctx.createGain();
+  oscGain.gain.setValueAtTime(0.3, now);
+  oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+  osc.connect(oscGain).connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + 0.42);
+}
+
+// Short slice/cut transient -- a sharp high-pass noise burst, played once per cutter placement
+// click on Recipe on Fire's Cut step (see onTrayPointerDown).
+function playSliceSound() {
+  if (isSoundMuted()) return;
+  const ctx = getAudioCtx();
+  const now = ctx.currentTime;
+  const noise = ctx.createBufferSource();
+  noise.buffer = makeNoiseBuffer(ctx, 0.2);
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'highpass';
+  filter.frequency.value = 3500;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.5, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+  noise.connect(filter).connect(gain).connect(ctx.destination);
+  noise.start(now);
+  noise.stop(now + 0.2);
 }
 
 function renderSectionNav() {
@@ -553,6 +656,7 @@ function renderView() {
   if (state.currentView === 'history') return renderHistoryView(main);
   if (state.currentView === 'exportAll') return renderExportAllView(main);
   if (state.currentView === 'menuIngredients') return renderMenuIngredientsView(main);
+  if (state.currentView === 'cleanMenu') return renderCleanMenuView(main);
   if (state.currentView === 'recipes') return renderRecipesView(main);
   if (state.currentView === 'extractor') return renderExtractorView(main);
   if (state.currentView === 'recipeGenerator') return renderRecipeGeneratorView(main);
@@ -561,6 +665,7 @@ function renderView() {
   if (state.currentView === 'ingredients') return renderIngredientsView(main);
   if (state.currentView === 'extractedIngredients') return renderExtractedIngredientsView(main);
   if (state.currentView === 'materials') return renderMaterialsView(main);
+  if (state.currentView === 'doughShapes') return renderDoughShapesView(main);
 }
 
 function currentSectionName() {
@@ -1893,6 +1998,112 @@ function renderMenuIngredientsReview(container, rows) {
     if (!row) return;
     if (isIngredients) row.ingredients = e.target.value;
     else row.allergens = e.target.value;
+  });
+}
+
+// ============================================================
+// CLEAN MENU FOR SHARING -- upload one or more already-exported/edited menu files, get back clean
+// copies with every formula flattened to a static value and every dropdown removed. No review
+// step (pure deterministic file manipulation, no AI) -- see main.js's clean-menus-for-sharing
+// handler for what actually changes (nothing but those two things) and for how multiple files are
+// processed independently (one failing never blocks or delays the others) and bundled into one
+// zip. Each uploaded file gets its OWN progress row here -- same spinner/message CSS every other
+// progress panel in this app already uses (.progress-panel-row/-spinner/-message), just N rows
+// instead of one shared bar, since each file's status is genuinely independent.
+// ============================================================
+function renderCleanMenuView(main) {
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Clean Menu for Sharing</h1><span class="section-pill">Upload one or more exported menu files, get back clean copies -- formulas flattened to values, dropdowns removed, nothing else changes</span></div>
+    </div>
+    <div class="generate-controls" style="align-items:center;">
+      <button class="primary" id="cm-upload-btn">Upload Menu File(s)</button>
+      <input type="file" id="cm-file-input" accept=".xlsx" multiple hidden />
+    </div>
+    <div id="cm-file-list" style="margin-top:14px;"></div>
+    <div id="cm-summary" style="margin-top:10px; font-size:13px;"></div>
+  `;
+
+  document.getElementById('cm-upload-btn').addEventListener('click', () => {
+    document.getElementById('cm-file-input').click();
+  });
+
+  document.getElementById('cm-file-input').addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (files.length === 0) return;
+
+    const uploadBtn = document.getElementById('cm-upload-btn');
+    uploadBtn.disabled = true;
+    const listEl = document.getElementById('cm-file-list');
+    const summaryEl = document.getElementById('cm-summary');
+    summaryEl.textContent = '';
+
+    listEl.innerHTML = `
+      <div class="progress-panel">
+        ${files.map((f, i) => `
+          <div class="progress-panel-row" data-file-row="${i}">
+            <span class="progress-panel-spinner" data-file-icon style="display:inline-block; width:14px;"></span>
+            <span class="progress-panel-message">${f.name}</span>
+            <span class="progress-panel-meta" data-file-status>Queued…</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+    function setRowStatus(fileIndex, stage, message) {
+      const row = listEl.querySelector(`[data-file-row="${fileIndex}"]`);
+      if (!row) return;
+      const statusEl = row.querySelector('[data-file-status]');
+      const iconEl = row.querySelector('[data-file-icon]');
+      if (statusEl && message != null) statusEl.textContent = message;
+      if (iconEl && (stage === 'done' || stage === 'error')) {
+        // Swap the spinning circle for a static glyph -- className reset drops the spinner's
+        // border/animation entirely, same fixed 14px width kept so the row doesn't jump.
+        iconEl.className = '';
+        iconEl.style.cssText = 'display:inline-block; width:14px; text-align:center; font-weight:600;';
+        iconEl.textContent = stage === 'done' ? '✓' : '✕';
+        iconEl.style.color = stage === 'done' ? 'var(--sage-dark)' : 'var(--danger, #c0392b)';
+      }
+    }
+
+    const unsubscribe = window.api.onCleanMenuProgress(({ fileIndex, stage, message }) => {
+      setRowStatus(fileIndex, stage, message);
+    });
+
+    try {
+      const filesPayload = await Promise.all(files.map((file) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ fileName: file.name, base64: reader.result.split(',')[1] });
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      })));
+
+      const result = await window.api.cleanMenusForSharing({ files: filesPayload });
+
+      // Reconciles every row against the final per-file results regardless of what progress
+      // events already showed -- a file failing inside cleanOneMenuFile already emits its own
+      // 'error' progress event (so this is mostly a no-op double-check), but this is the one
+      // place guaranteed to reflect the true final state even if an event was somehow missed.
+      (result.results || []).forEach((r, i) => {
+        setRowStatus(i, r.success ? 'done' : 'error', r.success ? 'Done' : r.error);
+      });
+
+      const successCount = (result.results || []).filter((r) => r.success).length;
+      const totalCount = (result.results || []).length;
+      if (result.success) {
+        summaryEl.innerHTML = `<span style="color:var(--sage-dark);">${successCount} of ${totalCount} file(s) cleaned successfully. Saved to "${result.path}".</span>`;
+      } else if (result.cancelled) {
+        summaryEl.innerHTML = `<span style="color:var(--neutral);">${successCount} of ${totalCount} file(s) cleaned successfully, but the save was cancelled.</span>`;
+      } else {
+        summaryEl.innerHTML = `<span style="color:var(--danger, #c0392b);">${result.error}</span>`;
+      }
+    } catch (err) {
+      summaryEl.innerHTML = `<span style="color:var(--danger, #c0392b);">Couldn't clean these files: ${err.message}</span>`;
+    } finally {
+      unsubscribe();
+      uploadBtn.disabled = false;
+    }
   });
 }
 
@@ -3941,8 +4152,9 @@ async function saveProcessRecipeForm(ns) {
 
 // ============================================================
 // RECIPE GENERATOR -- AI-generates a full ~100g reference recipe per dish pulled from an
-// uploaded menu file (main.js's parse-and-generate-recipes), for dishes in the AM Snack/PM
-// Snack/Soup/Appetizers/Main Course categories only. Two tabs: Drafts (generated_recipes rows
+// uploaded menu file (main.js's parse-and-generate-recipes), for every dish EXCEPT Bread/Milk/
+// Juice (and the already-established Fruit Basket/Fruit Bar/Salad Bar/Water/Soft Drinks
+// exclusions) -- see lib/recipeGenerator.js's isExcludedCategory/isReadyMadeItem. Two tabs: Drafts (generated_recipes rows
 // with status='draft', reviewed/edited before being confirmed) and Recipe Generated (status=
 // 'confirmed', an RG- code assigned the moment she confirms). Both tabs drill into the SAME
 // bespoke edit form (renderGeneratedRecipeFormView) when a row is opened -- reviewing a draft
@@ -4015,19 +4227,12 @@ async function renderRecipeGeneratorTabs(main, ns) {
       s.fileName = file.name;
       const warningNote = result.failures && result.failures.length
         ? `\n\n${result.failures.length} warning(s) -- see the app logs for details.` : '';
-      // existingCount is how many eligible dishes already had a recipe (draft or confirmed, from
-      // any menu) and were skipped before ever calling the AI -- see parse-and-generate-recipes'
-      // own dedup step. Phrased separately from the plain case so "all skipped" doesn't read as
-      // if 0 were generated out of 0 attempted.
-      const existingCount = result.existingCount || 0;
-      let summary;
-      if (existingCount === 0) {
-        summary = `Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s).`;
-      } else if (result.dishCount === existingCount) {
-        summary = `All ${result.dishCount} eligible dish(es) already have a recipe -- nothing new to generate.`;
-      } else {
-        summary = `${result.dishCount} eligible dish(es) found -- ${existingCount} already have a recipe (skipped), generated ${result.createdCount} of ${result.dishCount - existingCount} new one(s).`;
-      }
+      // No cross-upload skip anymore (removed per the chef's own explicit request) -- every
+      // eligible dish in this upload gets its own recipe every time, regardless of whether a
+      // similar one already exists from an earlier upload. dishCount can still exceed
+      // createdCount when a batch genuinely failed/timed out (see `failures`), not because
+      // anything was intentionally skipped.
+      const summary = `Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s).`;
       alert(`${summary} Review them in the Drafts tab.${warningNote}`);
       s.activeTab = 'drafts';
       s.draftFolder = null;
@@ -4137,23 +4342,55 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
     return;
   }
 
+  function rowMarkup(d) {
+    return `
+      <tr>
+        <td>${d.name}</td>
+        <td>${d.category || '–'}</td>
+        <td>${d.source_menu_label || '–'}</td>
+        <td>${new Date(d.created_at).toLocaleDateString()}</td>
+        <td style="text-align:right">
+          <button class="icon-btn" data-rg-review="${d.id}">Review</button>
+          <button class="icon-btn danger" data-rg-delete="${d.id}">Delete</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  // Sub-grouped by day WITHIN this menu folder (requirement 4) -- a pure client-side grouping,
+  // same "no separately persisted grouping entity" convention the menu-folder grouping one level
+  // up already uses (see this function's own header comment), just one level deeper. Insertion
+  // order into the Map is first-seen-in-this-folder order, which is already chronological for a
+  // real menu (the parser encounters day-blocks in the sheet's own top-to-bottom order).
+  //
+  // Falls back to the old flat table with NO day headings at all when not a single row in this
+  // folder carries a day label -- true for every draft generated before source_day_label existed,
+  // and for the AI-assisted layout-agnostic fallback parse path, which doesn't capture a day at
+  // all today (see main.js's extractDishesWithAI) -- a lone "No day recorded" heading sitting over
+  // literally every row would be noise, not a grouping aid.
+  const hasAnyDayLabel = rows.some(d => d.source_day_label);
+  let tableRowsHtml;
+  if (hasAnyDayLabel) {
+    const dayGroups = new Map(); // day label (or null) -> rows
+    for (const d of rows) {
+      const key = d.source_day_label || null;
+      if (!dayGroups.has(key)) dayGroups.set(key, []);
+      dayGroups.get(key).push(d);
+    }
+    tableRowsHtml = [...dayGroups.entries()].map(([day, groupRows]) => `
+      <tr><td colspan="5" style="background:var(--paper-dim); font-weight:600; padding-top:10px;">${day || 'No day recorded'}</td></tr>
+      ${groupRows.map(rowMarkup).join('')}
+    `).join('');
+  } else {
+    tableRowsHtml = rows.map(rowMarkup).join('');
+  }
+
   container.innerHTML = `
     ${backBtn}
     <table class="recipes-table rg-drafts-table">
       <thead><tr><th>Dish</th><th>Category</th><th>Source Menu</th><th>Generated</th><th></th></tr></thead>
       <tbody>
-        ${rows.map(d => `
-          <tr>
-            <td>${d.name}</td>
-            <td>${d.category || '–'}</td>
-            <td>${d.source_menu_label || '–'}</td>
-            <td>${new Date(d.created_at).toLocaleDateString()}</td>
-            <td style="text-align:right">
-              <button class="icon-btn" data-rg-review="${d.id}">Review</button>
-              <button class="icon-btn danger" data-rg-delete="${d.id}">Delete</button>
-            </td>
-          </tr>
-        `).join('')}
+        ${tableRowsHtml}
       </tbody>
     </table>
   `;
@@ -7150,23 +7387,19 @@ function createMaterialPreview3D(canvasEl) {
     });
   }
 
-  function setShape(shapeType, dims, category) {
-    if (group) { scene.remove(group); disposeGroup(group); group = null; }
-    const built = buildMaterialGroup(shapeType, dims, category);
-    if (!built) { render(); return; }
-    group = built;
-    scene.add(group);
-
-    // Frames the camera (and the key light + its shadow frustum, below) to the built shape's own
-    // size, so a tiny loaf pan and a huge sheet tray both fill the preview reasonably and both
-    // get a correctly-scaled shadow -- rather than one fixed setup tuned for a single size.
-    const box = new THREE.Box3().setFromObject(group);
-    const size = box.getSize(new THREE.Vector3());
-    box.getCenter(target);
-    const maxDim = Math.max(size.x, size.y, size.z, 1);
+  // Frames the camera (and the key light + its shadow frustum) to a given center/size, so a tiny
+  // loaf pan and a huge sheet tray both fill the preview reasonably and both get a correctly-
+  // scaled shadow -- rather than one fixed setup tuned for a single size. Split out of setShape
+  // (which computes newTarget/maxDim from a just-built buildMaterialGroup shape) so a caller that
+  // ISN'T showing a buildMaterialGroup shape at all -- e.g. Recipe on Fire's single-cutter-piece
+  // close-up, a plain dough-colored solid, not a steel tray/cutter -- can still get the same
+  // auto-fit camera/lighting via the returned fitCamera method below, instead of being stuck at
+  // this preview's default startup radius (tuned for nothing in particular).
+  function fitCameraAndLights(newTarget, maxDim) {
+    target.copy(newTarget);
     radius = maxDim * 2.2;
 
-    ground.position.y = box.min.y;
+    ground.position.y = newTarget.y - maxDim / 2;
 
     keyLight.position.set(target.x + maxDim * 1.4, target.y + maxDim * 2.2, target.z + maxDim * 1.6);
     keyLight.target.position.copy(target);
@@ -7179,6 +7412,22 @@ function createMaterialPreview3D(canvasEl) {
     fillLight.position.set(target.x - maxDim * 1.2, target.y + maxDim * 0.8, target.z - maxDim * 1.4);
 
     positionCamera();
+  }
+
+  function setShape(shapeType, dims, category) {
+    if (group) { scene.remove(group); disposeGroup(group); group = null; }
+    const built = buildMaterialGroup(shapeType, dims, category);
+    if (!built) { render(); return; }
+    group = built;
+    scene.add(group);
+
+    const box = new THREE.Box3().setFromObject(group);
+    const size = box.getSize(new THREE.Vector3());
+    const newTarget = box.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    fitCameraAndLights(newTarget, maxDim);
+    ground.position.y = box.min.y; // exact floor, not fitCameraAndLights' own maxDim-based estimate
+
     render();
   }
 
@@ -7216,6 +7465,16 @@ function createMaterialPreview3D(canvasEl) {
     setAnnotations,
     setLabels,
     resize,
+    // Exposed so a caller can force a redraw after mutating something render() itself doesn't
+    // know changed -- e.g. a material color set directly outside of setShape/setOverlay, which
+    // needs a fresh render() call to actually show up (nothing here runs its own continuous
+    // render loop otherwise).
+    render,
+    // For a caller showing content that never goes through setShape/buildMaterialGroup at all --
+    // a plain custom mesh, not a steel tray/cutter -- so it still gets the same auto-fit camera/
+    // lighting instead of being stuck at this preview's default startup radius. See
+    // fitCameraAndLights' own comment.
+    fitCamera: fitCameraAndLights,
     dispose() {
       canvasEl.removeEventListener('pointerdown', onPointerDown);
       canvasEl.removeEventListener('pointerup', onPointerUp);
@@ -7622,182 +7881,196 @@ function trayInteriorFootprint(shapeType, dims) {
   return null;
 }
 
-// Plain configurable number, not a per-ingredient/per-recipe density catalog -- dough density
-// varies a lot by type (bread vs. choux vs. cookie) and there's no reliable per-recipe source for
-// it today, so this is a single sensible default (mid-range bread/pastry dough) with a per-bake
-// override field in the UI (see renderRecipeOnFireView), same treatment as the Bake step's rise %
-// will get in a later phase.
-const ROF_DEFAULT_DOUGH_DENSITY_G_CM3 = 0.65;
+// ---- Recipe on Fire: cutter auto-layout (Phase 2c) ---------------------------------------------
+// Pure geometry helpers for tiling a cutter shape across a tray's usable interior -- a plain top-
+// down 2D problem, deliberately kept separate from the 3D dough-fill code above (see the Phase 2
+// plan: a new 2D canvas, not part of the 3D scene). All positions here are flat (x,z) plan-view
+// coordinates centered on the TRAY's own center, with NO 3D-world transform applied (the dough
+// code's local-Y-to-negative-world-Z convention is a 3D-scene-only concern; this module never
+// touches THREE.js at all) -- footprint.innerPts are used exactly as trayInteriorFootprint built
+// them.
 
-const ROF_DOUGH_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xE3C592, roughness: 0.9, metalness: 0.02 });
+// Point-in-triangle via same-sign-of-all-three-cross-products -- pts is [[x,z],[x,z],[x,z]] in
+// either winding (this test is winding-agnostic, unlike insetPolygon).
+function pointInTriangle(px, pz, pts) {
+  const [a, b, c] = pts;
+  const sign = (p1, p2, p3) => (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1]);
+  const d1 = sign([px, pz], a, b), d2 = sign([px, pz], b, c), d3 = sign([px, pz], c, a);
+  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0, hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(hasNeg && hasPos);
+}
 
-// Builds the visual dough-fill mesh sitting inside a tray's interior -- a plain, undivided slab/
-// cylinder/prism, not a real dough-surface simulation (no sag, no rounded top). `fillHeightCm` is
-// already capped at footprint.usableHeightCm by the caller (see renderRecipeOnFireView); this
-// function only draws whatever height it's given. Positions match buildMaterialGroup's own
-// per-shape interior-floor convention exactly (see each branch above) so the fill sits flush on a
-// tray's real interior floor with no visible gap or clipping.
-function buildDoughFillGroup(shapeType, dims, footprint, fillHeightCm) {
-  const group = new THREE.Group();
-  if (!(fillHeightCm > 0)) return group;
+// A cutter's own "how far can its center be from a boundary before the shape itself pokes past
+// it" radius -- exact for round (its own radius), a conservative (slightly-safe) estimate for
+// rectangular (half-diagonal) and triangle (circumradius of the isoceles base/triHeight shape).
+// Used to shrink the tray's usable interior by BOTH the chef's margin AND this radius, then test
+// only each candidate's CENTER point against that shrunk region -- the "advisory, not pixel-
+// perfect" simplification agreed for v1 (a few valid tight-corner placements may be conservatively
+// rejected, which is fine for a low-waste estimate).
+function cutterBoundingRadiusCm(shapeType, dims) {
+  if (shapeType === 'round') return (dims.diameterCm || 0) / 2;
+  if (shapeType === 'rectangular') return Math.hypot((dims.lengthCm || 0) / 2, (dims.widthCm || 0) / 2);
+  if (shapeType === 'triangle') {
+    const b = dims.baseCm || 0, h = dims.triHeightCm || 0.001;
+    return ((b / 2) ** 2 + h ** 2) / (2 * h); // circumradius: sides^2 / (2h) for this isoceles case
+  }
+  return 0;
+}
 
-  if (shapeType === 'round') {
-    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(footprint.innerR, footprint.innerR, fillHeightCm, 48), ROF_DOUGH_MATERIAL);
-    mesh.position.y = footprint.floorT + fillHeightCm / 2;
-    mesh.castShadow = true; mesh.receiveShadow = true;
-    group.add(mesh);
-  } else if (shapeType === 'rectangular') {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(footprint.innerL, fillHeightCm, footprint.innerW), ROF_DOUGH_MATERIAL);
-    mesh.position.y = footprint.floorT + fillHeightCm / 2;
-    mesh.castShadow = true; mesh.receiveShadow = true;
-    group.add(mesh);
-  } else if (shapeType === 'triangle') {
-    const shape = new THREE.Shape();
-    shape.moveTo(footprint.innerPts[0][0], footprint.innerPts[0][1]);
-    footprint.innerPts.slice(1).forEach(([x, y]) => shape.lineTo(x, y));
-    shape.closePath();
-    const geo = new THREE.ExtrudeGeometry(shape, { depth: fillHeightCm, bevelEnabled: false, curveSegments: 1 });
-    const mesh = new THREE.Mesh(geo, ROF_DOUGH_MATERIAL);
-    mesh.rotateX(-Math.PI / 2); // same local-Z-becomes-world-Y convention as buildMaterialGroup's own triangle ring
-    mesh.position.y = footprint.floorT;
-    mesh.castShadow = true; mesh.receiveShadow = true;
-    group.add(mesh);
-  } else if (shapeType === 'muffin_tray') {
-    const { lengthCm: l, widthCm: w, cupRows: rows, cupColumns: cols, cupDiameterCm: cd } = dims;
-    const cupX = (c) => -l / 2 + (l / (cols + 1)) * (c + 1);
-    const cupZ = (r) => -w / 2 + (w / (rows + 1)) * (r + 1);
-    // 0.9x the cup diameter -- sits just inside the real tapered/rounded cup wall (see
-    // buildMaterialGroup's own muffin cup profile) rather than clipping through it.
-    const cupR = (cd / 2) * 0.9;
-    const geo = new THREE.CylinderGeometry(cupR, cupR, fillHeightCm, 24);
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const mesh = new THREE.Mesh(geo, ROF_DOUGH_MATERIAL);
-        mesh.position.set(cupX(c), footprint.floorY + fillHeightCm / 2, cupZ(r));
-        mesh.castShadow = true; mesh.receiveShadow = true;
-        group.add(mesh);
-      }
+function cutterUnitAreaCm2(shapeType, dims) {
+  if (shapeType === 'round') return Math.PI * ((dims.diameterCm || 0) / 2) ** 2;
+  if (shapeType === 'rectangular') return (dims.lengthCm || 0) * (dims.widthCm || 0);
+  if (shapeType === 'triangle') return 0.5 * (dims.baseCm || 0) * (dims.triHeightCm || 0);
+  return 0;
+}
+
+// A one-line size label for a single cutter piece -- what the Trim panel's per-piece report
+// leads with, since every piece from one layout is identical and that's the number a chef
+// actually needs (how big is ONE portion), not just an aggregate.
+function cutterPieceSizeLabel(shapeType, dims) {
+  if (shapeType === 'round') return `⌀ ${roundNice(dims.diameterCm)} cm`;
+  if (shapeType === 'rectangular') return `${roundNice(dims.lengthCm)} × ${roundNice(dims.widthCm)} cm`;
+  if (shapeType === 'triangle') return `Base ${roundNice(dims.baseCm)} × H ${roundNice(dims.triHeightCm)} cm`;
+  return '';
+}
+
+// Is a candidate CENTER point still inside the tray's own interior once shrunk by
+// `effectiveInsetCm` (margin + the cutter's own bounding radius, see above)? Reuses
+// trayInteriorFootprint's own innerR/innerL/innerW/innerPts fields directly.
+function candidateFitsInterior(x, z, trayShapeType, footprint, effectiveInsetCm) {
+  if (trayShapeType === 'round') return Math.hypot(x, z) <= footprint.innerR - effectiveInsetCm;
+  if (trayShapeType === 'rectangular') {
+    return Math.abs(x) <= footprint.innerL / 2 - effectiveInsetCm && Math.abs(z) <= footprint.innerW / 2 - effectiveInsetCm;
+  }
+  if (trayShapeType === 'triangle') {
+    return pointInTriangle(x, z, insetPolygon(footprint.innerPts, effectiveInsetCm));
+  }
+  return false;
+}
+
+// The tray's own bounding box (in the same untransformed plan-view (x,z) coordinates as
+// everything else in this module) -- what the corner-sweep generators below anchor/sweep against.
+// Round's own box is its circumscribed square; the containment filter naturally clips circle
+// candidates near the box's corners (outside the real round boundary) same as any other shape.
+function trayBoundingBox(shapeType, footprint) {
+  if (shapeType === 'round') return { x0: -footprint.innerR, x1: footprint.innerR, z0: -footprint.innerR, z1: footprint.innerR };
+  if (shapeType === 'rectangular') return { x0: -footprint.innerL / 2, x1: footprint.innerL / 2, z0: -footprint.innerW / 2, z1: footprint.innerW / 2 };
+  if (shapeType === 'triangle') {
+    const xs = footprint.innerPts.map(p => p[0]), zs = footprint.innerPts.map(p => p[1]);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+  }
+  return { x0: -10, x1: 10, z0: -10, z1: 10 };
+}
+
+// Which corner of the tray's bounding box a sweep starts from -- x/z are which BOUND to start
+// AT (+1 = start at x1/z1, -1 = start at x0/z0); the sweep then proceeds in the opposite
+// direction. "tl"/"tr"/"bl"/"br" match how the 2D canvas already draws +z as "up the page".
+const ROF_LAYOUT_CORNERS = {
+  tl: { x: -1, z: 1 }, tr: { x: 1, z: 1 }, bl: { x: -1, z: -1 }, br: { x: 1, z: -1 },
+};
+
+// Hexagonal offset packing, anchored at one bounding-box corner and swept row-by-row outward --
+// NOT centered on the tray -- so leftover space concentrates at the far edge(s) from the start
+// corner, the way a chef actually cutting dough would work, rather than being split evenly on
+// both sides (confirmed wrong-looking at the centered version: circles read as rigidly
+// symmetric with wasted margin on every side at once). Rows spaced at diameter*(sqrt(3)/2) (plus
+// the gap), alternate rows offset sideways by radius+gap/2 -- the standard "close-packed circles"
+// arrangement (~90.6% density vs. ~78.5% for a plain square grid).
+function generateHexCandidates(diameterCm, gapCm, bounds, corner) {
+  const stepX = diameterCm + gapCm;
+  const stepZ = stepX * (Math.sqrt(3) / 2);
+  const dirX = corner.x > 0 ? -1 : 1, dirZ = corner.z > 0 ? -1 : 1;
+  const startX = corner.x > 0 ? bounds.x1 - diameterCm / 2 : bounds.x0 + diameterCm / 2;
+  const startZ = corner.z > 0 ? bounds.z1 - diameterCm / 2 : bounds.z0 + diameterCm / 2;
+  const nRows = Math.ceil((bounds.z1 - bounds.z0) / stepZ) + 1;
+  const nCols = Math.ceil((bounds.x1 - bounds.x0) / stepX) + 1;
+  const candidates = [];
+  for (let row = 0; row <= nRows; row++) {
+    const z = startZ + dirZ * row * stepZ;
+    const offset = (row % 2 !== 0) ? (stepX / 2) * dirX : 0;
+    for (let col = 0; col <= nCols; col++) candidates.push({ x: startX + dirX * col * stepX + offset, z });
+  }
+  return candidates;
+}
+
+// Plain grid, same corner-anchored sweep as generateHexCandidates -- step = size + gap per axis,
+// no rotation (v1 scope, per the agreed plan).
+function generateGridCandidates(sizeXCm, sizeZCm, gapCm, bounds, corner) {
+  const stepX = sizeXCm + gapCm, stepZ = sizeZCm + gapCm;
+  const dirX = corner.x > 0 ? -1 : 1, dirZ = corner.z > 0 ? -1 : 1;
+  const startX = corner.x > 0 ? bounds.x1 - sizeXCm / 2 : bounds.x0 + sizeXCm / 2;
+  const startZ = corner.z > 0 ? bounds.z1 - sizeZCm / 2 : bounds.z0 + sizeZCm / 2;
+  const nRows = Math.ceil((bounds.z1 - bounds.z0) / stepZ) + 1;
+  const nCols = Math.ceil((bounds.x1 - bounds.x0) / stepX) + 1;
+  const candidates = [];
+  for (let row = 0; row <= nRows; row++) {
+    const z = startZ + dirZ * row * stepZ;
+    for (let col = 0; col <= nCols; col++) candidates.push({ x: startX + dirX * col * stepX, z });
+  }
+  return candidates;
+}
+
+// Alternating up/down triangle pairing -- an "up" triangle (base on a row's bottom edge, apex on
+// its top edge) and a "down" triangle (apex on the bottom edge, base on the top edge) tile one
+// base x triHeight strip with zero gaps between them; stacking strips tiles the whole plane the
+// same way. `gapCm` is folded directly into the tiling STEP (not a post-shrink of each triangle),
+// same convention generateGridCandidates/generateHexCandidates use. Only the LEFT/RIGHT start
+// corner is respected here (`corner.x`) -- rows always build upward from the tray's own bottom
+// edge (bounds.z0) regardless of `corner.z`. Fully generalizing the strip's row direction to all
+// 4 corners is real added structural complexity for a shape where manual drag-adjustment
+// (a later phase) already matters more than a perfect auto-layout -- agreed simplification, not
+// an oversight. Each candidate keeps its own 3 vertex points (not just a center) since
+// orientation alternates -- the caller derives each one's centroid for the containment test, and
+// the 2D canvas / 3D cut-marks both draw the stored points directly, no reconstruction needed.
+function generateTriangleCandidates(baseCm, triHeightCm, gapCm, bounds, corner) {
+  const bStep = baseCm + gapCm, hStep = triHeightCm + gapCm;
+  const dirX = corner.x > 0 ? -1 : 1;
+  const startX = corner.x > 0 ? bounds.x1 : bounds.x0;
+  const nRows = Math.ceil((bounds.z1 - bounds.z0) / hStep) + 1;
+  const nCols = Math.ceil((bounds.x1 - bounds.x0) / bStep) + 2;
+  const candidates = [];
+  for (let row = 0; row <= nRows; row++) {
+    const y0 = bounds.z0 + row * hStep, y1 = y0 + triHeightCm;
+    for (let col = -1; col <= nCols; col++) {
+      const xUp = startX + dirX * col * bStep;
+      candidates.push({ orientation: 'up', pts: [[xUp - baseCm / 2, y0], [xUp + baseCm / 2, y0], [xUp, y1]] });
+      const xDown = startX + dirX * (col + 0.5) * bStep;
+      candidates.push({ orientation: 'down', pts: [[xDown - baseCm / 2, y1], [xDown + baseCm / 2, y1], [xDown, y0]] });
     }
   }
-  return group;
+  return candidates;
 }
 
-const ROF_DIM_LINE_MATERIAL = new THREE.LineBasicMaterial({ color: 0x2A2A2A });
+// Ties the three tiling generators + the shared containment filter together into one call --
+// returns the placements actually kept plus the unit area/utilization % AND the waste area/
+// weight, given a tray shape/footprint and a cutter shape/dims (already through any session-only
+// size override). `combinedNetWeightGrams` is the tray's own already-computed total dough mass
+// (bakeSnapshot.netWeight) -- baking/cutting don't change total mass, so waste weight is just
+// that total split by area fraction, same principle as the original grams-per-portion math.
+function computeCutterLayout(trayShapeType, trayFootprint, trayDims, cutterShapeType, cutterDims, marginCm, gapCm, corner, combinedNetWeightGrams) {
+  const cutterR = cutterBoundingRadiusCm(cutterShapeType, cutterDims);
+  const effectiveInsetCm = Math.max(0, marginCm) + cutterR;
+  const bounds = trayBoundingBox(trayShapeType, trayFootprint);
 
-// A straight horizontal dimension line between two ground-plane (XZ) points, with a short
-// perpendicular tick mark at each end -- the standard CAD "witness line" convention, so it reads
-// as a measurement rather than a stray line. `tickLength` is in the same cm units as everything
-// else built in this file.
-function buildDimensionLine(p1, p2, tickLength) {
-  const group = new THREE.Group();
-  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, p2]), ROF_DIM_LINE_MATERIAL));
-  const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
-  const perp = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(tickLength / 2);
-  [p1, p2].forEach(p => {
-    const a = new THREE.Vector3().addVectors(p, perp);
-    const b = new THREE.Vector3().subVectors(p, perp);
-    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), ROF_DIM_LINE_MATERIAL));
-  });
-  return group;
-}
-
-// Same idea, vertical -- used for the dough fill-height line. Ticks run horizontally instead of
-// perpendicular-in-plane since the line itself is already vertical.
-function buildVerticalDimensionLine(x, z, yBottom, yTop, tickLength) {
-  const group = new THREE.Group();
-  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(x, yBottom, z), new THREE.Vector3(x, yTop, z),
-  ]), ROF_DIM_LINE_MATERIAL));
-  [yBottom, yTop].forEach(y => {
-    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(x - tickLength / 2, y, z), new THREE.Vector3(x + tickLength / 2, y, z),
-    ]), ROF_DIM_LINE_MATERIAL));
-  });
-  return group;
-}
-
-// Builds Recipe on Fire's 3D measurement overlay -- the tray's own outer length/width (or
-// diameter/base) labeled just outside its edge, plus the dough fill height labeled as a vertical
-// dimension line right next to the dough itself. Returns { group, labels } for
-// preview3D.setAnnotations/setLabels. `fillHeightCm` of 0 (no dough yet) skips the fill-height
-// line/label -- nothing meaningful to measure. Deliberately a simplified reading of each shape's
-// "outer size" (a single representative line per dimension, not a full technical-drawing callout
-// set) -- good enough for a chef to sanity-check the fill number at a glance, which is the actual
-// goal here, not CAD-grade documentation.
-// Each labeled dimension gets its OWN side of the tray, far enough apart that they can't collide
-// in screen space from a typical viewing angle -- Length on the front edge (+Z), Width on the
-// right edge (+X), fill Height on the LEFT edge (-X), as three distinct witness lines rather than
-// three lines competing for the same corner. An earlier version anchored the fill-height line near
-// the tray's own +X/interior edge, which put it almost on top of the Width label (also on +X) --
-// that's the exact "66 cm and 1.47 cm cramped together" overlap this layout fixes.
-function buildTrayDimensionAnnotations(shapeType, dims, footprint, fillHeightCm) {
-  const group = new THREE.Group();
-  const labels = [];
-  const fillTopY = footprint.floorT != null ? footprint.floorT + fillHeightCm : (footprint.floorY ?? 0) + fillHeightCm;
-  const fillBottomY = footprint.floorT != null ? footprint.floorT : (footprint.floorY ?? 0);
-
-  function addFillHeightLine(x, z) {
-    if (!(fillHeightCm > 0)) return;
-    const tick = Math.max(fillHeightCm * 0.15, 0.4);
-    group.add(buildVerticalDimensionLine(x, z, fillBottomY, fillTopY, tick));
-    labels.push({
-      id: 'rof-fill-height',
-      worldPos: new THREE.Vector3(x, (fillBottomY + fillTopY) / 2, z),
-      text: `H: ${roundNice(fillHeightCm)} cm`,
-    });
+  let candidates;
+  if (cutterShapeType === 'round') {
+    candidates = generateHexCandidates(cutterDims.diameterCm, Math.max(0, gapCm), bounds, corner);
+  } else if (cutterShapeType === 'rectangular') {
+    candidates = generateGridCandidates(cutterDims.lengthCm, cutterDims.widthCm, Math.max(0, gapCm), bounds, corner);
+  } else if (cutterShapeType === 'triangle') {
+    candidates = generateTriangleCandidates(cutterDims.baseCm, cutterDims.triHeightCm, Math.max(0, gapCm), bounds, corner)
+      .map(c => ({ ...c, x: (c.pts[0][0] + c.pts[1][0] + c.pts[2][0]) / 3, z: (c.pts[0][1] + c.pts[1][1] + c.pts[2][1]) / 3 }));
+  } else {
+    candidates = [];
   }
 
-  if (shapeType === 'round') {
-    const { diameterCm: d } = dims;
-    const outerR = d / 2;
-    const margin = Math.max(d * 0.18, 2);
-    const tick = Math.max(d * 0.04, 0.4);
-    // Diameter on the front edge (+Z)...
-    group.add(buildDimensionLine(
-      new THREE.Vector3(-outerR, 0, outerR + margin),
-      new THREE.Vector3(outerR, 0, outerR + margin),
-      tick
-    ));
-    labels.push({ id: 'rof-outer-dim', worldPos: new THREE.Vector3(0, 0, outerR + margin), text: `⌀: ${d} cm` });
-    // ...fill height on the LEFT edge (-X), a fully separate side.
-    addFillHeightLine(-(outerR + margin), 0);
-  } else if (shapeType === 'rectangular' || shapeType === 'muffin_tray') {
-    const { lengthCm: l, widthCm: w } = dims;
-    const margin = Math.max(Math.max(l, w) * 0.16, 2);
-    const tick = Math.max(Math.max(l, w) * 0.03, 0.4);
-    // Length on the front edge (+Z).
-    group.add(buildDimensionLine(
-      new THREE.Vector3(-l / 2, 0, w / 2 + margin),
-      new THREE.Vector3(l / 2, 0, w / 2 + margin),
-      tick
-    ));
-    labels.push({ id: 'rof-outer-dim-l', worldPos: new THREE.Vector3(0, 0, w / 2 + margin), text: `L: ${l} cm` });
-    // Width on the right edge (+X).
-    group.add(buildDimensionLine(
-      new THREE.Vector3(l / 2 + margin, 0, -w / 2),
-      new THREE.Vector3(l / 2 + margin, 0, w / 2),
-      tick
-    ));
-    labels.push({ id: 'rof-outer-dim-w', worldPos: new THREE.Vector3(l / 2 + margin, 0, 0), text: `W: ${w} cm` });
-    // Fill height on the LEFT edge (-X) -- the third, otherwise-unused side.
-    addFillHeightLine(-(l / 2 + margin), 0);
-  } else if (shapeType === 'triangle') {
-    const { baseCm: b, triHeightCm: triH } = dims;
-    const margin = Math.max(Math.max(b, triH) * 0.16, 2);
-    const tick = Math.max(Math.max(b, triH) * 0.03, 0.4);
-    // Base sits along world Z=0 (see buildMaterialGroup's own triangle branch -- local (x,y) shape
-    // points map to world (x, -z) after the rotateX(-90deg) extrude), body extends toward -Z, so
-    // "outside" the base is +Z. Fill height goes on the LEFT side (-X), clear of the base label.
-    group.add(buildDimensionLine(
-      new THREE.Vector3(-b / 2, 0, margin),
-      new THREE.Vector3(b / 2, 0, margin),
-      tick
-    ));
-    labels.push({ id: 'rof-outer-dim', worldPos: new THREE.Vector3(0, 0, margin), text: `L: ${b} cm` });
-    addFillHeightLine(-(b / 2 + margin), -triH / 2);
-  }
-
-  return { group, labels };
+  const placements = candidates.filter(c => candidateFitsInterior(c.x, c.z, trayShapeType, trayFootprint, effectiveInsetCm));
+  const unitArea = cutterUnitAreaCm2(cutterShapeType, cutterDims);
+  const coveredAreaCm2 = placements.length * unitArea;
+  const utilizationPct = trayFootprint.areaCm2 > 0 ? Math.round((coveredAreaCm2 / trayFootprint.areaCm2) * 100) : 0;
+  const wasteAreaCm2 = Math.max(0, trayFootprint.areaCm2 - coveredAreaCm2);
+  const wasteGrams = trayFootprint.areaCm2 > 0 ? (wasteAreaCm2 / trayFootprint.areaCm2) * (combinedNetWeightGrams || 0) : 0;
+  return { placements, unitArea, utilizationPct, wasteAreaCm2, wasteGrams };
 }
 
 // ---- Recipe on Fire (Phase 1: process + tray selection, static 3D dough-fill visualization) ----
@@ -7839,30 +8112,12 @@ function renderRecipeOnFireView(main) {
 
     <div id="rof-process-summary"></div>
     <div id="rof-tray-section" style="display:none;">
-      <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:8px;">
-        <div style="flex:1 1 280px; min-width:260px;">
-          <h3 style="margin-bottom:10px;">Tray</h3>
-          <div class="generate-controls" style="margin-bottom:12px;">
-            <div class="field" style="max-width:260px;">
-              <label>Tray / Pan</label>
-              <select id="rof-material-select" class="builder-select">
-                <option value="">— Select a tray —</option>
-              </select>
-            </div>
-            <div class="field" style="max-width:160px;">
-              <label>Dough Density (g/cm³)</label>
-              <input id="rof-density" type="number" min="0.05" step="0.01" value="${ROF_DEFAULT_DOUGH_DENSITY_G_CM3}" />
-            </div>
-          </div>
-          <div id="rof-fill-summary"></div>
-        </div>
-        <div style="flex:1 1 340px; min-width:300px;">
-          <h3 style="margin-bottom:10px;">3D Preview</h3>
-          <div class="material-preview-wrap">
-            <canvas id="rof-preview-canvas"></canvas>
-            <div class="material-preview-empty" id="rof-preview-empty">Pick a tray to see the dough fill.</div>
-            <div class="material-preview-hint">Drag to rotate · Scroll to zoom</div>
-          </div>
+      <div class="rof-steps" id="rof-steps"></div>
+      <div id="rof-step-panel" class="rof-control-strip"></div>
+      <div class="rof-preview-hero">
+        <div class="material-preview-wrap" id="rof-tray-canvas-wrap">
+          <canvas id="rof-tray-canvas" tabindex="0"></canvas>
+          <div class="material-preview-empty" id="rof-preview-empty">Pick a tray to see it drawn to scale.</div>
         </div>
       </div>
     </div>
@@ -7876,12 +8131,10 @@ function renderRecipeOnFireView(main) {
   const processChecksEl = document.getElementById('rof-process-checks');
   const summaryEl = document.getElementById('rof-process-summary');
   const traySection = document.getElementById('rof-tray-section');
-  const materialSelect = document.getElementById('rof-material-select');
-  const densityInput = document.getElementById('rof-density');
-  const fillSummaryEl = document.getElementById('rof-fill-summary');
   const previewEmptyEl = document.getElementById('rof-preview-empty');
 
   const materialsPromise = window.api.listMaterials();
+  const wasteTypesPromise = window.api.listWasteTypes();
 
   let source = 'book';
   let selectedRecipe = null;
@@ -7889,6 +8142,54 @@ function renderRecipeOnFireView(main) {
   let selectedProcessLocalIds = new Set();
   let browseListShowing = false;
   let trayMaterials = []; // tray_pan-only, refreshed by populateMaterialSelect each time it runs
+  // Session-only, regenerated from the checked processes' own saved wastes on every structural
+  // rebuild (see renderProcessSummary) -- ONE flat wastage list applied against the COMBINED total
+  // quantity, never per-process. A single dough going into one tray (even when assembled from
+  // several separate processes, e.g. a biga + a final dough) has one wastage picture, not several
+  // independent ones stacked together.
+  let combinedWastes = [];
+
+  // ---- Setup -> Dough -> Baked -> Cut step-wizard state ------------------------------------------
+  // One continuous session over this same shared state (processes/wastes/tray/placed dough/placed
+  // cutters/etc.), not separate top-level views/routes. `rofStep` drives which panel
+  // #rof-step-panel renders AND what the shared 2D tray canvas currently shows/allows -- unlike
+  // the old 3D version, there's no persistent WebGL context to carry across steps; the canvas is
+  // just redrawn from `placedDough`/`placedCutters` state, which DOES persist across steps
+  // (placing dough, baking it in place, then cutting it are three views of the SAME session data,
+  // not three separate datasets).
+  //
+  // Density and rise-estimate are GONE (confirmed with the chef): they existed only to drive the
+  // old 3D fill-height mesh, which no longer exists. What replaces "how much dough fits/how tall
+  // does it get" is simpler and more direct -- she places real discrete dough units by hand and
+  // sees a running placed-count-vs-Net-Weight check (see renderDoughStepPanel), never a computed
+  // fill height at all.
+  let rofStep = 'setup'; // 'setup' | 'dough' | 'baked' | 'cut'
+  // Frozen at the moment "Continue ->" is clicked on Setup (see startDoughPlacement) -- the Dough/
+  // Baked/Cut steps compute off THIS snapshot, never off live tray inputs, since those controls
+  // don't exist in the DOM once the Setup panel is replaced. Re-clicking Continue after "<- Edit
+  // Setup" always rebuilds a fresh snapshot.
+  let bakeSnapshot = null; // { material, dims, footprint, netWeight }
+  let lastMaterialId = null; // remembered across a checkbox toggle / "<- Edit Setup" round-trip
+
+  // ---- Dough Shapes catalog (loaded once, reused across the Dough/Cut steps) --------------------
+  let doughShapesPromise = null; // window.api.listDoughShapes(), kicked off lazily on first need
+  let doughShapes = []; // resolved catalog rows, each with .photosByStage.{raw,baked,cut}
+  // photo_path -> already-loaded HTMLImageElement, so a drag's every-frame redraw never re-awaits
+  // an IPC round trip -- populated by preloadDoughShapeImages before a shape becomes placeable.
+  const doughImageCache = new Map();
+  let armedDoughShapeId = null; // which catalog shape a canvas click currently places, if any
+  // Placed dough units for THIS tray session -- { id, shapeId, stage: 'raw'|'baked', variation,
+  // xCm, yCm } in tray-LOCAL cm coordinates (origin at the tray's own center, +y up the page,
+  // matching trayInteriorFootprint's own convention) so canvas resize never needs to touch stored
+  // positions, only the cm<->px scale factor (see RofCanvas below).
+  let placedDough = [];
+  let nextPlacedId = 1;
+  let selectedPlacedId = null; // last-clicked placed item (dough OR cutter), for Delete/Backspace
+
+  // ---- Cutter placement (Cut step) --------------------------------------------------------------
+  let cutterMaterials = []; // cutter-category Materials, refreshed by populateCutterSelect
+  let armedCutterMaterialId = null; // which cutter Material a canvas click currently places
+  let placedCutters = []; // { id, materialId, shapeType, dims, xCm, yCm }
 
   function currentNs() {
     if (source === 'book') return RECIPE_NS.book;
@@ -7909,43 +8210,288 @@ function renderRecipeOnFireView(main) {
     return workingProcesses.filter(p => selectedProcessLocalIds.has(String(p.localId)));
   }
 
-  // Same WebGLRenderer-per-visit pattern as Materials' own createMaterialPreview3D call -- and the
-  // same gap: neither this view nor Materials' form disposes it on a sidebar click to a DIFFERENT
-  // view (only Materials' form has an explicit in-view Back/Save to hook into; this is a top-level
-  // nav item with no such exit). No generic "leaving this view" hook exists anywhere in renderer.js
-  // to fix that properly without touching renderView() itself, which is out of scope for this
-  // phase -- accepted for now, same as the pre-existing case.
-  const preview3D = createMaterialPreview3D(document.getElementById('rof-preview-canvas'));
-  // The canvas starts inside #rof-tray-section, which is display:none until at least one process
-  // is checked -- a `display:none` ancestor collapses clientWidth/clientHeight to 0 for every
-  // descendant regardless of its own CSS (.material-preview-wrap's height:300px included), so THIS
-  // initial resize() (still fired, for symmetry with Materials' own preview3D setup) would lock the
-  // WebGLRenderer's internal draw buffer at 1x1px if nothing ever resized it again. The real fix is
-  // the second resize() call in updateProcessCheckboxes/onProcessCheckChanged below, right after
-  // the section becomes visible -- that one measures the section's REAL, now-laid-out size. Without
-  // it the tray/dough mesh still gets built and added to the scene correctly, it just renders into
-  // a 1x1 buffer stretched over the visible canvas, i.e. the exact "3D Preview panel stays
-  // completely blank no matter which tray is picked" symptom this comment is here to prevent a
-  // repeat of.
-  requestAnimationFrame(() => preview3D.resize());
-  const onWindowResize = () => preview3D.resize();
+  // ---- 2D tray canvas -- draws the tray to scale + every placed dough/cutter item, and handles
+  // ALL drag/place/select/delete interaction for both. This is the direct replacement for the old
+  // 3D preview3D/piecePreview3D pair (createMaterialPreview3D, THREE.js) -- no WebGL, a plain 2D
+  // canvas showing real photos she can drag by hand, per the chef's own explicit rejection of the
+  // 3D/game-like look. ONE shared engine for dough AND cutters, not two: the interaction (place,
+  // drag, select, delete) is identical for both, only the draw call differs (an image vs. a plain
+  // vector shape) -- confirmed this is the right call per the pivot plan's own point 5 (the 2D
+  // canvas + drag infrastructure scoped for cutters becomes the foundation for dough placement
+  // too, not a separate system).
+  const trayCanvasEl = document.getElementById('rof-tray-canvas');
+  const trayCanvasCtx = trayCanvasEl.getContext('2d');
+  let trayPxPerCm = 4; // recomputed on every resize/render from the tray's own real outer size
+  let draggingId = null;
+  let dragOffsetCm = { x: 0, y: 0 };
+
+  // The tray's own outer footprint span (length x width, diameter x diameter, or base x
+  // triHeight) -- what the canvas scales itself to fit, same "frame the whole subject" role the
+  // old 3D camera's own maxDim auto-fit played.
+  function trayOuterSpanCm() {
+    if (!bakeSnapshot) return { spanX: 40, spanY: 40 };
+    const { material, dims } = bakeSnapshot;
+    if (material.shape_type === 'round') return { spanX: dims.diameterCm, spanY: dims.diameterCm };
+    if (material.shape_type === 'rectangular' || material.shape_type === 'muffin_tray') return { spanX: dims.lengthCm, spanY: dims.widthCm };
+    if (material.shape_type === 'triangle') return { spanX: dims.baseCm, spanY: dims.triHeightCm };
+    return { spanX: 40, spanY: 40 };
+  }
+
+  // cm<->px conversion, tray-center-origin, +y UP the page (matching trayInteriorFootprint's own
+  // plan-view convention) -- canvas pixel space has y DOWN, hence the sign flip on the y axis only.
+  function toCanvasXY(xCm, yCm) {
+    return [trayCanvasEl.width / 2 + xCm * trayPxPerCm, trayCanvasEl.height / 2 - yCm * trayPxPerCm];
+  }
+  function toCmXY(canvasX, canvasY) {
+    return [(canvasX - trayCanvasEl.width / 2) / trayPxPerCm, (trayCanvasEl.height / 2 - canvasY) / trayPxPerCm];
+  }
+
+  // Resized whenever the canvas's own real on-screen size can have changed -- window resize, or a
+  // step-panel swap that reveals #rof-tray-section for the first time (display:none collapses
+  // clientWidth/clientHeight to 0 for every descendant regardless of its own CSS, same gap the old
+  // 3D preview's own resize() had to work around -- but a plain 2D canvas has no lasting "locked
+  // internal buffer" consequence the way WebGL does, so simply calling this again whenever it
+  // MIGHT matter is sufficient, no separate "first paint vs. real paint" dance needed).
+  function resizeTrayCanvas() {
+    const wrap = document.getElementById('rof-tray-canvas-wrap');
+    if (!wrap || !trayCanvasEl) return;
+    const w = wrap.clientWidth || 1, h = wrap.clientHeight || 1;
+    trayCanvasEl.width = w;
+    trayCanvasEl.height = h;
+    if (bakeSnapshot) {
+      const { spanX, spanY } = trayOuterSpanCm();
+      trayPxPerCm = Math.max(1, Math.min((w * 0.85) / spanX, (h * 0.85) / spanY));
+    }
+    renderTrayCanvas();
+  }
+
+  // Simple to-scale drawn outline (agreed with the chef: a drawn shape, not a real tray photo --
+  // the tray itself doesn't need to look photorealistic the way the dough does, and a real photo
+  // per Material would be an ongoing content burden with no clear payoff). Draws the OUTER
+  // footprint (the tray's own outer wall) then the INNER usable footprint (from
+  // trayInteriorFootprint, unchanged pure geometry from the old 3D version) as a lighter inset,
+  // giving a visual "wall" cue without needing a real wall render.
+  function drawTrayOutline() {
+    const { material, dims, footprint } = bakeSnapshot;
+    const ctx = trayCanvasCtx;
+    const outerFill = '#B8BEC4', outerStroke = '#7D848B', innerFill = '#F1ECE1', innerStroke = '#C9A876';
+    ctx.save();
+    ctx.translate(trayCanvasEl.width / 2, trayCanvasEl.height / 2);
+
+    function toPx(xCm, yCm) { return [xCm * trayPxPerCm, -yCm * trayPxPerCm]; }
+    function pathFor(pts) {
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => { const [px, py] = toPx(x, y); if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
+      ctx.closePath();
+    }
+
+    if (material.shape_type === 'round') {
+      ctx.beginPath(); ctx.arc(0, 0, (dims.diameterCm / 2) * trayPxPerCm, 0, Math.PI * 2);
+      ctx.fillStyle = outerFill; ctx.fill(); ctx.strokeStyle = outerStroke; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, footprint.innerR * trayPxPerCm, 0, Math.PI * 2);
+      ctx.fillStyle = innerFill; ctx.fill(); ctx.strokeStyle = innerStroke; ctx.lineWidth = 1.5; ctx.stroke();
+    } else if (material.shape_type === 'rectangular' || material.shape_type === 'muffin_tray') {
+      const outerL = dims.lengthCm * trayPxPerCm, outerW = dims.widthCm * trayPxPerCm;
+      const innerL = footprint.innerL * trayPxPerCm, innerW = footprint.innerW * trayPxPerCm;
+      ctx.fillStyle = outerFill; ctx.fillRect(-outerL / 2, -outerW / 2, outerL, outerW);
+      ctx.strokeStyle = outerStroke; ctx.lineWidth = 2; ctx.strokeRect(-outerL / 2, -outerW / 2, outerL, outerW);
+      ctx.fillStyle = innerFill; ctx.fillRect(-innerL / 2, -innerW / 2, innerL, innerW);
+      ctx.strokeStyle = innerStroke; ctx.lineWidth = 1.5; ctx.strokeRect(-innerL / 2, -innerW / 2, innerL, innerW);
+    } else if (material.shape_type === 'triangle') {
+      pathFor([[-dims.baseCm / 2, 0], [0, dims.triHeightCm], [dims.baseCm / 2, 0]]);
+      ctx.fillStyle = outerFill; ctx.fill(); ctx.strokeStyle = outerStroke; ctx.lineWidth = 2; ctx.stroke();
+      pathFor(footprint.innerPts);
+      ctx.fillStyle = innerFill; ctx.fill(); ctx.strokeStyle = innerStroke; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawPlacedDoughItem(item) {
+    const shape = doughShapes.find(s => s.id === item.shapeId);
+    if (!shape) return;
+    const photos = shape.photosByStage[item.stage] || [];
+    const photo = photos.length ? photos[item.variation % photos.length] : null;
+    const img = photo && doughImageCache.get(photo.photo_path);
+    const [cx, cy] = toCanvasXY(item.xCm, item.yCm);
+    const sizePx = shape.size_cm * trayPxPerCm;
+    if (img) {
+      trayCanvasCtx.drawImage(img, cx - sizePx / 2, cy - sizePx / 2, sizePx, sizePx);
+    } else {
+      // Fallback while its image is still loading (or failed) -- a plain labeled circle, never a
+      // blank gap where a piece was just placed.
+      trayCanvasCtx.beginPath();
+      trayCanvasCtx.arc(cx, cy, sizePx / 2, 0, Math.PI * 2);
+      trayCanvasCtx.fillStyle = item.stage === 'baked' ? '#B6752E' : '#E3C592';
+      trayCanvasCtx.fill();
+    }
+    if (item.id === selectedPlacedId) {
+      trayCanvasCtx.beginPath();
+      trayCanvasCtx.arc(cx, cy, sizePx / 2 + 3, 0, Math.PI * 2);
+      trayCanvasCtx.strokeStyle = '#2D7DD2'; trayCanvasCtx.lineWidth = 2.5; trayCanvasCtx.stroke();
+    }
+  }
+
+  function drawPlacedCutterItem(item) {
+    const [cx, cy] = toCanvasXY(item.xCm, item.yCm);
+    const ctx = trayCanvasCtx;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.fillStyle = 'rgba(76,175,80,0.35)';
+    ctx.strokeStyle = item.id === selectedPlacedId ? '#2D7DD2' : '#3A5641';
+    ctx.lineWidth = item.id === selectedPlacedId ? 2.5 : 1.5;
+    if (item.shapeType === 'round') {
+      const r = (item.dims.diameterCm / 2) * trayPxPerCm;
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    } else if (item.shapeType === 'rectangular') {
+      const l = item.dims.lengthCm * trayPxPerCm, w = item.dims.widthCm * trayPxPerCm;
+      ctx.fillRect(-l / 2, -w / 2, l, w); ctx.strokeRect(-l / 2, -w / 2, l, w);
+    } else if (item.shapeType === 'triangle') {
+      const b = item.dims.baseCm * trayPxPerCm, h = item.dims.triHeightCm * trayPxPerCm;
+      ctx.beginPath(); ctx.moveTo(-b / 2, h / 3); ctx.lineTo(b / 2, h / 3); ctx.lineTo(0, -2 * h / 3); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function renderTrayCanvas() {
+    trayCanvasCtx.clearRect(0, 0, trayCanvasEl.width, trayCanvasEl.height);
+    if (!bakeSnapshot) return;
+    drawTrayOutline();
+    placedDough.forEach(drawPlacedDoughItem);
+    placedCutters.forEach(drawPlacedCutterItem);
+  }
+
+  // A generous circular hit-radius per item (its own real size / 2) -- good enough for a mouse
+  // click/drag target without needing per-shape precise hit-testing (a rectangular cutter's own
+  // corners are a little "hot" outside its true silhouette, same accepted simplification
+  // candidateFitsInterior's own bounding-radius approach already used for the old auto-layout).
+  function hitTestAt(xCm, yCm) {
+    for (let i = placedCutters.length - 1; i >= 0; i--) {
+      const it = placedCutters[i];
+      const r = Math.max(it.dims.diameterCm / 2 || 0, (it.dims.lengthCm || 0) / 2, (it.dims.widthCm || 0) / 2, (it.dims.baseCm || 0) / 2, (it.dims.triHeightCm || 0) / 2, 1);
+      if (Math.hypot(xCm - it.xCm, yCm - it.yCm) <= r) return { kind: 'cutter', item: it };
+    }
+    for (let i = placedDough.length - 1; i >= 0; i--) {
+      const it = placedDough[i];
+      const shape = doughShapes.find(s => s.id === it.shapeId);
+      const r = (shape?.size_cm || 4) / 2;
+      if (Math.hypot(xCm - it.xCm, yCm - it.yCm) <= r) return { kind: 'dough', item: it };
+    }
+    return null;
+  }
+
+  function refreshStepSummary() {
+    if (rofStep === 'dough' || rofStep === 'baked') updateDoughPlacementSummary();
+    else if (rofStep === 'cut') updateCutSummary();
+  }
+
+  function deleteSelectedPlacedItem() {
+    if (selectedPlacedId == null) return;
+    placedDough = placedDough.filter(d => d.id !== selectedPlacedId);
+    placedCutters = placedCutters.filter(c => c.id !== selectedPlacedId);
+    selectedPlacedId = null;
+    renderTrayCanvas();
+    refreshStepSummary();
+  }
+
+  function onTrayPointerDown(e) {
+    if (!bakeSnapshot || (rofStep !== 'dough' && rofStep !== 'cut')) return;
+    // Explicit, not relied-upon-by-default: a canvas click focusing itself is consistent in this
+    // app's actual Chromium/Electron runtime, but Delete-to-remove is a core enough interaction
+    // that this shouldn't depend on that default holding across every browser context.
+    trayCanvasEl.focus();
+    const rect = trayCanvasEl.getBoundingClientRect();
+    const [xCm, yCm] = toCmXY(e.clientX - rect.left, e.clientY - rect.top);
+    const hit = hitTestAt(xCm, yCm);
+    if (hit) {
+      draggingId = hit.item.id;
+      dragOffsetCm = { x: xCm - hit.item.xCm, y: yCm - hit.item.yCm };
+      selectedPlacedId = hit.item.id;
+      trayCanvasEl.setPointerCapture(e.pointerId);
+      renderTrayCanvas();
+      return;
+    }
+    // Nothing hit -- place a new item if something's armed in the palette for this step.
+    if (rofStep === 'dough' && armedDoughShapeId) {
+      const id = nextPlacedId++;
+      placedDough.push({ id, shapeId: armedDoughShapeId, stage: 'raw', variation: Math.floor(Math.random() * 3), xCm, yCm });
+      selectedPlacedId = id;
+      refreshStepSummary();
+    } else if (rofStep === 'cut' && armedCutterMaterialId) {
+      const cutter = cutterMaterials.find(m => String(m.id) === String(armedCutterMaterialId));
+      if (cutter) {
+        playSliceSound();
+        const id = nextPlacedId++;
+        placedCutters.push({ id, materialId: cutter.id, shapeType: cutter.shape_type, dims: materialDimsFromRow(cutter), xCm, yCm });
+        selectedPlacedId = id;
+        refreshStepSummary();
+      }
+    } else {
+      selectedPlacedId = null;
+    }
+    renderTrayCanvas();
+  }
+
+  function onTrayPointerMove(e) {
+    if (draggingId == null) return;
+    const rect = trayCanvasEl.getBoundingClientRect();
+    const [xCm, yCm] = toCmXY(e.clientX - rect.left, e.clientY - rect.top);
+    const item = placedDough.find(d => d.id === draggingId) || placedCutters.find(c => c.id === draggingId);
+    if (item) {
+      item.xCm = xCm - dragOffsetCm.x;
+      item.yCm = yCm - dragOffsetCm.y;
+      renderTrayCanvas();
+    }
+  }
+
+  function onTrayPointerUp(e) {
+    if (draggingId != null) {
+      trayCanvasEl.releasePointerCapture(e.pointerId);
+      draggingId = null;
+      refreshStepSummary();
+    }
+  }
+
+  trayCanvasEl.addEventListener('pointerdown', onTrayPointerDown);
+  trayCanvasEl.addEventListener('pointermove', onTrayPointerMove);
+  trayCanvasEl.addEventListener('pointerup', onTrayPointerUp);
+  // tabindex="0" (set on the canvas element itself, see main.innerHTML above) makes it a valid
+  // keydown target scoped to itself -- deliberately NOT a document-level listener, which would
+  // stack a new handler on every visit to this view with no matching removal (same "no generic
+  // leaving-this-view hook" gap the old resize listener below already accepted, not worth
+  // introducing a second instance of when scoping to the canvas element avoids it for free: this
+  // element itself is discarded by the next full innerHTML rebuild, taking its own listener with
+  // it, no manual cleanup needed).
+  trayCanvasEl.addEventListener('keydown', (e) => {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedPlacedId != null) {
+      e.preventDefault();
+      deleteSelectedPlacedItem();
+    }
+  });
+
+  requestAnimationFrame(() => resizeTrayCanvas());
+  const onWindowResize = () => resizeTrayCanvas();
   window.addEventListener('resize', onWindowResize);
 
   function clearSelection() {
     selectedRecipe = null;
     workingProcesses = [];
     selectedProcessLocalIds = new Set();
+    combinedWastes = [];
+    rofStep = 'setup';
+    bakeSnapshot = null;
+    lastMaterialId = null;
+    placedDough = [];
+    placedCutters = [];
+    selectedPlacedId = null;
+    armedDoughShapeId = null;
+    armedCutterMaterialId = null;
     processField.style.display = 'none';
     processChecksEl.innerHTML = '';
     summaryEl.innerHTML = '';
     traySection.style.display = 'none';
-    materialSelect.innerHTML = '<option value="">— Select a tray —</option>';
-    fillSummaryEl.innerHTML = '';
     previewEmptyEl.style.display = '';
-    preview3D.setShape(null, {}, 'tray_pan');
-    preview3D.setOverlay(null);
-    preview3D.setAnnotations(null);
-    preview3D.setLabels([]);
+    renderTrayCanvas();
   }
 
   function combinedTotalQuantity(processes) {
@@ -7953,45 +8499,53 @@ function renderRecipeOnFireView(main) {
   }
 
   // Structural rebuild -- called on checkbox change / recipe pick, i.e. whenever the SET of
-  // processes shown changes. Waste % edits and removes (see renderWasteRowsFor) deliberately do
+  // processes shown changes. Waste % edits/adds/removes (see renderWasteRowsFor) deliberately do
   // NOT go through this again for a plain % edit -- only refreshComputedNumbers, so a keystroke in
-  // the % input never wipes the input's own focus mid-type. Wastes[] mutated here is each
-  // process's own LOCAL, unsaved copy (from buildProcessFromSaved) -- this view has no Save action
-  // at all, so nothing typed or removed here ever reaches the real recipe.
+  // the % input never wipes the input's own focus mid-type. combinedWastes rebuilt here is a
+  // session-only, unsaved copy (seeded from each checked process's own buildProcessFromSaved
+  // wastes) -- this view has no Save action at all, so nothing typed/added/removed here ever
+  // reaches the real recipe.
   function renderProcessSummary() {
     const procs = selectedProcesses();
-    if (procs.length === 0) { summaryEl.innerHTML = ''; return; }
+    if (procs.length === 0) { summaryEl.innerHTML = ''; combinedWastes = []; return; }
+    // One flat wastage list for the whole combined dough, not one per process -- see
+    // combinedWastes' own declaration above for why. Fresh localIds so this copy is independent
+    // of each process's own (untouched) proc.wastes, which stays available to reseed from the
+    // next time the checked SET changes.
+    combinedWastes = procs.flatMap(p => p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })));
     summaryEl.innerHTML = `
       <div class="computed-value-box" style="max-width:640px; margin:4px 0 18px;">
         ${procs.map(p => `
-          <div style="${procs.length > 1 ? 'margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line);' : ''}">
-            <div style="margin-bottom:6px;"><strong>${p.name || '(untitled process)'}</strong> — Total Quantity: <span id="rof-total-${p.localId}"></span> g</div>
-            <div style="margin:6px 0;">
-              <div style="font-size:11.5px; color:var(--neutral); margin-bottom:3px;">Wastage Applied</div>
-              <div id="rof-wastes-${p.localId}"></div>
-            </div>
-            <div><strong>Net Weight:</strong> <span id="rof-net-${p.localId}"></span> g</div>
-          </div>
+          <div style="margin-bottom:4px; font-size:13px;"><strong>${p.name || '(untitled process)'}</strong> — Total Quantity: <span id="rof-total-${p.localId}"></span> g</div>
         `).join('')}
-        ${procs.length > 1 ? `<div><strong>Combined Total Quantity:</strong> <span id="rof-combined-total"></span> g &nbsp;·&nbsp; <strong>Combined Net Weight:</strong> <span id="rof-combined-net"></span> g</div>` : ''}
+        ${procs.length > 1 ? `<div style="margin:6px 0 10px;"><strong>Combined Total Quantity:</strong> <span id="rof-combined-total"></span> g</div>` : ''}
+        <div style="margin:10px 0;">
+          <div style="font-size:11.5px; color:var(--neutral); margin-bottom:3px;">Wastage Applied${procs.length > 1 ? ' (combined -- one dough, one wastage picture)' : ''}</div>
+          <div id="rof-wastes-combined"></div>
+          <select class="builder-select" data-rof-add-waste="combined" style="margin-top:6px; max-width:220px; font-size:12px;">
+            <option value="">+ Add Waste…</option>
+          </select>
+        </div>
+        <div><strong>Net Weight:</strong> <span id="rof-net-combined"></span> g</div>
       </div>
     `;
-    procs.forEach(p => renderWasteRowsFor(p));
+    renderWasteRowsFor();
     refreshComputedNumbers();
   }
 
-  // Rebuilds one process's own waste rows -- called on structural change only (initial summary
-  // render, or a Remove click here). A plain % edit never calls this, only refreshComputedNumbers,
-  // so the input the chef is actively typing into is never torn down mid-edit.
-  function renderWasteRowsFor(proc) {
-    const el = document.getElementById(`rof-wastes-${proc.localId}`);
+  // Rebuilds the combined waste rows -- called on structural change only (initial summary render,
+  // a Remove click, or a fresh "+ Add Waste..." pick, all here). A plain % edit never calls this,
+  // only refreshComputedNumbers, so the input the chef is actively typing into is never torn down
+  // mid-edit.
+  function renderWasteRowsFor() {
+    const el = document.getElementById('rof-wastes-combined');
     if (!el) return;
-    el.innerHTML = proc.wastes.length > 0
-      ? proc.wastes.map(w => `
+    el.innerHTML = combinedWastes.length > 0
+      ? combinedWastes.map(w => `
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
           <span style="min-width:130px; font-size:13px;">${w.name || 'Waste'}</span>
           <input type="number" min="0" max="100" step="0.1" value="${w.percent ?? 0}" style="width:70px;" data-rof-waste-input="${w.localId}" />
-          <span style="font-size:11px; color:var(--neutral);">% (recipe default: ${w.originalPercent ?? 0}%)</span>
+          <span style="font-size:11px; color:var(--neutral);">${w.originalPercent != null ? `% (recipe default: ${w.originalPercent}%)` : '% (added this session)'}</span>
           <button type="button" class="icon-btn danger" data-rof-waste-remove="${w.localId}" title="Remove for this tray session only">✕</button>
         </div>
       `).join('')
@@ -8000,7 +8554,7 @@ function renderRecipeOnFireView(main) {
     el.querySelectorAll('[data-rof-waste-input]').forEach(input => {
       input.addEventListener('input', () => {
         const localId = parseInt(input.dataset.rofWasteInput, 10);
-        const w = proc.wastes.find(w => w.localId === localId);
+        const w = combinedWastes.find(w => w.localId === localId);
         if (w) w.percent = input.value;
         refreshComputedNumbers();
       });
@@ -8008,130 +8562,533 @@ function renderRecipeOnFireView(main) {
     el.querySelectorAll('[data-rof-waste-remove]').forEach(btn => {
       btn.addEventListener('click', () => {
         const localId = parseInt(btn.dataset.rofWasteRemove, 10);
-        proc.wastes = proc.wastes.filter(w => w.localId !== localId);
-        renderWasteRowsFor(proc);
+        combinedWastes = combinedWastes.filter(w => w.localId !== localId);
+        renderWasteRowsFor();
         refreshComputedNumbers();
       });
     });
+
+    populateAddWasteSelect();
   }
 
-  // Writes only the numeric spans (Total Quantity/Net Weight per process, plus the combined line)
-  // and refreshes the fill preview -- never touches the waste input rows themselves, see
-  // renderWasteRowsFor's own comment on why that split matters.
+  // Populates the combined "+ Add Waste..." select -- same reuse-the-catalog dropdown pattern as
+  // Recipe Book/Recipe Extractor's process form (see renderProcessWastes), but deliberately NOT
+  // that same function: this view has no Save at all (see renderProcessSummary's own comment
+  // above), so picking a type here only pushes a session-only row onto combinedWastes -- it never
+  // calls addWasteType/updateWasteType and skips "+ Create new waste type..." entirely, since
+  // creating a brand-new catalog entry is a real, permanent write this view should never make on
+  // the chef's behalf just to run one tray calculation.
+  // Reassigned (not addEventListener) every call -- selectEl persists across a rows-only refresh
+  // (it lives outside the #rof-wastes-combined div this rebuilds), so this avoids stacking
+  // duplicate handlers the same way renderProcessWastes' own select does.
+  async function populateAddWasteSelect() {
+    const selectEl = document.querySelector('[data-rof-add-waste="combined"]');
+    if (!selectEl) return;
+    const wasteTypes = await wasteTypesPromise;
+    // Re-check after the await -- the chef may have unchecked every process (or picked a
+    // different recipe entirely) while the catalog fetch was in flight.
+    if (!document.querySelector('[data-rof-add-waste="combined"]')) return;
+
+    const availableTypes = wasteTypes.filter(wt => !combinedWastes.some(w => w.wasteTypeId === wt.id));
+    selectEl.innerHTML = `<option value="">+ Add Waste…</option>` +
+      availableTypes.map(wt => `<option value="${wt.id}">${wt.name} (${wt.default_percent}%)</option>`).join('');
+    selectEl.value = '';
+    selectEl.onchange = () => {
+      const rawValue = selectEl.value;
+      selectEl.value = ''; // always reset immediately, same as renderProcessWastes' own select
+      if (!rawValue) return;
+      const wasteTypeId = parseInt(rawValue, 10);
+      const wt = wasteTypes.find(w => w.id === wasteTypeId);
+      if (!wt) return;
+      // No originalPercent -- this row has no "recipe default" to show or diff against (unlike
+      // rows seeded from buildProcessFromSaved), it exists only for this tray session.
+      combinedWastes.push({ localId: ++_recipeRowLocalIdCounter, wasteTypeId: wt.id, name: wt.name, percent: wt.default_percent });
+      renderWasteRowsFor();
+      refreshComputedNumbers();
+    };
+  }
+
+  // Writes only the numeric spans (each process's own raw Total Quantity, the combined total, and
+  // the single combined Net Weight) and refreshes the fill preview -- never touches the waste
+  // input rows themselves, see renderWasteRowsFor's own comment on why that split matters.
   function refreshComputedNumbers() {
     const procs = selectedProcesses();
     procs.forEach(p => {
-      const totalQty = sumIngredientQuantities(p.ingredientRows);
-      const netWeight = compoundWasteYield(totalQty, p.wastes);
       const totalEl = document.getElementById(`rof-total-${p.localId}`);
-      const netEl = document.getElementById(`rof-net-${p.localId}`);
-      if (totalEl) totalEl.textContent = roundNice(totalQty);
-      if (netEl) netEl.textContent = netWeight;
+      if (totalEl) totalEl.textContent = roundNice(sumIngredientQuantities(p.ingredientRows));
     });
-    if (procs.length > 1) {
-      const combinedTotalEl = document.getElementById('rof-combined-total');
-      const combinedNetEl = document.getElementById('rof-combined-net');
-      if (combinedTotalEl) combinedTotalEl.textContent = combinedTotalQuantity(procs);
-      if (combinedNetEl) combinedNetEl.textContent = originalCombinedNetWeight(procs);
-    }
-    updateFillPreview();
+    const combinedTotalEl = document.getElementById('rof-combined-total');
+    if (combinedTotalEl) combinedTotalEl.textContent = combinedTotalQuantity(procs);
+    const netEl = document.getElementById('rof-net-combined');
+    if (netEl) netEl.textContent = compoundWasteYield(combinedTotalQuantity(procs), combinedWastes);
+    updateSetupPreview();
   }
 
-  function updateFillPreview() {
+  // Setup-step only -- draws the tray to scale on the 2D canvas and computes this tray's own Net
+  // Weight into `bakeSnapshot`. Density and fill-height are GONE (confirmed with the chef): they
+  // only ever existed to drive the old 3D fill mesh, which no longer exists -- what replaces "how
+  // much dough fits" is the Dough step's own placed-count-vs-Net-Weight check (see
+  // updateDoughPlacementSummary), not anything computed here. Fresh document.getElementById
+  // lookups (not hoisted consts) since #rof-material-select only exists while rofStep === 'setup'.
+  // A no-op (via the early `if (rofStep !== 'setup') return`) is deliberately safe to call from
+  // refreshComputedNumbers regardless of which step is active.
+  function updateSetupPreview() {
+    if (rofStep !== 'setup') return;
+    const materialSelect = document.getElementById('rof-material-select');
+    const fillSummaryEl = document.getElementById('rof-fill-summary');
+    const continueBtn = document.getElementById('rof-continue-btn');
+    if (!materialSelect || !fillSummaryEl) return;
+
     const procs = selectedProcesses();
-    const materialId = materialSelect.value;
-    const material = trayMaterials.find(m => String(m.id) === String(materialId));
+    const material = trayMaterials.find(m => String(m.id) === String(materialSelect.value));
     if (procs.length === 0 || !material) {
+      bakeSnapshot = null;
       previewEmptyEl.style.display = '';
       fillSummaryEl.innerHTML = '';
-      preview3D.setShape(null, {}, 'tray_pan');
-      preview3D.setOverlay(null);
-      preview3D.setAnnotations(null);
-      preview3D.setLabels([]);
+      if (continueBtn) continueBtn.disabled = true;
+      renderTrayCanvas();
       return;
     }
 
     const dims = materialDimsFromRow(material);
     const footprint = trayInteriorFootprint(material.shape_type, dims);
-    preview3D.setShape(material.shape_type, dims, 'tray_pan');
-
     if (!footprint) {
+      bakeSnapshot = null;
       previewEmptyEl.textContent = 'This tray is missing some dimensions.';
       previewEmptyEl.style.display = '';
       fillSummaryEl.innerHTML = '';
-      preview3D.setOverlay(null);
-      preview3D.setAnnotations(null);
-      preview3D.setLabels([]);
+      if (continueBtn) continueBtn.disabled = true;
+      renderTrayCanvas();
       return;
     }
     previewEmptyEl.style.display = 'none';
 
-    const netWeight = originalCombinedNetWeight(procs);
-    const density = parseFloat(densityInput.value);
-    const validDensity = density > 0 ? density : ROF_DEFAULT_DOUGH_DENSITY_G_CM3;
-
-    const trayCapacityGrams = footprint.areaCm2 * footprint.usableHeightCm * validDensity;
-    const sessionsNeeded = trayCapacityGrams > 0 ? Math.ceil(netWeight / trayCapacityGrams) : 0;
-    // This session's own share -- the first tray-full when the batch needs more than one; the
-    // "repeat this same session N times" workflow itself (looping back for session 2, 3, ...) is
-    // a later phase, this just shows the chef up front how many she'll need.
-    const thisSessionGrams = sessionsNeeded > 1 ? trayCapacityGrams : netWeight;
-    const fillHeightCm = validDensity > 0 && footprint.areaCm2 > 0
-      ? Math.min(thisSessionGrams / (footprint.areaCm2 * validDensity), footprint.usableHeightCm)
-      : 0;
-
-    preview3D.setOverlay(buildDoughFillGroup(material.shape_type, dims, footprint, fillHeightCm));
-    const annotated = buildTrayDimensionAnnotations(material.shape_type, dims, footprint, fillHeightCm);
-    preview3D.setAnnotations(annotated.group);
-    preview3D.setLabels(annotated.labels);
-
-    const fillPct = footprint.usableHeightCm > 0 ? Math.round((fillHeightCm / footprint.usableHeightCm) * 100) : 0;
+    const netWeight = compoundWasteYield(combinedTotalQuantity(procs), combinedWastes);
+    bakeSnapshot = { material, dims, footprint, netWeight };
     fillSummaryEl.innerHTML = `
       <div class="computed-value-box" style="max-width:340px; margin-bottom:14px;">
-        <div><strong>Fill Height:</strong> ${roundNice(fillHeightCm)} cm (${fillPct}% of usable ${roundNice(footprint.usableHeightCm)} cm)</div>
-        ${sessionsNeeded > 1
-          ? `<div style="margin-top:6px; color:var(--danger, #c0392b);"><strong>Overflow:</strong> this batch's ${netWeight} g needs ~${sessionsNeeded} tray sessions at this density (this tray holds ~${roundNice(trayCapacityGrams)} g per session).</div>`
-          : `<div style="margin-top:6px; color:var(--neutral);">Fits in one session (tray holds ~${roundNice(trayCapacityGrams)} g at this density).</div>`}
+        <div><strong>Net Weight for this tray:</strong> ${roundNice(netWeight)} g</div>
       </div>
     `;
+    if (continueBtn) continueBtn.disabled = false;
+    resizeTrayCanvas();
   }
 
+  // Fresh document.getElementById lookups, same reasoning as updateSetupPreview above -- the
+  // select this populates only exists while rofStep === 'setup', and this is itself async, so a
+  // re-check after the await guards against the chef having moved past Setup (or unchecked every
+  // process) while the materials list was still loading.
   async function populateMaterialSelect() {
+    let materialSelect = document.getElementById('rof-material-select');
+    if (!materialSelect) return;
     trayMaterials = (await materialsPromise).filter(m => m.category === 'tray_pan');
+    materialSelect = document.getElementById('rof-material-select');
+    if (!materialSelect) return;
     materialSelect.innerHTML = [
       `<option value="">— Select a tray —</option>`,
       ...trayMaterials.map(m => `<option value="${m.id}">${m.code} — ${m.name} (${formatMaterialDimensions(m)})</option>`),
     ].join('');
-    // Default from the first selected process that already has a tray/pan linked (its own recipe
-    // form's Material/Tray field, see buildProcessFromSaved) -- only when nothing's been picked
+    // Restore the chef's own last pick for this session (surviving a checkbox toggle or an
+    // "<- Edit Setup" round-trip) before falling back to a linked process's own tray/pan (its own
+    // recipe form's Material field, see buildProcessFromSaved) -- only when nothing's been picked
     // here yet, so toggling which processes are checked never clobbers a tray the chef already
     // chose by hand in this view.
-    if (!materialSelect.value) {
+    if (lastMaterialId && trayMaterials.some(m => String(m.id) === String(lastMaterialId))) {
+      materialSelect.value = String(lastMaterialId);
+    } else {
       const defaultId = selectedProcesses().map(p => p.materialId).find(id => id && trayMaterials.some(m => String(m.id) === String(id)));
       if (defaultId) materialSelect.value = String(defaultId);
     }
-    updateFillPreview();
+    lastMaterialId = materialSelect.value || lastMaterialId;
+    updateSetupPreview();
+  }
+
+  // ---- Step header + per-step panel rendering --------------------------------------------------
+  const ROF_STEP_LABELS = [
+    { key: 'setup', label: '1. Setup' },
+    { key: 'dough', label: '2. Dough' },
+    { key: 'baked', label: '3. Baked' },
+    { key: 'cut', label: '4. Cut' },
+  ];
+
+  function renderStepHeader() {
+    const stepsEl = document.getElementById('rof-steps');
+    if (!stepsEl) return;
+    stepsEl.innerHTML = ROF_STEP_LABELS.map(s => `<span class="rof-step-pill ${s.key === rofStep ? 'active' : ''}">${s.label}</span>`).join('');
+  }
+
+  function renderTrayStepPanel() {
+    renderStepHeader();
+    const panel = document.getElementById('rof-step-panel');
+    if (!panel) return;
+    if (rofStep === 'setup') renderSetupPanel(panel);
+    else if (rofStep === 'dough') renderDoughStepPanel(panel);
+    else if (rofStep === 'baked') renderBakedStepPanel(panel);
+    else if (rofStep === 'cut') renderCutStepPanel(panel);
+    resizeTrayCanvas();
+  }
+
+  function renderSetupPanel(panel) {
+    panel.innerHTML = `
+      <h3 style="margin-bottom:10px;">Tray</h3>
+      <div class="generate-controls" style="margin-bottom:12px;">
+        <div class="field" style="max-width:280px;">
+          <label>Tray / Pan</label>
+          <select id="rof-material-select" class="builder-select">
+            <option value="">— Select a tray —</option>
+          </select>
+        </div>
+      </div>
+      <div id="rof-fill-summary"></div>
+      <button type="button" class="primary" id="rof-continue-btn" style="margin-top:10px;" disabled>Continue →</button>
+    `;
+    document.getElementById('rof-material-select').addEventListener('change', () => {
+      lastMaterialId = document.getElementById('rof-material-select').value || null;
+      updateSetupPreview();
+    });
+    document.getElementById('rof-continue-btn').addEventListener('click', startDoughPlacement);
+    populateMaterialSelect();
+  }
+
+  // Enters the Dough step -- always a fresh tray session (no previous placed dough/cutters carry
+  // over from a prior bake of the same recipe, since this is "Continue" from Setup, not a resume).
+  function startDoughPlacement() {
+    rofStep = 'dough';
+    placedDough = [];
+    placedCutters = [];
+    selectedPlacedId = null;
+    armedDoughShapeId = null;
+    armedCutterMaterialId = null;
+    renderTrayStepPanel();
+  }
+
+  const doughThumbCache = new Map(); // shape.id -> data URL (its own first baked variation), for the palette
+
+  async function ensureDoughShapesLoaded() {
+    if (!doughShapesPromise) doughShapesPromise = window.api.listDoughShapes();
+    doughShapes = await doughShapesPromise;
+    return doughShapes;
+  }
+
+  // Preloads every raw+baked photo for one shape into doughImageCache as real, already-decoded
+  // HTMLImageElements -- called once when a shape is first armed, so every later drag/redraw
+  // draws synchronously with zero IPC round trips or load flicker. Cut-stage photos are loaded on
+  // demand instead (see renderSinglePiecePanel), since they're shown once in a static panel, never
+  // redrawn repeatedly during a drag.
+  async function preloadDoughShapeImages(shape) {
+    const paths = [...shape.photosByStage.raw, ...shape.photosByStage.baked].map(p => p.photo_path);
+    await Promise.all(paths.map(async (path) => {
+      if (doughImageCache.has(path)) return;
+      const dataUrl = await window.api.getDoughShapePhoto(path);
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => { doughImageCache.set(path, img); resolve(); };
+        img.onerror = () => resolve(); // missing/corrupt photo -- drawPlacedDoughItem's own fallback circle covers this
+        img.src = dataUrl;
+      });
+      renderTrayCanvas(); // picks up this one image as soon as it's ready, not just at the very end
+    }));
+  }
+
+  function renderDoughPalette() {
+    const paletteEl = document.getElementById('rof-dough-palette');
+    if (!paletteEl) return;
+    if (doughShapes.length === 0) {
+      paletteEl.innerHTML = `<div class="empty-state" style="margin:0; padding:14px;">No dough shapes yet -- add one from the "Dough Shapes" screen in the sidebar first.</div>`;
+      return;
+    }
+    paletteEl.innerHTML = doughShapes.map(shape => {
+      const dataUrl = doughThumbCache.get(shape.id);
+      const armed = shape.id === armedDoughShapeId;
+      return `
+        <button type="button" data-arm-shape="${shape.id}" style="border:2px solid ${armed ? 'var(--sage-dark)' : 'var(--line)'}; border-radius:8px; padding:6px; background:white; cursor:pointer; text-align:center; width:92px;">
+          <div style="width:100%; height:60px; display:flex; align-items:center; justify-content:center; overflow:hidden;">${dataUrl ? `<img src="${dataUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />` : ''}</div>
+          <div style="font-size:11.5px; font-weight:600; margin-top:4px;">${shape.name}</div>
+          <div style="font-size:10.5px; color:var(--neutral);">${roundNice(shape.unit_weight_grams)} g</div>
+        </button>
+      `;
+    }).join('');
+    paletteEl.querySelectorAll('[data-arm-shape]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.armShape, 10);
+        const shape = doughShapes.find(s => s.id === id);
+        if (!shape) return;
+        armedDoughShapeId = id;
+        armedCutterMaterialId = null;
+        renderDoughPalette();
+        renderSinglePiecePanel();
+        await preloadDoughShapeImages(shape);
+      });
+    });
+  }
+
+  async function renderDoughStepPanel(panel) {
+    panel.innerHTML = `
+      <h3 style="margin-bottom:6px;">Place Dough</h3>
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:10px;">Pick a shape below, then click anywhere on the tray to place one. Drag a placed piece to move it; click it and press Delete to remove it.</div>
+      <div id="rof-dough-palette" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">Loading shapes…</div>
+      <div id="rof-dough-placement-summary" style="margin-bottom:12px;"></div>
+      <div style="display:flex; gap:8px;">
+        <button type="button" class="secondary" id="rof-edit-setup-btn">← Edit Setup</button>
+        <button type="button" class="primary" id="rof-bake-btn">Bake →</button>
+      </div>
+    `;
+    document.getElementById('rof-edit-setup-btn').addEventListener('click', () => {
+      rofStep = 'setup';
+      bakeSnapshot = null;
+      renderTrayStepPanel();
+    });
+    document.getElementById('rof-bake-btn').addEventListener('click', startBaking);
+
+    await ensureDoughShapesLoaded();
+    if (rofStep !== 'dough') return; // stepped away while the catalog was loading
+    await Promise.all(doughShapes.map(async (shape) => {
+      if (doughThumbCache.has(shape.id)) return;
+      const bakedFirst = shape.photosByStage.baked[0];
+      doughThumbCache.set(shape.id, bakedFirst ? await window.api.getDoughShapePhoto(bakedFirst.photo_path) : null);
+    }));
+    if (rofStep !== 'dough') return;
+    renderDoughPalette();
+    updateDoughPlacementSummary();
+  }
+
+  // Shared by the Dough and Baked steps -- how much of this tray's own Net Weight is accounted
+  // for by what's actually been placed, replacing the old 3D version's density/fill-height math
+  // entirely (confirmed with the chef: this placed-count check is the better fit for a manual,
+  // hands-on placement model). Per-unit weight comes straight from the Dough Shapes catalog row
+  // (see lib/doughShapes.js), never recomputed here.
+  function updateDoughPlacementSummary() {
+    const el = document.getElementById('rof-dough-placement-summary');
+    if (!el || !bakeSnapshot) return;
+    const placedWeight = placedDough.reduce((sum, d) => {
+      const shape = doughShapes.find(s => s.id === d.shapeId);
+      return sum + (shape ? shape.unit_weight_grams : 0);
+    }, 0);
+    const netWeight = bakeSnapshot.netWeight;
+    const pct = netWeight > 0 ? Math.round((placedWeight / netWeight) * 100) : 0;
+    const diff = roundNice(netWeight - placedWeight);
+    let statusColor = 'var(--neutral)', statusText = 'Nothing placed yet.';
+    if (placedDough.length > 0) {
+      if (Math.abs(diff) < Math.max(netWeight * 0.03, 1)) { statusColor = 'var(--sage-dark)'; statusText = 'Matches Net Weight closely.'; }
+      else if (diff > 0) { statusColor = 'var(--danger, #c0392b)'; statusText = `${diff} g still to place.`; }
+      else { statusColor = 'var(--danger, #c0392b)'; statusText = `${Math.abs(diff)} g over Net Weight.`; }
+    }
+    el.innerHTML = `
+      <div class="computed-value-box" style="max-width:360px;">
+        <div><strong>${placedDough.length}</strong> unit(s) placed &nbsp;·&nbsp; <strong>${roundNice(placedWeight)} g</strong> of ${roundNice(netWeight)} g (${pct}%)</div>
+        <div style="margin-top:4px; color:${statusColor}; font-size:12.5px;">${statusText}</div>
+      </div>
+    `;
+  }
+
+  // No AI call, no rise/proofing math, no animation -- just swaps every placed unit's own sprite
+  // from raw to baked IN PLACE (same x/y). Confirmed with the chef: this is the whole "Bake" step
+  // now that there's no 3D fill mesh to animate a rise into.
+  function startBaking() {
+    playIgniteSound();
+    placedDough.forEach(d => { d.stage = 'baked'; });
+    rofStep = 'baked';
+    renderTrayStepPanel();
+  }
+
+  function renderBakedStepPanel(panel) {
+    const isMuffinTray = bakeSnapshot.material.shape_type === 'muffin_tray';
+    panel.innerHTML = `
+      <h3 style="margin-bottom:10px;">Baked</h3>
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:12px;">Every placed piece has swapped to its baked reference photo.</div>
+      <div id="rof-dough-placement-summary" style="margin-bottom:12px;"></div>
+      <div style="display:flex; gap:8px;">
+        <button type="button" class="secondary" id="rof-edit-dough-btn">← Edit Dough Placement</button>
+        <button type="button" class="primary" id="rof-cut-btn" ${isMuffinTray ? 'disabled title="Each cup is already a discrete portion -- no cutting needed"' : ''}>Cut →</button>
+      </div>
+    `;
+    document.getElementById('rof-edit-dough-btn').addEventListener('click', () => {
+      placedDough.forEach(d => { d.stage = 'raw'; });
+      rofStep = 'dough';
+      renderTrayStepPanel();
+    });
+    if (!isMuffinTray) document.getElementById('rof-cut-btn').addEventListener('click', startCutting);
+    updateDoughPlacementSummary();
+  }
+
+  // Enters the Cut step -- always a fresh cutter layout (no previous placement carries over from
+  // an earlier visit, same "fresh session" reasoning startDoughPlacement's own comment gives).
+  function startCutting() {
+    rofStep = 'cut';
+    placedCutters = [];
+    selectedPlacedId = null;
+    armedCutterMaterialId = null;
+    renderTrayStepPanel();
+  }
+
+  // Fresh document.getElementById lookup, same reasoning as every other step's own populate
+  // function -- #rof-cutter-select only exists while rofStep === 'cut'. Reuses the SAME
+  // materialsPromise the Setup step's own populateMaterialSelect already fetches once (both
+  // categories come back in one call; each filters differently). No per-cutter size override
+  // field anymore (unlike the old numeric auto-layout, which needed exact dims to compute a
+  // packing) -- manual drag placement just uses the cutter Material's own catalog size as-is; she
+  // is eyeballing position against the real photo, not relying on computed precision.
+  async function populateCutterSelect() {
+    let select = document.getElementById('rof-cutter-select');
+    if (!select) return;
+    cutterMaterials = (await materialsPromise).filter(m => m.category === 'cutter');
+    select = document.getElementById('rof-cutter-select');
+    if (!select) return;
+    select.innerHTML = [
+      `<option value="">— Select a cutter —</option>`,
+      ...cutterMaterials.map(m => `<option value="${m.id}">${m.code} — ${m.name} (${formatMaterialDimensions(m)})</option>`),
+    ].join('');
+  }
+
+  // Optional convenience only (confirmed with the chef: fully manual placement is the primary
+  // interaction, this is an opt-in starting point to adjust from, never the only way to place
+  // cutters) -- reuses computeCutterLayout UNCHANGED from the old 3D version (pure 2D geometry,
+  // never touched THREE.js at all, see that module's own header comment) with fixed, sensible
+  // defaults (0.5cm margin, 0.3cm gap, top-left start corner) rather than exposing those as
+  // always-visible numeric controls, which would undercut "fully manual first" by making the
+  // numeric-input path look like the primary one again.
+  function autoArrangeCutters() {
+    if (!armedCutterMaterialId || !bakeSnapshot) return;
+    const cutter = cutterMaterials.find(m => String(m.id) === String(armedCutterMaterialId));
+    if (!cutter) return;
+    const dims = materialDimsFromRow(cutter);
+    const { material, dims: trayDims, footprint, netWeight } = bakeSnapshot;
+    const result = computeCutterLayout(material.shape_type, footprint, trayDims, cutter.shape_type, dims, 0.5, 0.3, ROF_LAYOUT_CORNERS.tl, netWeight);
+    placedCutters = result.placements.map(p => ({
+      id: nextPlacedId++, materialId: cutter.id, shapeType: cutter.shape_type, dims, xCm: p.x, yCm: p.z,
+    }));
+    selectedPlacedId = null;
+    renderTrayCanvas();
+    updateCutSummary();
+  }
+
+  // Per-piece + waste, reusing the exact same area math the old 3D version's report panel used
+  // (cutterUnitAreaCm2 -- pure geometry, unchanged) -- just driven by however many cutters are
+  // actually placed on the canvas right now instead of an algorithmic packing result. "Per Piece"
+  // reads off the FIRST placed cutter since every real placement of the same cutter Material is
+  // the same size/weight regardless of how many are on the tray.
+  function updateCutSummary() {
+    const el = document.getElementById('rof-cut-summary');
+    if (!el || !bakeSnapshot) return;
+    const { footprint, netWeight } = bakeSnapshot;
+    if (placedCutters.length === 0) {
+      el.innerHTML = `<div style="font-size:12.5px; color:var(--neutral);">No cutters placed yet.</div>`;
+      return;
+    }
+    const first = placedCutters[0];
+    const unitArea = cutterUnitAreaCm2(first.shapeType, first.dims);
+    const coveredAreaCm2 = placedCutters.reduce((sum, c) => sum + cutterUnitAreaCm2(c.shapeType, c.dims), 0);
+    const utilizationPct = footprint.areaCm2 > 0 ? Math.round((coveredAreaCm2 / footprint.areaCm2) * 100) : 0;
+    const wasteAreaCm2 = Math.max(0, footprint.areaCm2 - coveredAreaCm2);
+    const wasteGrams = footprint.areaCm2 > 0 ? (wasteAreaCm2 / footprint.areaCm2) * netWeight : 0;
+    const pieceGrams = footprint.areaCm2 > 0 ? (unitArea / footprint.areaCm2) * netWeight : 0;
+    el.innerHTML = `
+      <div class="computed-value-box" style="max-width:360px;">
+        <div style="font-size:11.5px; color:var(--neutral); margin-bottom:3px;">Per Piece</div>
+        <div style="font-size:15px; font-weight:600;">${cutterPieceSizeLabel(first.shapeType, first.dims)}</div>
+        <div style="margin-top:2px;">Weight: ${roundNice(pieceGrams)} g</div>
+        <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);">
+          <strong>${placedCutters.length}</strong> pieces placed &nbsp;·&nbsp; <strong>${utilizationPct}%</strong> utilization
+        </div>
+        <div style="margin-top:4px; font-size:12px; color:var(--neutral);"><strong>Waste:</strong> ${roundNice(wasteGrams)} g</div>
+      </div>
+    `;
+  }
+
+  // The Cut step's real-photo counterpart to the old 3D "single-piece close-up" panel -- shows
+  // the CURRENTLY-ARMED dough shape's own real cut/portioned reference photo (falling back to
+  // whichever shape was placed first, if nothing's freshly armed), so "here's exactly what one
+  // portion looks like" is a genuine photo, not rendered geometry. One cut photo per DOUGH SHAPE,
+  // not per dough-shape-x-cutter-shape combination -- a deliberate simplification (see the pivot
+  // plan): a representative cut portion is what's asked for, not a precise per-cutter render.
+  async function renderSinglePiecePanel() {
+    const el = document.getElementById('rof-single-piece-panel');
+    if (!el) return;
+    const shapeId = armedDoughShapeId ?? placedDough[0]?.shapeId;
+    const shape = doughShapes.find(s => s.id === shapeId);
+    if (!shape) {
+      el.innerHTML = `<div style="font-size:12px; color:var(--neutral);">Place some dough (or pick a shape) to see its cut-portion reference.</div>`;
+      return;
+    }
+    const cutPhoto = shape.photosByStage.cut[0];
+    const dataUrl = cutPhoto ? await window.api.getDoughShapePhoto(cutPhoto.photo_path) : null;
+    // A newer call may have already started (or finished) for a DIFFERENT shape while this one
+    // awaited its own photo fetch -- bail out rather than overwrite that newer result with this
+    // now-stale one.
+    if ((armedDoughShapeId ?? placedDough[0]?.shapeId) !== shapeId) return;
+    el.innerHTML = `
+      <div style="font-size:11.5px; color:var(--neutral); margin-bottom:4px;">Single Piece Reference — ${shape.name}</div>
+      <div class="material-preview-wrap" style="height:200px; display:flex; align-items:center; justify-content:center;">
+        ${dataUrl ? `<img src="${dataUrl}" style="max-height:100%; max-width:100%; object-fit:contain;" />` : '<span style="color:var(--neutral); font-size:12px;">No cut reference photo.</span>'}
+      </div>
+      <div style="margin-top:6px; font-size:12.5px;"><strong>${roundNice(shape.unit_weight_grams)} g</strong> per unit &middot; ${roundNice(shape.size_cm)} cm</div>
+    `;
+  }
+
+  async function renderCutStepPanel(panel) {
+    panel.innerHTML = `
+      <h3 style="margin-bottom:6px;">Cut Into Portions</h3>
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:10px;">Pick a cutter below, then click the tray to place one. Drag to reposition; click a placed cutter and press Delete to remove it.</div>
+      <div class="generate-controls" style="margin-bottom:10px; align-items:flex-end;">
+        <div class="field" style="max-width:260px;">
+          <label>Cutter</label>
+          <select id="rof-cutter-select" class="builder-select">
+            <option value="">— Select a cutter —</option>
+          </select>
+        </div>
+        <button type="button" class="secondary" id="rof-auto-arrange-btn" disabled>Auto-arrange (optional)</button>
+        <button type="button" class="secondary" id="rof-clear-cutters-btn">Clear All</button>
+      </div>
+      <div id="rof-cut-summary" style="margin-bottom:12px;"></div>
+      <div id="rof-single-piece-panel"></div>
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <button type="button" class="secondary" id="rof-edit-baked-btn">← Back to Baked</button>
+      </div>
+    `;
+    document.getElementById('rof-edit-baked-btn').addEventListener('click', () => {
+      rofStep = 'baked';
+      renderTrayStepPanel();
+    });
+    document.getElementById('rof-clear-cutters-btn').addEventListener('click', () => {
+      placedCutters = [];
+      selectedPlacedId = null;
+      renderTrayCanvas();
+      updateCutSummary();
+    });
+    document.getElementById('rof-cutter-select').addEventListener('change', (e) => {
+      armedCutterMaterialId = e.target.value || null;
+      armedDoughShapeId = null;
+      document.getElementById('rof-auto-arrange-btn').disabled = !armedCutterMaterialId;
+    });
+    document.getElementById('rof-auto-arrange-btn').addEventListener('click', autoArrangeCutters);
+
+    await populateCutterSelect();
+    if (rofStep !== 'cut') return;
+    renderSinglePiecePanel();
+    updateCutSummary();
   }
 
   function onProcessCheckChanged() {
     selectedProcessLocalIds = new Set(
       [...processChecksEl.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value)
     );
+    // Changing which processes feed this tray invalidates any in-progress/completed session --
+    // always drop back to Setup rather than let stale placed dough/cutters survive a process
+    // change (a different combined dough entirely).
+    rofStep = 'setup';
+    bakeSnapshot = null;
+    placedDough = [];
+    placedCutters = [];
     renderProcessSummary();
     const hasSelection = selectedProcessLocalIds.size > 0;
     traySection.style.display = hasSelection ? '' : 'none';
     if (hasSelection) {
       // Section just went from display:none to visible -- resize AFTER layout settles to this
-      // frame's real box (see the long comment on the initial resize() above for why this call,
-      // not that one, is what actually makes the tray/preview appear).
-      requestAnimationFrame(() => preview3D.resize());
-      populateMaterialSelect();
+      // frame's real box, same reasoning the initial resizeTrayCanvas() call above documents.
+      requestAnimationFrame(() => resizeTrayCanvas());
+      renderTrayStepPanel();
     } else {
-      fillSummaryEl.innerHTML = '';
-      preview3D.setShape(null, {}, 'tray_pan');
-      preview3D.setOverlay(null);
-      preview3D.setAnnotations(null);
-      preview3D.setLabels([]);
+      renderTrayCanvas();
     }
   }
 
@@ -8169,6 +9126,10 @@ function renderRecipeOnFireView(main) {
     browseListShowing = false;
     traySection.style.display = 'none';
     summaryEl.innerHTML = '';
+    rofStep = 'setup';
+    bakeSnapshot = null;
+    placedDough = [];
+    placedCutters = [];
 
     const full = await currentNs().api.get(recipe.id);
     if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
@@ -8211,8 +9172,6 @@ function renderRecipeOnFireView(main) {
     nameInput.focus();
   });
 
-  materialSelect.addEventListener('change', updateFillPreview);
-  densityInput.addEventListener('input', updateFillPreview);
 }
 
 function renderMaterialsView(main) {
@@ -8577,6 +9536,204 @@ async function renderMaterialFormView(main) {
       alert(`Save failed: ${err.message}`);
     }
   });
+}
+
+// ============================================================
+// Dough Shapes (Recipe on Fire pivot, Phase A) -- see state.doughShapes' own comment. This view's
+// ONLY job right now is proving the reference-image pipeline actually works and looks real: add
+// a shape, watch its 9-photo set generate, see the result as an actual gallery (on a checkerboard
+// background specifically so a transparent-background photo that DIDN'T cut out cleanly is
+// visually obvious, not something she'd have to guess at). The canvas/drag placement UI that
+// actually CONSUMES this catalog is a later phase -- nothing here talks to Recipe on Fire yet.
+// ============================================================
+
+const DOUGH_SHAPE_GALLERY_STAGES = ['raw', 'baked', 'cut'];
+
+function renderDoughShapesView(main) {
+  const s = state.doughShapes;
+  if (s.view === 'form') return renderDoughShapeFormView(main);
+  if (s.view === 'gallery') return renderDoughShapeGalleryView(main);
+  return renderDoughShapesListView(main);
+}
+
+function openNewDoughShapeForm() {
+  state.doughShapes.view = 'form';
+  renderView();
+}
+
+function goBackToDoughShapesList() {
+  state.doughShapes.view = 'list';
+  state.doughShapes.galleryShapeId = null;
+  renderView();
+}
+
+async function renderDoughShapesListView(main) {
+  const shapes = await window.api.listDoughShapes();
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Dough Shapes</h1><span class="section-pill">Real AI-generated reference photos for Recipe on Fire's dough placement</span></div>
+      <button class="primary" id="add-dough-shape-btn">+ Add Dough Shape</button>
+    </div>
+    <div id="dough-shapes-content">Loading…</div>
+  `;
+  document.getElementById('add-dough-shape-btn').addEventListener('click', openNewDoughShapeForm);
+
+  const content = document.getElementById('dough-shapes-content');
+  if (shapes.length === 0) {
+    content.innerHTML = `<div class="empty-state"><div class="display">No dough shapes yet</div>Click "+ Add Dough Shape" to generate the first one's reference photos.</div>`;
+    return;
+  }
+
+  // Thumbnail = the first "baked" variation -- the stage a chef would recognize a shape by at a
+  // glance, same reasoning a recipe card's own photo is always the finished dish, not a raw prep
+  // shot.
+  const thumbEntries = await Promise.all(shapes.map(async (shape) => {
+    const bakedFirst = shape.photosByStage.baked?.[0];
+    const dataUrl = bakedFirst ? await window.api.getDoughShapePhoto(bakedFirst.photo_path) : null;
+    return { shape, dataUrl };
+  }));
+
+  content.innerHTML = `
+    <div style="display:flex; flex-wrap:wrap; gap:16px;">
+      ${thumbEntries.map(({ shape, dataUrl }) => `
+        <div class="computed-value-box dough-shape-card" data-shape-id="${shape.id}" style="width:200px; cursor:pointer;">
+          <div class="dough-shape-checker" style="width:100%; height:160px; border-radius:6px; margin-bottom:8px; display:flex; align-items:center; justify-content:center; overflow:hidden;">
+            ${dataUrl ? `<img src="${dataUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />` : '<span style="color:var(--neutral); font-size:12px;">No photo</span>'}
+          </div>
+          <div style="font-weight:600;">${shape.name}</div>
+          <div style="font-size:12px; color:var(--neutral); margin-top:2px;">${roundNice(shape.unit_weight_grams)} g &nbsp;·&nbsp; ${roundNice(shape.size_cm)} cm</div>
+          <button class="icon-btn danger" data-delete-shape="${shape.id}" style="margin-top:8px;">Delete</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  content.querySelectorAll('[data-shape-id]').forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('[data-delete-shape]')) return;
+      state.doughShapes.view = 'gallery';
+      state.doughShapes.galleryShapeId = parseInt(card.dataset.shapeId, 10);
+      renderView();
+    });
+  });
+  content.querySelectorAll('[data-delete-shape]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.deleteShape, 10);
+      const shape = shapes.find(sh => sh.id === id);
+      if (!confirm(`Delete "${shape.name}" and all its reference photos? This cannot be undone.`)) return;
+      await window.api.deleteDoughShape(id);
+      renderView();
+    });
+  });
+}
+
+function renderDoughShapeFormView(main) {
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Add Dough Shape</h1><span class="section-pill">Generates 9 real reference photos (raw/baked/cut &times; 3 variations each) via AI</span></div>
+    </div>
+    <button class="secondary" id="dough-shape-form-back-btn" style="margin-bottom:14px;">← Back to Dough Shapes</button>
+    <div style="font-size:12.5px; color:var(--neutral); margin-bottom:14px; max-width:560px;">
+      This calls the image-generation API 9 times (~2-3 minutes total, run concurrently) and costs real money per shape -- meant for a small, stable catalog (round ball, baguette, mini baguette, ciabatta, etc.), not something to regenerate casually.
+    </div>
+    <div class="generate-controls" style="margin-bottom:14px;">
+      <div class="field" style="max-width:260px;">
+        <label>Name</label>
+        <input id="dough-shape-name" placeholder="e.g. Round Ball" />
+      </div>
+      <div class="field" style="max-width:160px;">
+        <label>Unit Weight (g)</label>
+        <input id="dough-shape-weight" type="number" min="0" step="1" placeholder="e.g. 80" />
+      </div>
+      <div class="field" style="max-width:200px;">
+        <label>Size (cm) <span title="Diameter for a round shape, length for an elongated one (baguette-style) -- used later to scale this shape correctly against a tray's real dimensions." style="cursor:help; color:var(--neutral); font-weight:normal;">ⓘ</span></label>
+        <input id="dough-shape-size" type="number" min="0" step="0.5" placeholder="e.g. 8" />
+      </div>
+    </div>
+    <button class="primary" id="dough-shape-generate-btn">Generate Reference Photos</button>
+    <div id="dough-shape-progress-wrap" style="margin-top:16px; max-width:480px;"></div>
+  `;
+  document.getElementById('dough-shape-form-back-btn').addEventListener('click', goBackToDoughShapesList);
+
+  document.getElementById('dough-shape-generate-btn').addEventListener('click', async () => {
+    const name = document.getElementById('dough-shape-name').value.trim();
+    const unitWeightGrams = document.getElementById('dough-shape-weight').value;
+    const sizeCm = document.getElementById('dough-shape-size').value;
+    if (!name) { alert('Name is required.'); return; }
+    if (!unitWeightGrams || !sizeCm) { alert('Unit weight and size are both required.'); return; }
+
+    const genBtn = document.getElementById('dough-shape-generate-btn');
+    genBtn.disabled = true;
+    const progressWrap = document.getElementById('dough-shape-progress-wrap');
+    const panel = createProgressPanel(progressWrap, { label: 'Starting…' });
+    const unsubscribe = window.api.onDoughShapeGenerateProgress((payload) => panel.update(payload));
+
+    try {
+      const result = await window.api.createDoughShape({ name, unitWeightGrams, sizeCm });
+      if (!result.success) {
+        if (!result.cancelled) alert(`Couldn't generate this shape: ${result.error}`);
+        return;
+      }
+      state.doughShapes.view = 'gallery';
+      state.doughShapes.galleryShapeId = result.id;
+      renderView();
+    } catch (err) {
+      alert(`Couldn't generate this shape: ${err.message}`);
+    } finally {
+      unsubscribe();
+      panel.destroy();
+      if (document.body.contains(genBtn)) genBtn.disabled = false;
+    }
+  });
+}
+
+async function renderDoughShapeGalleryView(main) {
+  const shapes = await window.api.listDoughShapes();
+  const shape = shapes.find(sh => sh.id === state.doughShapes.galleryShapeId);
+  const backBtn = `<button class="secondary" id="dough-shape-back-btn" style="margin-bottom:14px;">← Back to Dough Shapes</button>`;
+
+  if (!shape) {
+    main.innerHTML = `${backBtn}<div class="empty-state">This dough shape no longer exists.</div>`;
+    document.getElementById('dough-shape-back-btn').addEventListener('click', goBackToDoughShapesList);
+    return;
+  }
+
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>${shape.name}</h1><span class="section-pill">${roundNice(shape.unit_weight_grams)} g per unit &middot; ${roundNice(shape.size_cm)} cm</span></div>
+    </div>
+    ${backBtn}
+    <div id="dough-shape-gallery">Loading photos…</div>
+  `;
+  document.getElementById('dough-shape-back-btn').addEventListener('click', goBackToDoughShapesList);
+
+  const galleryEl = document.getElementById('dough-shape-gallery');
+  const stageLabels = { raw: 'Raw', baked: 'Baked', cut: 'Cut / Portioned' };
+  // Checkerboard background behind every thumbnail -- these photos are meant to have a
+  // TRANSPARENT background (see generate-dough-shape-image's own prompt); a checkerboard showing
+  // through is the standard, unambiguous way to confirm that actually worked, rather than a solid
+  // background color that could just as easily mean "opaque white" as "correctly transparent."
+  const checkerStyle = 'background:repeating-conic-gradient(#e2ddcf 0% 25%, #f6f3e9 0% 50%) 0 0/20px 20px;';
+
+  const sections = await Promise.all(DOUGH_SHAPE_GALLERY_STAGES.map(async (stage) => {
+    const photos = shape.photosByStage[stage] || [];
+    const dataUrls = await Promise.all(photos.map(p => window.api.getDoughShapePhoto(p.photo_path)));
+    return { stage, dataUrls };
+  }));
+
+  galleryEl.innerHTML = sections.map(({ stage, dataUrls }) => `
+    <div style="margin-bottom:22px;">
+      <div style="font-weight:600; margin-bottom:8px;">${stageLabels[stage]}</div>
+      <div style="display:flex; gap:12px; flex-wrap:wrap;">
+        ${dataUrls.length === 0 ? '<span style="color:var(--neutral); font-size:12.5px;">No photos for this stage.</span>' : dataUrls.map(url => `
+          <div style="width:220px; height:220px; border:1px solid var(--line); border-radius:8px; ${checkerStyle} display:flex; align-items:center; justify-content:center; overflow:hidden;">
+            <img src="${url}" style="max-width:100%; max-height:100%; object-fit:contain;" />
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
 }
 
 init();
