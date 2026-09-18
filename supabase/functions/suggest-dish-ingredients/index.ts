@@ -67,25 +67,61 @@ const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly pr
 
 // The model's laziest failure mode: naming a sub-preparation itself ("dough", "filling", "sauce")
 // as if it were an ingredient, instead of decomposing it into what it's actually made of. Broken
-// out as its own constant (same reasoning as NUT_RESTRICTION above) with two matched before/after
+// out as its own constant (same reasoning as NUT_RESTRICTION above) with matched before/after
 // examples inline -- concrete examples anchor this kind of behavioral instruction far more
 // reliably than the abstract rule alone.
-const DECOMPOSITION_RULE = `Never name a sub-preparation (dough, batter, crust, bread, bun, roll, breading, filling, glaze, frosting, marinade, etc.) as an ingredient by itself -- always decompose it into the real base ingredients it is made from (flour, sugar, butter, eggs, yeast, milk, salt, oil, etc.), even when that sub-preparation is only part of a larger dish (e.g. the bun in a burger, the bread in a sandwich). A sub-preparation name is a placeholder, not an ingredient, and must never appear in your output. Exception: a simple, single-purpose condiment/sauce that is commonly used and sourced as one finished product (ketchup, mustard, soy sauce, mayonnaise, plain tomato/pizza sauce) may still be named as itself -- only decompose a sauce or filling further if it's itself a multi-component preparation specific to this dish (a curry sauce, gravy, or fruit pie filling), the same way "dough" must be decomposed.
+//
+// Bread/dough specifically needs a SPLIT rule, not a blanket one: whether to decompose it depends
+// on whether it's the dish's own preparation focus (pizza dough, pie crust -- decompose) or just a
+// carrier/component alongside a protein or filling that's the dish's actual focus (sandwich bread,
+// a burger bun -- name it as itself instead). Earlier versions of this rule told the model to
+// decompose sandwich bread the same way as pizza dough (see the removed "Grilled Chicken Sandwich"
+// example below, now flipped) -- that was wrong in practice: a chef reviewing "brown bread" can
+// correct it to whatever bread is actually used in one edit, but "all-purpose flour - yeast - salt
+// - sugar - olive oil" for the bread in a sandwich is not a real, editable ingredient in that sense
+// -- nobody bakes bread from scratch to make a sandwich, so decomposing it just produces noise she
+// has to delete. Batter/breading/crust/filling/glaze/frosting/marinade are NOT bread and are
+// unaffected by this split -- none of those are a real standalone product the way a loaf or baguette
+// is, so they always decompose regardless of whether they coat/fill a "focus" or "carrier" dish.
+const DECOMPOSITION_RULE = `Never name a non-bread sub-preparation (batter, crust, breading, filling, glaze, frosting, marinade, etc.) as an ingredient by itself -- always decompose it into the real base ingredients it is made from (flour, sugar, butter, eggs, yeast, milk, salt, oil, etc.), even when it's only part of a larger dish. A sub-preparation name is a placeholder, not an ingredient, and must never appear in your output. Exception: a simple, single-purpose condiment/sauce that is commonly used and sourced as one finished product (ketchup, mustard, soy sauce, mayonnaise, plain tomato/pizza sauce) may still be named as itself -- only decompose a sauce or filling further if it's itself a multi-component preparation specific to this dish (a curry sauce, gravy, or fruit pie filling), the same way "batter" must be decomposed.
+
+Bread and dough (bread, bun, roll, dough, baguette, ciabatta, pita, tortilla, toast, etc.) follow a DIFFERENT rule, because which treatment is correct depends on what the dish actually is:
+
+- If the bread/dough IS the dish's own preparation focus -- the thing that's actually being made, such that the dish wouldn't exist or be recognizable without it (pizza dough, pie/tart crust, a loaf of bread, a cake, muffins, pancakes, flatbread served as the entree) -- decompose it into its real base ingredients, exactly like any other sub-preparation.
+- If the bread is just an accompanying carrier/component alongside a protein or filling that is the dish's actual focus -- such that the dish is still fundamentally the same dish without it (a sandwich, burger, wrap, slider, hot dog) -- do NOT decompose it. Instead name the specific real bread/wrap type as a single ingredient (e.g. "brown bread", "toast", "baguette", "ciabatta", "samoli", "pita bread", "burger bun", "flour tortilla") -- something a chef can directly edit to match what's actually used, not baking components she'd have to delete.
 
 Example -- WRONG (uses a sub-preparation as a placeholder):
 "Pizza" -> "dough - tomato sauce - mozzarella cheese"
-Example -- RIGHT (the dough is decomposed into its real base ingredients; tomato sauce and mozzarella cheese are themselves finished ingredients, not further sub-preparations, so they stay as-is):
+Example -- RIGHT (dough IS the preparation focus here, so it's decomposed into its real base ingredients; tomato sauce and mozzarella cheese are themselves finished ingredients, not further sub-preparations, so they stay as-is):
 "Pizza" -> "all-purpose flour - sugar - salt - butter - milk - yeast - olive oil - tomato sauce - mozzarella cheese"
 
 Example -- WRONG (filling left as a placeholder):
 "Apple Pie" -> "pie crust - apple filling"
-Example -- RIGHT (both crust and filling are decomposed into real base ingredients):
+Example -- RIGHT (crust IS the preparation focus of a pie, so both crust and filling are decomposed into real base ingredients):
 "Apple Pie" -> "all-purpose flour - butter - salt - apples - sugar - cinnamon - cornstarch - lemon juice"
 
-Example -- WRONG (bread left as a placeholder even though it's just one part of the dish):
-"Grilled Chicken Sandwich" -> "chicken breast - bread - lettuce - tomato - mayonnaise"
-Example -- RIGHT (the bread is decomposed into its real base ingredients too, same as the dough/crust cases above):
-"Grilled Chicken Sandwich" -> "chicken breast - all-purpose flour - yeast - salt - sugar - olive oil - lettuce - tomato - mayonnaise"`;
+Example -- WRONG (the bread is just a carrier here, not the preparation focus -- the dish is still "grilled chicken" without it -- so decomposing it into baking components is unwanted noise):
+"Grilled Chicken Sandwich" -> "chicken breast - all-purpose flour - yeast - salt - sugar - olive oil - lettuce - tomato - mayonnaise"
+Example -- RIGHT (the bread is named as a real, editable ingredient instead):
+"Grilled Chicken Sandwich" -> "chicken breast - brown bread - lettuce - tomato - mayonnaise"
+
+Example -- RIGHT (same carrier logic for a burger bun; the patty is the dish's focus, not the bun):
+"Beef Burger" -> "ground beef - burger bun - lettuce - tomato - onion - ketchup - mustard"
+
+Example -- RIGHT (a coating/breading is NOT bread, so it still decomposes normally, even though the sandwich's own bread stays as one ingredient right next to it):
+"Fried Chicken Sandwich" -> "chicken breast - all-purpose flour - eggs - breadcrumbs - salt - pepper - brown bread - lettuce - mayonnaise"`;
+
+// The model's other common failure mode on multi-component dishes: dropping a component the dish
+// name itself calls out (most often the protein) while still faithfully listing the rest, e.g.
+// "Lamb with Green Beans and Carrots" coming back as just "green beans - carrots - olive oil -
+// salt" with the lamb silently missing. Kept as its own constant/example, same reasoning as the
+// other two rules above.
+const COMPLETENESS_RULE = `Every distinct food component explicitly named in the dish's own name must be represented somewhere in its ingredient list -- do not silently drop one, especially the protein (meat, poultry, fish, egg, legume, etc.) in a dish named "[protein] with [sides]". Check your own output against the dish name before finalizing: if the name says "Lamb with Green Beans and Carrots", the word "lamb" (or a specific lamb cut/cook, e.g. "lamb stew meat") must appear in the ingredients -- not just the green beans and carrots.
+
+Example -- WRONG (the named protein, lamb, is missing entirely):
+"Lamb with Green Beans and Carrots" -> "green beans - carrots - olive oil - garlic - salt - pepper"
+Example -- RIGHT (every component named in the dish -- lamb, green beans, carrots -- is represented):
+"Lamb with Green Beans and Carrots" -> "lamb - green beans - carrots - olive oil - garlic - salt - pepper"`;
 
 // Allergens are derived from the SAME decomposed ingredient list buildPrompt() asks for above
 // (that's why this is one call, not a separate Edge Function -- see index.ts's header comment)
@@ -116,13 +152,15 @@ For each school/staff cafeteria dish name below, suggest a plausible list of its
 
 ${DECOMPOSITION_RULE}
 
+${COMPLETENESS_RULE}
+
 Format each dish's ingredients as a SINGLE string of ingredient names separated by " - " (space, hyphen, space), all lowercase, no quantities/measurements/units, no "and" before the last item, ordered roughly by prominence (main ingredients first, seasonings/condiments last). Keep each list reasonably concise -- typically 5 to 14 ingredients; a composite dish whose base preparation (dough, batter, filling) has been decomposed per the rule above will naturally run longer than a simple dish, and that's expected. Example format: "zucchini - red onions - shallots - olive oil - butter - salt".
 
 ${ALLERGEN_RULE}
 
 Each item carries its own "index" number. Return exactly one entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate suggestion. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
 
-Remember: absolutely no nuts or nut-derived ingredients anywhere in your output -- neither in the ingredients list nor as an allergen -- per the restriction stated at the top. And per the decomposition rule above, never leave a sub-preparation (dough, batter, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients.
+Remember: absolutely no nuts or nut-derived ingredients anywhere in your output -- neither in the ingredients list nor as an allergen -- per the restriction stated at the top. Per the decomposition rule above, never leave a non-bread sub-preparation (batter, breading, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients -- and only decompose bread/dough itself when it's the dish's own preparation focus, not when it's just a carrier alongside the dish's real focus. And per the completeness rule above, double-check that every component named in the dish's own title -- protein included -- actually appears in your ingredient list before finalizing.
 
 Items (JSON array): ${JSON.stringify(items)}`;
 }
