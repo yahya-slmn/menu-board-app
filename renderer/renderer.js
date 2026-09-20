@@ -2646,7 +2646,7 @@ function renderRecipePreviewBody(ns, model, photoDataUrls) {
           ${renderPreviewIngredientsTable(labels, proc.ingredients, proc.totalQuantity, false, labels.noteColumnHeader)}
           <div class="preview-fields-grid preview-fields-grid-inline">
             <div class="preview-field"><span class="preview-field-label">${labels.totalQuantity}</span><span class="preview-field-strong">${proc.totalQuantity}</span></div>
-            ${(proc.wastes || []).map(w => `<div class="preview-field"><span class="preview-field-label">${w.name}</span><span>${w.percent}%</span></div>`).join('')}
+            ${(proc.wastes || []).map(w => `<div class="preview-field"><span class="preview-field-label">${w.name}</span><span>${w.percent}% <span class="preview-waste-reduced">${w.reduced}</span> → ${w.after}</span></div>`).join('')}
             <div class="preview-field"><span class="preview-field-label">${labels.netWeight}</span><span class="preview-field-strong">${proc.netWeight}</span></div>
             ${proc.materialName ? `<div class="preview-field"><span class="preview-field-label">${labels.materialLabel}</span><span>${proc.materialName}</span></div>` : ''}
             ${proc.traysNeeded !== '' ? `<div class="preview-field"><span class="preview-field-label">${labels.traysNeeded}</span><span class="preview-field-strong">${proc.traysNeeded}</span></div>` : ''}
@@ -2729,6 +2729,48 @@ function compoundWasteYield(baseQty, wastes) {
   }, baseQty));
 }
 
+// Per-waste display breakdown: how much THIS waste removed (against the running total right
+// before it, never the original Total Quantity) and what's left running into the next one --
+// shared by the recipe form's Wastes Applied rows (renderProcessWastes) and the Calculator's own
+// (renderCalcProcessWastes). Each row's `after` is computed via compoundWasteYield(baseQty,
+// wastes.slice(0, i+1)) -- i.e. fresh from the raw, unrounded baseQty every time, rounding only
+// once per call, exactly like compoundWasteYield's own single call for the real Net Weight --
+// rather than chaining through previously-ROUNDED `after` values. Chaining rounded intermediates
+// instead can drift from the real Net Weight by a hundredth of a gram once there are 3+ wastes
+// (confirmed: 100g through two 33.333% wastes rounds to 44.45g chained vs. the correct 44.44g),
+// which would silently disagree with the Net Weight box sitting right below these rows. Because
+// of this, the LAST row's `after` is always bit-for-bit the same number compoundWasteYield(baseQty,
+// wastes) itself produces -- never a separately-derived figure that could drift out of sync.
+function computeWasteWaterfall(baseQty, wastes) {
+  const list = wastes || [];
+  const rows = [];
+  let before = roundNice(baseQty);
+  for (let i = 0; i < list.length; i++) {
+    const after = compoundWasteYield(baseQty, list.slice(0, i + 1));
+    rows.push({ before, after, reduced: roundNice(before - after) });
+    before = after;
+  }
+  return rows;
+}
+
+// Updates just the two computed spans inside each already-rendered waste row (reduced amount +
+// running total) without touching the percent <input> itself -- lets this run on every Total/Net
+// Weight recompute (including a keystroke in a waste's own % field, via updateProcessNetWeight/
+// refreshProcessCalc below) without stealing focus mid-edit. renderProcessWastes/
+// renderCalcProcessWastes only rebuild the whole row list on add/remove, where a fresh render (and
+// therefore losing focus) is already expected. `idPrefix` is 'ew' for the recipe form's own row
+// ids or 'calc' for the Calculator's, matching each one's existing id scheme for the percent input.
+function refreshProcessWasteWaterfallDisplay(proc, baseQty, idPrefix) {
+  const waterfall = computeWasteWaterfall(baseQty, proc.wastes);
+  proc.wastes.forEach((w, i) => {
+    const row = waterfall[i];
+    const reducedEl = document.getElementById(`${idPrefix}-waste-reduced-${proc.localId}-${w.localId}`);
+    const runningEl = document.getElementById(`${idPrefix}-waste-running-${proc.localId}-${w.localId}`);
+    if (reducedEl) reducedEl.textContent = row.reduced > 0 ? `−${row.reduced} G` : '0 G';
+    if (runningEl) runningEl.textContent = `→ ${row.after} G`;
+  });
+}
+
 // Same reduction as compoundWasteYield above (baseQty=1 gives exactly the compounded retention
 // fraction, Net Weight / Total Quantity), deliberately NOT reusing compoundWasteYield itself --
 // that function's own roundNice at the end is fine for a DISPLAYED weight but would inject up to
@@ -2791,6 +2833,12 @@ function updateProcessNetWeight(proc) {
   // Same guard as totalEl above -- Net Weight is now also editable (see
   // wireProcessNetWeightRescale), and must not fight her mid-edit either.
   if (document.activeElement !== yieldEl) yieldEl.value = `${netWeight} G`;
+
+  // Keeps every waste row's own reduced-amount/running-total spans in lockstep with this exact
+  // totalQty/netWeight recompute -- covers every path that leads here (ingredient edits, Total
+  // Quantity/Net Weight rescale, and a waste's own % edit, since that also funnels through here
+  // via onChange -- see renderProcessWastes), so there's exactly one place this ever goes stale.
+  refreshProcessWasteWaterfallDisplay(proc, totalQty, 'ew');
 
   // Trays Needed -- how many of this process's linked material (tray/pan/mold) are required to
   // hold its full Net Weight, rounded UP (a partially-filled tray still counts as one you need to
@@ -3349,12 +3397,15 @@ function wasteRowIsChanged(w) {
   return w.originalPercent != null && parseFloat(w.percent) !== parseFloat(w.originalPercent);
 }
 
-function renderProcessWasteRow(proc, w) {
+function renderProcessWasteRow(proc, w, row) {
+  const reducedText = row.reduced > 0 ? `−${row.reduced} G` : '0 G';
   return `
     <div class="process-waste-row" data-waste="${w.localId}">
       <span class="process-waste-name" dir="auto">${w.name}</span>
       <input type="number" min="0" max="100" step="0.1" id="ew-waste-${proc.localId}-${w.localId}" class="process-waste-percent" value="${w.percent ?? ''}" />
       <span class="process-waste-percent-sign">%</span>
+      <span class="process-waste-reduced" id="ew-waste-reduced-${proc.localId}-${w.localId}">${reducedText}</span>
+      <span class="process-waste-running" id="ew-waste-running-${proc.localId}-${w.localId}">→ ${row.after} G</span>
       <button type="button" class="icon-btn" data-update-waste="${w.localId}" ${wasteRowIsChanged(w) ? '' : 'hidden'}>Update</button>
       <button type="button" class="icon-btn danger" data-remove-waste="${w.localId}">Remove</button>
     </div>
@@ -3366,8 +3417,13 @@ function renderProcessWastes(proc, wasteTypes, onChange) {
   const selectEl = document.querySelector(`[data-add-waste="${proc.localId}"]`);
   if (!rowsEl || !selectEl) return;
 
+  // Base quantity the waterfall's first row reduces against -- the process's own Total Quantity,
+  // same figure ep-total-<id> itself shows (see updateProcessNetWeight).
+  const baseQty = sumIngredientQuantities(proc.ingredientRows);
+  const waterfall = computeWasteWaterfall(baseQty, proc.wastes);
+
   rowsEl.innerHTML = proc.wastes.length > 0
-    ? proc.wastes.map(w => renderProcessWasteRow(proc, w)).join('')
+    ? proc.wastes.map((w, i) => renderProcessWasteRow(proc, w, waterfall[i])).join('')
     : `<div class="process-waste-empty">No wastes applied.</div>`;
 
   proc.wastes.forEach(w => {
@@ -5902,12 +5958,15 @@ function renderRecipeAutocompleteList(listEl, matches, inputEl, onPick, emptyMes
   });
 }
 
-function renderCalcProcessWasteRow(proc, w) {
+function renderCalcProcessWasteRow(proc, w, row) {
+  const reducedText = row.reduced > 0 ? `−${row.reduced} G` : '0 G';
   return `
     <div class="process-waste-row" data-waste="${w.localId}">
       <span class="process-waste-name" dir="auto">${w.name}</span>
       <input type="number" min="0" max="100" step="0.1" id="calc-waste-${proc.localId}-${w.localId}" class="process-waste-percent" value="${w.percent ?? ''}" />
       <span class="process-waste-percent-sign">%</span>
+      <span class="process-waste-reduced" id="calc-waste-reduced-${proc.localId}-${w.localId}">${reducedText}</span>
+      <span class="process-waste-running" id="calc-waste-running-${proc.localId}-${w.localId}">→ ${row.after} G</span>
       <button type="button" class="icon-btn danger" data-calc-remove-waste="${w.localId}">Remove</button>
     </div>
   `;
@@ -5925,8 +5984,14 @@ function renderCalcProcessWastes(proc, wasteTypes, onChange) {
   const selectEl = document.querySelector(`[data-calc-add-waste="${proc.localId}"]`);
   if (!rowsEl || !selectEl) return;
 
+  // Same basis refreshProcessCalc itself uses for proc.totalQuantity -- computed directly here
+  // (not read off proc.totalQuantity) so the very first render is correct even before
+  // refreshProcessCalc has run once.
+  const baseQty = sumIngredientQuantities(proc.scaledIngredients || []);
+  const waterfall = computeWasteWaterfall(baseQty, proc.wastes);
+
   rowsEl.innerHTML = proc.wastes.length > 0
-    ? proc.wastes.map(w => renderCalcProcessWasteRow(proc, w)).join('')
+    ? proc.wastes.map((w, i) => renderCalcProcessWasteRow(proc, w, waterfall[i])).join('')
     : `<div class="process-waste-empty">No wastes applied.</div>`;
 
   proc.wastes.forEach(w => {
@@ -6156,6 +6221,10 @@ function renderCalcProcessCards(ns, workingProcesses, processesShown, wasteTypes
     const yieldEl = document.getElementById(`calc-netweight-${proc.localId}`);
     if (totalEl) totalEl.textContent = `${proc.totalQuantity} G`;
     if (yieldEl) yieldEl.textContent = `${proc.netWeight} G`;
+
+    // Same reasoning as updateProcessNetWeight's own call -- covers every path that recomputes
+    // this process's totals, waste % edits included (see renderCalcProcessWastes' onChange).
+    refreshProcessWasteWaterfallDisplay(proc, proc.totalQuantity, 'calc');
 
     // Trays Needed -- same ceil-not-round reasoning as updateProcessNetWeight's ep-trays-<id> in
     // the recipe form, just against this process's SCALED Net Weight instead of the unscaled one.
