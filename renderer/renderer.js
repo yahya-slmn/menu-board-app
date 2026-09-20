@@ -424,6 +424,7 @@ function showToast(message) {
   if (existing) existing.remove();
   const el = document.createElement('div');
   el.className = 'toast';
+  el.setAttribute('role', 'status');
   el.textContent = message;
   document.body.appendChild(el);
   requestAnimationFrame(() => el.classList.add('visible'));
@@ -594,7 +595,7 @@ function renderSectionNav() {
 }
 
 // The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
-const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll', 'menuIngredients'];
+const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll', 'menuIngredients', 'cleanMenu'];
 
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
@@ -633,6 +634,8 @@ function wireNav() {
 function updateActiveViewButtons() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.view === state.currentView);
+    if (btn.dataset.view === state.currentView) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
   });
   document.getElementById('menu-parent-btn').classList.toggle('active', MENU_GROUP_VIEWS.includes(state.currentView));
 }
@@ -640,36 +643,49 @@ function updateActiveViewButtons() {
 function updateItemCatalogExpansion() {
   const expanded = state.currentView === 'items' && state.itemCatalogExpanded;
   document.getElementById('section-nav').style.display = expanded ? 'block' : 'none';
+  document.querySelector('[data-view="items"]').setAttribute('aria-expanded', String(expanded));
   const caret = document.getElementById('items-caret');
   if (caret) caret.textContent = expanded ? '▾' : '▸';
 
   const menuExpanded = MENU_GROUP_VIEWS.includes(state.currentView) && state.menuGroupExpanded;
   document.getElementById('menu-sublist').style.display = menuExpanded ? 'block' : 'none';
+  document.getElementById('menu-parent-btn').setAttribute('aria-expanded', String(menuExpanded));
   const menuCaret = document.getElementById('menu-caret');
   if (menuCaret) menuCaret.textContent = menuExpanded ? '▾' : '▸';
 }
 
-function renderView() {
+async function renderView() {
   updateActiveViewButtons();
   updateItemCatalogExpansion();
   const main = document.getElementById('main');
+  main.dataset.view = state.currentView;
   main.classList.toggle('build-mode', state.currentView === 'build');
-  if (state.currentView === 'items') return renderItemsView(main);
-  if (state.currentView === 'generate') return renderGenerateView(main);
-  if (state.currentView === 'build') return renderBuildMenuView(main);
-  if (state.currentView === 'history') return renderHistoryView(main);
-  if (state.currentView === 'exportAll') return renderExportAllView(main);
-  if (state.currentView === 'menuIngredients') return renderMenuIngredientsView(main);
-  if (state.currentView === 'cleanMenu') return renderCleanMenuView(main);
-  if (state.currentView === 'recipes') return renderRecipesView(main);
-  if (state.currentView === 'extractor') return renderExtractorView(main);
-  if (state.currentView === 'recipeGenerator') return renderRecipeGeneratorView(main);
-  if (state.currentView === 'calculator') return renderCalculatorView(main);
-  if (state.currentView === 'recipeOnFire') return renderRecipeOnFireView(main);
-  if (state.currentView === 'ingredients') return renderIngredientsView(main);
-  if (state.currentView === 'extractedIngredients') return renderExtractedIngredientsView(main);
-  if (state.currentView === 'materials') return renderMaterialsView(main);
-  if (state.currentView === 'doughShapes') return renderDoughShapesView(main);
+  try {
+  if (state.currentView === 'items') return await renderItemsView(main);
+  if (state.currentView === 'generate') return await renderGenerateView(main);
+  if (state.currentView === 'build') return await renderBuildMenuView(main);
+  if (state.currentView === 'history') return await renderHistoryView(main);
+  if (state.currentView === 'exportAll') return await renderExportAllView(main);
+  if (state.currentView === 'menuIngredients') return await renderMenuIngredientsView(main);
+  if (state.currentView === 'cleanMenu') return await renderCleanMenuView(main);
+  if (state.currentView === 'recipes') return await renderRecipesView(main);
+  if (state.currentView === 'extractor') return await renderExtractorView(main);
+  if (state.currentView === 'recipeGenerator') return await renderRecipeGeneratorView(main);
+  if (state.currentView === 'calculator') return await renderCalculatorView(main);
+  if (state.currentView === 'recipeOnFire') return await renderRecipeOnFireView(main);
+  if (state.currentView === 'ingredients') return await renderIngredientsView(main);
+  if (state.currentView === 'extractedIngredients') return await renderExtractedIngredientsView(main);
+  if (state.currentView === 'materials') return await renderMaterialsView(main);
+  if (state.currentView === 'doughShapes') return await renderDoughShapesView(main);
+  } catch (error) { showViewError(error); }
+}
+
+function showViewError(error) {
+  const main = document.getElementById('main');
+  main.classList.remove('build-mode');
+  main.innerHTML = `<div class="empty-state view-error" role="alert"><div class="display">Couldn’t load this view</div><p></p><button class="secondary" id="retry-view">Try again</button></div>`;
+  main.querySelector('p').textContent = error?.message || 'Check your connection and try again.';
+  main.querySelector('#retry-view').addEventListener('click', () => state.currentSection ? renderView() : init().catch(showViewError));
 }
 
 function currentSectionName() {
@@ -708,7 +724,7 @@ async function renderItemsView(main) {
         ${proteinTypes.map(p => `<option value="${p.code}">${p.name}</option>`).join('')}
       </select>
     </div>
-    <div id="items-content">Loading…</div>
+    <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
 
@@ -794,10 +810,10 @@ async function renderItemsView(main) {
     }
 
     content.innerHTML = `
-      <table class="items-table dish-catalog-table">
+      <div class="table-scroll"><table class="items-table dish-catalog-table">
         <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Tags</th><th>RC</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
-      </table>
+      </table></div>
     `;
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
@@ -1233,7 +1249,7 @@ function renderMenuResult(container, menuId, days, warnings, createdBy) {
 async function renderHistoryView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>History</h1><span class="section-pill">Every generated menu, all sections</span></div>
+      <div><h1>History</h1><span class="page-description">Every generated menu, all sections</span></div>
     </div>
     <div id="history-list"></div>
     <div id="history-detail"></div>
@@ -1251,7 +1267,7 @@ async function renderHistoryView(main) {
       <label><input type="checkbox" id="history-select-all" /> Select All</label>
       <button class="secondary" id="history-delete-btn" disabled>Delete Selected</button>
     </div>
-    <table class="history-table">
+    <div class="table-scroll"><table class="history-table">
       <thead><tr><th></th><th>Name</th><th>Created By</th><th>Date</th><th>Section</th><th>Export</th></tr></thead>
       <tbody>
         ${menus.map(m => `
@@ -1265,7 +1281,7 @@ async function renderHistoryView(main) {
           </tr>
         `).join('')}
       </tbody>
-    </table>
+    </table></div>
   `;
 
   const selectAllEl = document.getElementById('history-select-all');
@@ -1364,7 +1380,7 @@ function renderBuildMenuView(main) {
   main.innerHTML = `
     <div class="build-scroll">
       <div class="topbar">
-        <div><h1>Build Menu</h1><span class="section-pill">Pick every dish yourself</span></div>
+        <div><h1>Build Menu</h1><span class="page-description">Pick every dish yourself</span></div>
       </div>
       <div class="generate-controls">
         <div class="field">
@@ -1684,7 +1700,7 @@ async function exportBuilderBlankTemplate() {
 async function renderExportAllView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Export All Sections</h1><span class="section-pill">One click, one workbook</span></div>
+      <div><h1>Export All Sections</h1><span class="page-description">One click, one workbook</span></div>
     </div>
     <p style="color:var(--neutral); max-width:640px; margin-bottom:20px;">
       Export all sections together.
@@ -1768,7 +1784,7 @@ function renderMenuIngredientsView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Menu Ingredients Generator</h1><span class="section-pill">Upload a menu, review AI-suggested ingredients, export -- nothing is saved</span></div>
+      <div><h1>Menu Ingredients Generator</h1><span class="page-description">Upload a menu, review AI-suggested ingredients, export -- nothing is saved</span></div>
     </div>
     <div class="generate-controls" style="align-items:center;">
       <button class="primary" id="mi-upload-btn">${hasUpload ? 'Upload Different File(s)' : 'Upload Menu File(s)'}</button>
@@ -2076,7 +2092,7 @@ function renderMenuIngredientsReview(container, rows) {
 function renderCleanMenuView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Clean Menu for Sharing</h1><span class="section-pill">Upload one or more exported menu files, get back clean copies -- formulas flattened to values, dropdowns removed, nothing else changes</span></div>
+      <div><h1>Clean Menu for Sharing</h1><span class="page-description">Upload one or more exported menu files, get back clean copies -- formulas flattened to values, dropdowns removed, nothing else changes</span></div>
     </div>
     <div class="generate-controls" style="align-items:center;">
       <button class="primary" id="cm-upload-btn">Upload Menu File(s)</button>
@@ -2295,8 +2311,8 @@ function groupRecipesBySourceMenu(list) {
 async function renderRecipeListView(main, ns) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>${ns.title}</h1><span class="section-pill">${ns.subtitle}</span></div>
-      <div style="display:flex; gap:10px; align-items:center;">
+      <div><h1>${ns.title}</h1><span class="page-description">${ns.subtitle}</span></div>
+      <div class="action-toolbar">
         ${ns.stateKey === RECIPE_NS.book.stateKey ? '<button class="secondary" id="waste-types-btn">Waste Types</button>' : ''}
         ${ns.extract ? '<button class="secondary" id="import-recipe-btn">Upload Recipe</button>' : ''}
         ${ns.allowManualNew ? '<button class="primary" id="new-recipe-btn">+ New Recipe</button>' : ''}
@@ -2308,13 +2324,13 @@ async function renderRecipeListView(main, ns) {
       <label for="recipe-search">${ns.searchLabel}</label>
       <input id="recipe-search" type="search" />
     </div>
-    <div style="margin-bottom:14px; display:flex; align-items:center; gap:10px;">
+    <div class="action-toolbar">
       <button class="secondary" id="export-selected-btn" disabled>Export Selected</button>
       ${exportLanguagePickerHtml('list')}
       <button class="secondary" id="delete-selected-btn" disabled>Delete Selected</button>
     </div>
     <div id="export-selected-progress-wrap"></div>
-    <div id="recipes-content">Loading…</div>
+    <div id="recipes-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   wireExportLanguagePicker('list');
   // Waste Types catalog is global (shared by Book and Extractor process cards alike), but its
@@ -2438,7 +2454,7 @@ async function renderRecipeListView(main, ns) {
             <span style="color:var(--neutral); font-weight:400;">(${group.recipes.length})</span>
           </label>
         </div>
-        <table class="recipes-table">
+        <div class="table-scroll"><table class="recipes-table">
           <thead><tr><th></th><th>Code</th><th>Name</th><th>Category</th><th>Prepared By</th><th>Date</th><th></th></tr></thead>
           <tbody>
             ${group.recipes.map(r => `
@@ -2457,7 +2473,7 @@ async function renderRecipeListView(main, ns) {
               </tr>
             `).join('')}
           </tbody>
-        </table>
+        </table></div>
       </div>
     `).join('');
 
@@ -3725,13 +3741,13 @@ async function renderRecipeFormView(main, ns) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${editing ? 'Edit Recipe' : 'New Recipe'}</h1>
-        <span class="section-pill">${editing ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
+        <span class="page-description">${editing ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
       </div>
       <button class="secondary" id="rf-back-btn">${ns.backLabel}</button>
     </div>
 
     <div class="generate-controls">
-      <div class="field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" dir="auto" /></div>
+      <div class="field recipe-name-field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" dir="auto" /></div>
       <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" dir="auto" /></div>
       <div class="field"><label>Portion Weight (g)</label><input id="rf-portion-weight" type="number" min="0" step="0.1" value="${recipe?.portion_weight_grams ?? ''}" /></div>
       <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" dir="auto" /></div>
@@ -3954,7 +3970,7 @@ async function renderRecipeFormView(main, ns) {
     container.innerHTML = s.processes.map((proc, idx) => `
       <div class="process-card" data-process="${proc.localId}">
         <div class="process-card-head">
-          <input class="process-name-input" value="${proc.name}" dir="auto" />
+          <input aria-label="Process name" placeholder="Name this process, e.g. dough or filling" class="process-name-input" value="${proc.name}" dir="auto" />
           <button type="button" class="icon-btn" data-move-process-up="${proc.localId}" title="Move process up" aria-label="Move process up" ${idx === 0 ? 'disabled' : ''}>▲</button>
           <button type="button" class="icon-btn" data-move-process-down="${proc.localId}" title="Move process down" aria-label="Move process down" ${idx === s.processes.length - 1 ? 'disabled' : ''}>▼</button>
           <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${s.processes.length <= 1 ? 'disabled' : ''}>Remove Process</button>
@@ -4299,8 +4315,8 @@ async function renderRecipeGeneratorTabs(main, ns) {
   const s = state[ns.stateKey];
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>${ns.title}</h1><span class="section-pill">${ns.subtitle}</span></div>
-      <div style="display:flex; gap:10px; align-items:center;">
+      <div><h1>${ns.title}</h1><span class="page-description">${ns.subtitle}</span></div>
+      <div class="action-toolbar">
         <button class="primary" id="rg-upload-btn">${s.fileName ? 'Upload a Different File' : 'Upload Menu File'}</button>
       </div>
     </div>
@@ -4385,7 +4401,7 @@ async function renderRecipeGeneratorTabs(main, ns) {
 // the review form's own back button already uses one level up, not a new interaction style.
 async function renderGeneratedDraftsList(container, ns, main) {
   const s = state[ns.stateKey];
-  container.innerHTML = 'Loading…';
+  container.innerHTML = '<div class="loading-state" role="status">Loading recipes…</div>';
   const drafts = await window.api.listGeneratedRecipeDrafts();
   if (s.draftFolder !== null) return renderDraftFolderContents(container, ns, main, drafts, s.draftFolder);
   return renderDraftFolderList(container, ns, main, drafts);
@@ -4416,7 +4432,7 @@ function renderDraftFolderList(container, ns, main, drafts) {
     .sort((a, b) => b.latest - a.latest);
 
   container.innerHTML = `
-    <table class="recipes-table rg-drafts-table">
+    <div class="table-scroll"><table class="recipes-table rg-drafts-table">
       <thead><tr><th>Source Menu</th><th>Pending Review</th><th></th></tr></thead>
       <tbody>
         ${folders.map((f, i) => `
@@ -4427,7 +4443,7 @@ function renderDraftFolderList(container, ns, main, drafts) {
           </tr>
         `).join('')}
       </tbody>
-    </table>
+    </table></div>
   `;
   container.querySelectorAll('[data-rg-open-folder]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -4505,12 +4521,12 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
 
   container.innerHTML = `
     ${backBtn}
-    <table class="recipes-table rg-drafts-table">
+    <div class="table-scroll"><table class="recipes-table rg-drafts-table">
       <thead><tr><th>Dish</th><th>Category</th><th>Source Menu</th><th>Generated</th><th></th></tr></thead>
       <tbody>
         ${tableRowsHtml}
       </tbody>
-    </table>
+    </table></div>
   `;
   wireBack();
   container.querySelectorAll('[data-rg-review]').forEach(btn => {
@@ -4536,13 +4552,13 @@ async function renderGeneratedConfirmedList(container, ns, main) {
       <label for="rg-search">${ns.searchLabel}</label>
       <input id="rg-search" type="search" />
     </div>
-    <div style="margin-bottom:14px; display:flex; align-items:center; gap:10px;">
+    <div class="action-toolbar">
       <button class="secondary" id="rg-export-selected-btn" disabled>Export Selected</button>
       ${exportLanguagePickerHtml('rglist')}
       <button class="secondary" id="rg-delete-selected-btn" disabled>Delete Selected</button>
     </div>
     <div id="rg-export-selected-progress-wrap"></div>
-    <div id="rg-list-content">Loading…</div>
+    <div id="rg-list-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   wireExportLanguagePicker('rglist');
 
@@ -4590,7 +4606,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
             <span style="color:var(--neutral); font-weight:400;">(${group.recipes.length})</span>
           </label>
         </div>
-        <table class="recipes-table rg-generated-table">
+        <div class="table-scroll"><table class="recipes-table rg-generated-table">
           <thead><tr><th></th><th>Code</th><th>Name</th><th>Category</th><th>Date</th><th></th></tr></thead>
           <tbody>
             ${group.recipes.map(r => `
@@ -4608,7 +4624,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
               </tr>
             `).join('')}
           </tbody>
-        </table>
+        </table></div>
       </div>
     `).join('');
 
@@ -4863,14 +4879,14 @@ async function renderGeneratedRecipeFormView(main, ns) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${isDraft ? 'Review Generated Recipe' : 'Edit Generated Recipe'}</h1>
-        <span class="section-pill">${recipe.code ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
+        <span class="page-description">${recipe.code ? recipe.code : `${ns.codeLabel} code assigned after saving`}</span>
       </div>
       <button class="secondary" id="rg-back-btn">${ns.backLabel}</button>
     </div>
     ${isDraft ? `<div style="color:var(--neutral); font-size:12.5px; margin:-10px 0 14px;">Generated from "${recipe.source_menu_label}" -- source dish: "${recipe.source_dish_name}". Review and edit below, then Confirm &amp; Save to assign an RG- code.</div>` : ''}
 
     <div class="generate-controls">
-      <div class="field"><label>Recipe Name</label><input id="rg-name" value="${recipe.name || ''}" dir="auto" /></div>
+      <div class="field recipe-name-field"><label>Recipe Name</label><input id="rg-name" value="${recipe.name || ''}" dir="auto" /></div>
       <div class="field"><label>Quantity Produced</label><input id="rg-qty" value="${recipe.quantity_produced || ''}" dir="auto" /></div>
       <div class="field"><label>Portion Weight (g)</label><input id="rg-portion-weight" type="number" min="0" step="0.1" value="${recipe.portion_weight_grams ?? ''}" /></div>
       <div class="field"><label>Prepared By</label><input id="rg-prepared-by" value="${recipe.prepared_by || ''}" dir="auto" /></div>
@@ -4991,7 +5007,7 @@ async function renderGeneratedRecipeFormView(main, ns) {
     container.innerHTML = s.processes.map((proc, idx) => `
       <div class="process-card" data-process="${proc.localId}">
         <div class="process-card-head">
-          <input class="process-name-input" value="${proc.name}" dir="auto" />
+          <input aria-label="Process name" placeholder="Name this process, e.g. dough or filling" class="process-name-input" value="${proc.name}" dir="auto" />
           <button type="button" class="icon-btn" data-move-process-up="${proc.localId}" title="Move process up" aria-label="Move process up" ${idx === 0 ? 'disabled' : ''}>▲</button>
           <button type="button" class="icon-btn" data-move-process-down="${proc.localId}" title="Move process down" aria-label="Move process down" ${idx === s.processes.length - 1 ? 'disabled' : ''}>▼</button>
           <button type="button" class="icon-btn danger" data-remove-process="${proc.localId}" ${s.processes.length <= 1 ? 'disabled' : ''}>Remove Process</button>
@@ -5312,12 +5328,12 @@ function computeMultiplierFromTargetPortions(processes, targetPortionsText, port
 function renderCalculatorView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Recipe Calculator</h1><span class="section-pill">Scale a recipe -- export only, nothing is saved</span></div>
+      <div><h1>Recipe Calculator</h1><span class="page-description">Scale a recipe -- export only, nothing is saved</span></div>
     </div>
 
     <div class="generate-controls">
-      <div class="field" style="max-width:220px;">
-        <label>Source</label>
+      <div class="field source-field">
+        <label>Recipe source</label>
         <div class="mode-toggle">
           <button type="button" class="mode-toggle-btn active" data-source="book">Recipe Book</button>
           <button type="button" class="mode-toggle-btn" data-source="extractor">Recipe Extractor</button>
@@ -6163,7 +6179,7 @@ function renderCalcProcessCards(ns, workingProcesses, processesShown, wasteTypes
   mountEl.innerHTML = processesShown.map((proc, idx) => `
     <div class="process-card" data-process="${proc.localId}">
       <div class="process-card-head">
-        <input class="process-name-input" value="${proc.name}" dir="auto" placeholder="Process name" />
+        <input aria-label="Process name" placeholder="Name this process, e.g. dough or filling" class="process-name-input" value="${proc.name}" dir="auto" />
         <span style="font-size:12px; color:var(--neutral); font-weight:400;">×${roundNice(proc.multiplier ?? 1)}</span>
         <button type="button" class="icon-btn" data-move-process-up="${proc.localId}" title="Move process up" aria-label="Move process up" ${idx === 0 ? 'disabled' : ''}>▲</button>
         <button type="button" class="icon-btn" data-move-process-down="${proc.localId}" title="Move process down" aria-label="Move process down" ${idx === processesShown.length - 1 ? 'disabled' : ''}>▼</button>
@@ -6709,7 +6725,7 @@ async function renderIngredientsView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Ingredients</h1><span class="section-pill">Canonical ingredient master</span></div>
+      <div><h1>Ingredients</h1><span class="page-description">Canonical ingredient master</span></div>
       <button class="primary" id="add-ingredient-btn">+ Add Ingredient</button>
     </div>
     <div class="search-bar">
@@ -6721,7 +6737,7 @@ async function renderIngredientsView(main) {
         ${categoryNames.map(c => `<option value="${c}">${c}</option>`).join('')}
       </select>
     </div>
-    <div id="ingredients-content">Loading…</div>
+    <div id="ingredients-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-ingredient-btn').addEventListener('click', () => openIngredientModal());
 
@@ -6777,10 +6793,10 @@ async function renderIngredientsView(main) {
     }
 
     content.innerHTML = `
-      <table class="items-table">
+      <div class="table-scroll"><table class="items-table ingredients-table">
         <thead><tr><th>Category</th><th>Product Code</th><th>Name</th><th>Default Unit</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
-      </table>
+      </table></div>
     `;
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
@@ -6910,7 +6926,7 @@ async function openWasteTypesModal() {
     overlay.innerHTML = `
       <div class="modal">
         <h2>Waste Types</h2>
-        <table class="items-table">
+        <div class="table-scroll"><table class="items-table">
           <thead><tr><th>Name</th><th>Default %</th><th></th></tr></thead>
           <tbody>
             ${rows.map(r => `
@@ -6924,7 +6940,7 @@ async function openWasteTypesModal() {
               </tr>
             `).join('')}
           </tbody>
-        </table>
+        </table></div>
         <button type="button" class="secondary" id="wt-add-btn" style="margin:10px 0 16px;">+ Add Waste Type</button>
         <div class="actions">
           <button class="secondary" id="wt-close">Close</button>
@@ -7082,13 +7098,13 @@ async function renderExtractedIngredientsView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Extracted Ingredients</h1><span class="section-pill">Recipe Extractor ingredient list (EX-IN-)</span></div>
+      <div><h1>Extracted Ingredients</h1><span class="page-description">Recipe Extractor ingredient list (EX-IN-)</span></div>
     </div>
     <div class="search-bar">
       <label for="extracted-ingredient-search">Search by name</label>
       <input id="extracted-ingredient-search" type="search" />
     </div>
-    <div id="extracted-ingredients-content">Loading…</div>
+    <div id="extracted-ingredients-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
 
   const searchInput = document.getElementById('extracted-ingredient-search');
@@ -7121,10 +7137,10 @@ async function renderExtractedIngredientsView(main) {
     `);
 
     content.innerHTML = `
-      <table class="items-table">
+      <div class="table-scroll"><table class="items-table extracted-ingredients-table">
         <thead><tr><th>Product Code</th><th>Name</th><th>Default Unit</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
-      </table>
+      </table></div>
     `;
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
@@ -8214,7 +8230,7 @@ function computeCutterLayout(trayShapeType, trayFootprint, trayDims, cutterShape
 function renderRecipeOnFireView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Recipe on Fire</h1><span class="section-pill">Pick the process(es) going into one tray, then the tray itself</span></div>
+      <div><h1>Recipe on Fire</h1><span class="page-description">Pick the process(es) going into one tray, then the tray itself</span></div>
     </div>
 
     <div class="generate-controls">
@@ -9340,14 +9356,14 @@ async function renderMaterialsListView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Materials</h1><span class="section-pill">Trays, molds &amp; pans</span></div>
+      <div><h1>Materials</h1><span class="page-description">Trays, molds &amp; pans</span></div>
       <button class="primary" id="add-material-btn">+ Add Material</button>
     </div>
     <div class="search-bar">
       <label for="material-search">Search by name or code</label>
       <input id="material-search" type="search" />
     </div>
-    <div id="materials-content">Loading…</div>
+    <div id="materials-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-material-btn').addEventListener('click', () => openNewMaterialForm());
 
@@ -9412,10 +9428,10 @@ async function renderMaterialsListView(main) {
     }
 
     content.innerHTML = `
-      <table class="materials-table">
+      <div class="table-scroll"><table class="materials-table">
         <thead><tr><th>Category</th><th>Code</th><th>Name</th><th>Shape</th><th>Dimensions</th><th>Weight (g)</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
-      </table>
+      </table></div>
     `;
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
@@ -9459,7 +9475,7 @@ async function renderMaterialFormView(main) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${editing ? 'Edit Material' : 'New Material'}</h1>
-        <span class="section-pill">${editing ? material.code : 'MS code assigned after saving'}</span>
+        <span class="page-description">${editing ? material.code : 'MS code assigned after saving'}</span>
       </div>
       <button class="secondary" id="mf-back-btn">← Back to Materials</button>
     </div>
@@ -9703,10 +9719,10 @@ async function renderDoughShapesListView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Dough Shapes</h1><span class="section-pill">Real AI-generated reference photos for Recipe on Fire's dough placement</span></div>
+      <div><h1>Dough Shapes</h1><span class="page-description">Real AI-generated reference photos for Recipe on Fire's dough placement</span></div>
       <button class="primary" id="add-dough-shape-btn">+ Add Dough Shape</button>
     </div>
-    <div id="dough-shapes-content">Loading…</div>
+    <div id="dough-shapes-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-dough-shape-btn').addEventListener('click', openNewDoughShapeForm);
 
@@ -9726,20 +9742,23 @@ async function renderDoughShapesListView(main) {
   }));
 
   content.innerHTML = `
-    <div style="display:flex; flex-wrap:wrap; gap:16px;">
+    <div class="dough-shape-grid">
       ${thumbEntries.map(({ shape, dataUrl }) => `
-        <div class="computed-value-box dough-shape-card" data-shape-id="${shape.id}" style="width:200px; cursor:pointer;">
-          <div class="dough-shape-checker" style="width:100%; height:160px; border-radius:6px; margin-bottom:8px; display:flex; align-items:center; justify-content:center; overflow:hidden;">
+        <div class="dough-shape-card" data-shape-id="${shape.id}" tabindex="0" role="button" aria-label="View ${shape.name}">
+          <div class="dough-shape-image">
             ${dataUrl ? `<img src="${dataUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />` : '<span style="color:var(--neutral); font-size:12px;">No photo</span>'}
           </div>
-          <div style="font-weight:600;">${shape.name}</div>
-          <div style="font-size:12px; color:var(--neutral); margin-top:2px;">${roundNice(shape.unit_weight_grams)} g &nbsp;·&nbsp; ${roundNice(shape.size_cm)} cm</div>
+          <div class="dough-shape-name">${shape.name}</div>
+          <div class="dough-shape-meta">${roundNice(shape.unit_weight_grams)} g &nbsp;·&nbsp; ${roundNice(shape.size_cm)} cm</div>
           <button class="icon-btn danger" data-delete-shape="${shape.id}" style="margin-top:8px;">Delete</button>
         </div>
       `).join('')}
     </div>
   `;
   content.querySelectorAll('[data-shape-id]').forEach(card => {
+    card.addEventListener('keydown', (event) => {
+      if (event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); card.click(); }
+    });
     card.addEventListener('click', (e) => {
       if (e.target.closest('[data-delete-shape]')) return;
       state.doughShapes.view = 'gallery';
@@ -9762,11 +9781,11 @@ async function renderDoughShapesListView(main) {
 function renderDoughShapeFormView(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Add Dough Shape</h1><span class="section-pill">Generates 9 real reference photos (raw/baked/cut &times; 3 variations each) via AI</span></div>
+      <div><h1>Add Dough Shape</h1><span class="page-description">Generates 9 real reference photos (raw/baked/cut &times; 3 variations each) via AI</span></div>
     </div>
     <button class="secondary" id="dough-shape-form-back-btn" style="margin-bottom:14px;">← Back to Dough Shapes</button>
     <div style="font-size:12.5px; color:var(--neutral); margin-bottom:14px; max-width:560px;">
-      This calls the image-generation API 9 times (~2-3 minutes total, run concurrently) and costs real money per shape -- meant for a small, stable catalog (round ball, baguette, mini baguette, ciabatta, etc.), not something to regenerate casually.
+      Each shape includes nine AI-generated reference images. Allow about 2–3 minutes; image-generation charges apply. Choose a shape you will reuse in your kitchen.
     </div>
     <div class="generate-controls" style="margin-bottom:14px;">
       <div class="field" style="max-width:260px;">
@@ -9832,10 +9851,10 @@ async function renderDoughShapeGalleryView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>${shape.name}</h1><span class="section-pill">${roundNice(shape.unit_weight_grams)} g per unit &middot; ${roundNice(shape.size_cm)} cm</span></div>
+      <div><h1>${shape.name}</h1><span class="page-description">${roundNice(shape.unit_weight_grams)} g per unit &middot; ${roundNice(shape.size_cm)} cm</span></div>
     </div>
     ${backBtn}
-    <div id="dough-shape-gallery">Loading photos…</div>
+    <div id="dough-shape-gallery"><div class="loading-state" role="status">Loading photos…</div></div>
   `;
   document.getElementById('dough-shape-back-btn').addEventListener('click', goBackToDoughShapesList);
 
@@ -9854,17 +9873,17 @@ async function renderDoughShapeGalleryView(main) {
   }));
 
   galleryEl.innerHTML = sections.map(({ stage, dataUrls }) => `
-    <div style="margin-bottom:22px;">
-      <div style="font-weight:600; margin-bottom:8px;">${stageLabels[stage]}</div>
-      <div style="display:flex; gap:12px; flex-wrap:wrap;">
+    <section class="dough-gallery-stage">
+      <h2>${stageLabels[stage]}</h2>
+      <div class="dough-gallery-grid">
         ${dataUrls.length === 0 ? '<span style="color:var(--neutral); font-size:12.5px;">No photos for this stage.</span>' : dataUrls.map(url => `
-          <div style="width:220px; height:220px; border:1px solid var(--line); border-radius:8px; ${checkerStyle} display:flex; align-items:center; justify-content:center; overflow:hidden;">
+          <div class="dough-gallery-tile" style="${checkerStyle}">
             <img src="${url}" style="max-width:100%; max-height:100%; object-fit:contain;" />
           </div>
         `).join('')}
       </div>
-    </div>
+    </section>
   `).join('');
 }
 
-init();
+init().catch(showViewError);
