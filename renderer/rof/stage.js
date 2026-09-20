@@ -142,6 +142,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
 
   // ---- render loop (on demand) -----------------------------------------------------------------
   const tickers = new Set();
+  const frameHooks = new Set(); // called after every rendered frame
   let raf = 0, dirty = true, last = 0, disposed = false, hooks = [];
   let locked = false; // a fixed quality was chosen: the governor must not change it
   const governor = new FrameGovernor(() => {
@@ -179,6 +180,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
 
     // A ticker may itself have called requestRender() this frame (which already scheduled the next
     // one) -- only schedule if nothing is pending, or callbacks double every frame.
+    for (const fn of frameHooks) fn(); // DOM overlays that follow the 3D scene (scrap flags)
     if (active) { governor.sample(rawDt); if (!raf) raf = requestAnimationFrame(frame); }
     else { last = 0; governor.reset(); }
   }
@@ -217,6 +219,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
     get tier() { return tier; },
     get fps() { return governor.fps; },
     fit, animate, requestRender, resize, setView, setOvenLook,
+    addFrameHook(fn) { frameHooks.add(fn); return () => frameHooks.delete(fn); },
     get post() { return post; }, // exposed for tuning/tests
     setTier(name) { if (TIERS[name]) { tier = TIERS[name]; applyTier(); } },
     // 'auto' starts from what the GPU probe suggests and lets the governor step down; a tier name fixes it.

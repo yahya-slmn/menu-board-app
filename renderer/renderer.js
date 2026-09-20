@@ -8320,41 +8320,9 @@ function trayInteriorFootprint(shapeType, dims) {
   return null;
 }
 
-// ---- Recipe on Fire: cutter auto-layout (Phase 2c) ---------------------------------------------
-// Pure geometry helpers for tiling a cutter shape across a tray's usable interior -- a plain top-
-// down 2D problem, deliberately kept separate from the 3D dough-fill code above (see the Phase 2
-// plan: a new 2D canvas, not part of the 3D scene). All positions here are flat (x,z) plan-view
-// coordinates centered on the TRAY's own center, with NO 3D-world transform applied (the dough
-// code's local-Y-to-negative-world-Z convention is a 3D-scene-only concern; this module never
-// touches THREE.js at all) -- footprint.innerPts are used exactly as trayInteriorFootprint built
-// them.
-
-// Point-in-triangle via same-sign-of-all-three-cross-products -- pts is [[x,z],[x,z],[x,z]] in
-// either winding (this test is winding-agnostic, unlike insetPolygon).
-function pointInTriangle(px, pz, pts) {
-  const [a, b, c] = pts;
-  const sign = (p1, p2, p3) => (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1]);
-  const d1 = sign([px, pz], a, b), d2 = sign([px, pz], b, c), d3 = sign([px, pz], c, a);
-  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0, hasPos = d1 > 0 || d2 > 0 || d3 > 0;
-  return !(hasNeg && hasPos);
-}
-
-// A cutter's own "how far can its center be from a boundary before the shape itself pokes past
-// it" radius -- exact for round (its own radius), a conservative (slightly-safe) estimate for
-// rectangular (half-diagonal) and triangle (circumradius of the isoceles base/triHeight shape).
-// Used to shrink the tray's usable interior by BOTH the chef's margin AND this radius, then test
-// only each candidate's CENTER point against that shrunk region -- the "advisory, not pixel-
-// perfect" simplification agreed for v1 (a few valid tight-corner placements may be conservatively
-// rejected, which is fine for a low-waste estimate).
-function cutterBoundingRadiusCm(shapeType, dims) {
-  if (shapeType === 'round') return (dims.diameterCm || 0) / 2;
-  if (shapeType === 'rectangular') return Math.hypot((dims.lengthCm || 0) / 2, (dims.widthCm || 0) / 2);
-  if (shapeType === 'triangle') {
-    const b = dims.baseCm || 0, h = dims.triHeightCm || 0.001;
-    return ((b / 2) ** 2 + h ** 2) / (2 * h); // circumradius: sides^2 / (2h) for this isoceles case
-  }
-  return 0;
-}
+// ---- Recipe on Fire: cutter measurements -----------------------------------------------------
+// Area and label of one cutter piece. (Where cutters go -- the auto-arrange packing -- lives in
+// renderer/rof/packing.js.)
 
 function cutterUnitAreaCm2(shapeType, dims) {
   if (shapeType === 'round') return Math.PI * ((dims.diameterCm || 0) / 2) ** 2;
@@ -8371,145 +8339,6 @@ function cutterPieceSizeLabel(shapeType, dims) {
   if (shapeType === 'rectangular') return `${roundNice(dims.lengthCm)} × ${roundNice(dims.widthCm)} cm`;
   if (shapeType === 'triangle') return `Base ${roundNice(dims.baseCm)} × H ${roundNice(dims.triHeightCm)} cm`;
   return '';
-}
-
-// Is a candidate CENTER point still inside the tray's own interior once shrunk by
-// `effectiveInsetCm` (margin + the cutter's own bounding radius, see above)? Reuses
-// trayInteriorFootprint's own innerR/innerL/innerW/innerPts fields directly.
-function candidateFitsInterior(x, z, trayShapeType, footprint, effectiveInsetCm) {
-  if (trayShapeType === 'round') return Math.hypot(x, z) <= footprint.innerR - effectiveInsetCm;
-  if (trayShapeType === 'rectangular') {
-    return Math.abs(x) <= footprint.innerL / 2 - effectiveInsetCm && Math.abs(z) <= footprint.innerW / 2 - effectiveInsetCm;
-  }
-  if (trayShapeType === 'triangle') {
-    return pointInTriangle(x, z, insetPolygon(footprint.innerPts, effectiveInsetCm));
-  }
-  return false;
-}
-
-// The tray's own bounding box (in the same untransformed plan-view (x,z) coordinates as
-// everything else in this module) -- what the corner-sweep generators below anchor/sweep against.
-// Round's own box is its circumscribed square; the containment filter naturally clips circle
-// candidates near the box's corners (outside the real round boundary) same as any other shape.
-function trayBoundingBox(shapeType, footprint) {
-  if (shapeType === 'round') return { x0: -footprint.innerR, x1: footprint.innerR, z0: -footprint.innerR, z1: footprint.innerR };
-  if (shapeType === 'rectangular') return { x0: -footprint.innerL / 2, x1: footprint.innerL / 2, z0: -footprint.innerW / 2, z1: footprint.innerW / 2 };
-  if (shapeType === 'triangle') {
-    const xs = footprint.innerPts.map(p => p[0]), zs = footprint.innerPts.map(p => p[1]);
-    return { x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
-  }
-  return { x0: -10, x1: 10, z0: -10, z1: 10 };
-}
-
-// Which corner of the tray's bounding box a sweep starts from -- x/z are which BOUND to start
-// AT (+1 = start at x1/z1, -1 = start at x0/z0); the sweep then proceeds in the opposite
-// direction. "tl"/"tr"/"bl"/"br" match how the 2D canvas already draws +z as "up the page".
-const ROF_LAYOUT_CORNERS = {
-  tl: { x: -1, z: 1 }, tr: { x: 1, z: 1 }, bl: { x: -1, z: -1 }, br: { x: 1, z: -1 },
-};
-
-// Hexagonal offset packing, anchored at one bounding-box corner and swept row-by-row outward --
-// NOT centered on the tray -- so leftover space concentrates at the far edge(s) from the start
-// corner, the way a chef actually cutting dough would work, rather than being split evenly on
-// both sides (confirmed wrong-looking at the centered version: circles read as rigidly
-// symmetric with wasted margin on every side at once). Rows spaced at diameter*(sqrt(3)/2) (plus
-// the gap), alternate rows offset sideways by radius+gap/2 -- the standard "close-packed circles"
-// arrangement (~90.6% density vs. ~78.5% for a plain square grid).
-function generateHexCandidates(diameterCm, gapCm, bounds, corner) {
-  const stepX = diameterCm + gapCm;
-  const stepZ = stepX * (Math.sqrt(3) / 2);
-  const dirX = corner.x > 0 ? -1 : 1, dirZ = corner.z > 0 ? -1 : 1;
-  const startX = corner.x > 0 ? bounds.x1 - diameterCm / 2 : bounds.x0 + diameterCm / 2;
-  const startZ = corner.z > 0 ? bounds.z1 - diameterCm / 2 : bounds.z0 + diameterCm / 2;
-  const nRows = Math.ceil((bounds.z1 - bounds.z0) / stepZ) + 1;
-  const nCols = Math.ceil((bounds.x1 - bounds.x0) / stepX) + 1;
-  const candidates = [];
-  for (let row = 0; row <= nRows; row++) {
-    const z = startZ + dirZ * row * stepZ;
-    const offset = (row % 2 !== 0) ? (stepX / 2) * dirX : 0;
-    for (let col = 0; col <= nCols; col++) candidates.push({ x: startX + dirX * col * stepX + offset, z });
-  }
-  return candidates;
-}
-
-// Plain grid, same corner-anchored sweep as generateHexCandidates -- step = size + gap per axis,
-// no rotation (v1 scope, per the agreed plan).
-function generateGridCandidates(sizeXCm, sizeZCm, gapCm, bounds, corner) {
-  const stepX = sizeXCm + gapCm, stepZ = sizeZCm + gapCm;
-  const dirX = corner.x > 0 ? -1 : 1, dirZ = corner.z > 0 ? -1 : 1;
-  const startX = corner.x > 0 ? bounds.x1 - sizeXCm / 2 : bounds.x0 + sizeXCm / 2;
-  const startZ = corner.z > 0 ? bounds.z1 - sizeZCm / 2 : bounds.z0 + sizeZCm / 2;
-  const nRows = Math.ceil((bounds.z1 - bounds.z0) / stepZ) + 1;
-  const nCols = Math.ceil((bounds.x1 - bounds.x0) / stepX) + 1;
-  const candidates = [];
-  for (let row = 0; row <= nRows; row++) {
-    const z = startZ + dirZ * row * stepZ;
-    for (let col = 0; col <= nCols; col++) candidates.push({ x: startX + dirX * col * stepX, z });
-  }
-  return candidates;
-}
-
-// Alternating up/down triangle pairing -- an "up" triangle (base on a row's bottom edge, apex on
-// its top edge) and a "down" triangle (apex on the bottom edge, base on the top edge) tile one
-// base x triHeight strip with zero gaps between them; stacking strips tiles the whole plane the
-// same way. `gapCm` is folded directly into the tiling STEP (not a post-shrink of each triangle),
-// same convention generateGridCandidates/generateHexCandidates use. Only the LEFT/RIGHT start
-// corner is respected here (`corner.x`) -- rows always build upward from the tray's own bottom
-// edge (bounds.z0) regardless of `corner.z`. Fully generalizing the strip's row direction to all
-// 4 corners is real added structural complexity for a shape where manual drag-adjustment
-// (a later phase) already matters more than a perfect auto-layout -- agreed simplification, not
-// an oversight. Each candidate keeps its own 3 vertex points (not just a center) since
-// orientation alternates -- the caller derives each one's centroid for the containment test, and
-// the 2D canvas / 3D cut-marks both draw the stored points directly, no reconstruction needed.
-function generateTriangleCandidates(baseCm, triHeightCm, gapCm, bounds, corner) {
-  const bStep = baseCm + gapCm, hStep = triHeightCm + gapCm;
-  const dirX = corner.x > 0 ? -1 : 1;
-  const startX = corner.x > 0 ? bounds.x1 : bounds.x0;
-  const nRows = Math.ceil((bounds.z1 - bounds.z0) / hStep) + 1;
-  const nCols = Math.ceil((bounds.x1 - bounds.x0) / bStep) + 2;
-  const candidates = [];
-  for (let row = 0; row <= nRows; row++) {
-    const y0 = bounds.z0 + row * hStep, y1 = y0 + triHeightCm;
-    for (let col = -1; col <= nCols; col++) {
-      const xUp = startX + dirX * col * bStep;
-      candidates.push({ orientation: 'up', pts: [[xUp - baseCm / 2, y0], [xUp + baseCm / 2, y0], [xUp, y1]] });
-      const xDown = startX + dirX * (col + 0.5) * bStep;
-      candidates.push({ orientation: 'down', pts: [[xDown - baseCm / 2, y1], [xDown + baseCm / 2, y1], [xDown, y0]] });
-    }
-  }
-  return candidates;
-}
-
-// Ties the three tiling generators + the shared containment filter together into one call --
-// returns the placements actually kept plus the unit area/utilization % AND the waste area/
-// weight, given a tray shape/footprint and a cutter shape/dims (already through any session-only
-// size override). `combinedNetWeightGrams` is the tray's own already-computed total dough mass
-// (bakeSnapshot.netWeight) -- baking/cutting don't change total mass, so waste weight is just
-// that total split by area fraction, same principle as the original grams-per-portion math.
-function computeCutterLayout(trayShapeType, trayFootprint, trayDims, cutterShapeType, cutterDims, marginCm, gapCm, corner, combinedNetWeightGrams) {
-  const cutterR = cutterBoundingRadiusCm(cutterShapeType, cutterDims);
-  const effectiveInsetCm = Math.max(0, marginCm) + cutterR;
-  const bounds = trayBoundingBox(trayShapeType, trayFootprint);
-
-  let candidates;
-  if (cutterShapeType === 'round') {
-    candidates = generateHexCandidates(cutterDims.diameterCm, Math.max(0, gapCm), bounds, corner);
-  } else if (cutterShapeType === 'rectangular') {
-    candidates = generateGridCandidates(cutterDims.lengthCm, cutterDims.widthCm, Math.max(0, gapCm), bounds, corner);
-  } else if (cutterShapeType === 'triangle') {
-    candidates = generateTriangleCandidates(cutterDims.baseCm, cutterDims.triHeightCm, Math.max(0, gapCm), bounds, corner)
-      .map(c => ({ ...c, x: (c.pts[0][0] + c.pts[1][0] + c.pts[2][0]) / 3, z: (c.pts[0][1] + c.pts[1][1] + c.pts[2][1]) / 3 }));
-  } else {
-    candidates = [];
-  }
-
-  const placements = candidates.filter(c => candidateFitsInterior(c.x, c.z, trayShapeType, trayFootprint, effectiveInsetCm));
-  const unitArea = cutterUnitAreaCm2(cutterShapeType, cutterDims);
-  const coveredAreaCm2 = placements.length * unitArea;
-  const utilizationPct = trayFootprint.areaCm2 > 0 ? Math.round((coveredAreaCm2 / trayFootprint.areaCm2) * 100) : 0;
-  const wasteAreaCm2 = Math.max(0, trayFootprint.areaCm2 - coveredAreaCm2);
-  const wasteGrams = trayFootprint.areaCm2 > 0 ? (wasteAreaCm2 / trayFootprint.areaCm2) * (combinedNetWeightGrams || 0) : 0;
-  return { placements, unitArea, utilizationPct, wasteAreaCm2, wasteGrams };
 }
 
 // ---- Recipe on Fire (Phase 1: process + tray selection, static 3D dough-fill visualization) ----
@@ -9366,7 +9195,9 @@ function renderRecipeOnFireView(main) {
     bakeState = 'ready';
     rofStep = 'bake';
     renderTrayStepPanel();
-    ensureRofGame().then((game) => { if (rofStep === 'bake' && rofMode === 'sheet') game.beginSheet({ thicknessCm: sheetInfo.renderThickness }); });
+    ensureRofGame().then((game) => {
+      if (rofStep === 'bake' && rofMode === 'sheet') { game.beginSheet({ thicknessCm: sheetInfo.renderThickness }); game.setSheetGrams(sheetInfo.sessionGrams); }
+    });
   }
   function sheetSummaryHtml() {
     if (!sheetInfo) return '';
@@ -9473,6 +9304,14 @@ function renderRecipeOnFireView(main) {
   // Per-piece weight, count, utilization and waste -- the same area math as before, driven by however
   // many cutters are on the sheet right now. A piece's share of the dough is its share of the tray's
   // area (the sheet is uniform), of the grams that fit in this one tray.
+  // The scrap of the current layout: what no cutter covers, in grams and as a share of the dough on this tray
+  // (the sheet is uniform, so area share = weight share).
+  function trimScrap() {
+    const { footprint } = bakeSnapshot, grams = sheetInfo.sessionGrams;
+    const covered = cutterList.reduce((sum, c) => sum + cutterUnitAreaCm2(c.data.shapeType, c.data.dims), 0);
+    const frac = footprint.areaCm2 > 0 ? Math.max(0, footprint.areaCm2 - covered) / footprint.areaCm2 : 0;
+    return { grams: frac * grams, pct: frac * 100, covered };
+  }
   function updateTrimSummary() {
     const el = document.getElementById('rof-trim-summary');
     if (!el || !bakeSnapshot || !sheetInfo) return;
@@ -9491,24 +9330,26 @@ function renderRecipeOnFireView(main) {
       g.n++; groups.set(key, g);
     }
     const util = footprint.areaCm2 > 0 ? Math.round((covered / footprint.areaCm2) * 100) : 0;
-    const wasteG = Math.max(0, footprint.areaCm2 - covered) / footprint.areaCm2 * grams;
+    const scrap = trimScrap();
     el.innerHTML = `
       <div class="computed-value-box" style="margin:12px 0;">
         ${[...groups.values()].map(g => `<div style="font-size:13px; margin-bottom:2px;"><strong>${g.n}</strong> × ${cutterPieceSizeLabel(g.data.shapeType, g.data.dims)} &middot; ${roundNice((g.area / footprint.areaCm2) * grams)} g each</div>`).join('')}
-        <div style="margin-top:8px; padding-top:6px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);"><strong>${cutterList.length}</strong> pieces &nbsp;·&nbsp; <strong>${util}%</strong> utilization &nbsp;·&nbsp; <strong>Waste:</strong> ${roundNice(wasteG)} g</div>
+        <div style="margin-top:8px; padding-top:6px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);"><strong>${cutterList.length}</strong> pieces &nbsp;·&nbsp; <strong>${util}%</strong> utilization</div>
+        <div class="rof-leftover" style="margin-top:4px; font-size:12.5px;">Scrap: ${window.RofGame.portions.fmtGrams(scrap.grams)} g &middot; ${window.RofGame.portions.fmtGrams(scrap.pct)}% of the dough on this tray</div>
       </div>`;
   }
 
+  // Auto-arrange: the packer (renderer/rof/packing.js) alternates up / down triangles the way a baker cuts them and
+  // tests every cutter exactly against the tray. 0.3 cm clear of the tray wall, 0.2 cm between cutters.
+  const TRIM_MARGIN_CM = 0.3, TRIM_GAP_CM = 0.2;
   function autoArrangeCutters() {
     const m = cutterMaterials.find(x => String(x.id) === String(armedCutterId ?? lastCutterId));
     if (!m) { trimNote = 'Pick a cutter first.'; updateTrimSummary(); return; }
-    const dims = materialDimsFromRow(m);
-    const { material, dims: trayDims, footprint } = bakeSnapshot;
-    // The pure 2D packing (0.5 cm margin from the wall, 0.3 cm between pieces, from the top-left).
-    const result = computeCutterLayout(material.shape_type, footprint, trayDims, m.shape_type, dims, 0.5, 0.3, ROF_LAYOUT_CORNERS.tl, sheetInfo.sessionGrams);
-    const placedN = rofGame.setCutters(result.placements.map(p => ({ shapeType: m.shape_type, dims, x: p.x, y: p.z, materialId: m.id })));
+    const res = rofGame.autoArrangeCutters({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
     playArrangeSound();
-    rofGame.announce(`${placedN} cutters arranged.`);
+    rofGame.disarmCutter(); // arranging is a finished action; putting the cutter down also lets you hover the scrap
+    const sc = trimScrap(); // cutterList is already up to date (the game reports it synchronously)
+    rofGame.announce(`${res.count} cutters arranged. Scrap ${Math.round(sc.grams)} grams, ${Math.round(sc.pct)} percent of the dough.`);
   }
 
   async function renderTrimStepPanel(panel) {
@@ -9517,14 +9358,14 @@ function renderRecipeOnFireView(main) {
       <h3 style="margin-bottom:6px;">Trim</h3>
       <div style="font-size:12.5px; color:var(--neutral); margin-bottom:10px;">Pick a cutter, then click the sheet to stamp it. Drag to move one, scroll to turn it, Delete removes it.</div>
       <div class="rof-shape-cards" id="rof-cutter-cards"><div style="font-size:12px; color:var(--neutral);">Loading cutters…</div></div>
+      <div style="display:flex; gap:8px; margin-bottom:6px;">
+        <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
+        <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
+      </div>
       <div id="rof-trim-summary"></div>
       <label style="display:flex; align-items:center; gap:8px; font-weight:normal; font-size:12.5px; margin-bottom:10px;">
         <input type="checkbox" id="rof-scrap-toggle" checked /> Highlight scrap
       </label>
-      <div style="display:flex; gap:8px; margin-bottom:10px;">
-        <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
-        <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
-      </div>
       <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button></div>`;
     rofGame.setScrapHighlight(true);
     document.getElementById('rof-scrap-toggle').addEventListener('change', (e) => rofGame.setScrapHighlight(e.target.checked));

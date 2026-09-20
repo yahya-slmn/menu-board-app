@@ -274,6 +274,7 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
 
   return {
     place, wake, select, rotate, hooks,
+    isDragging: () => !!dragging,
     planePoint, pickAt: pick,
     // Where a piece WOULD go at (x, y) -- inside the tray, off its neighbours -- and whether that spot is valid.
     probe(item, x, y) {

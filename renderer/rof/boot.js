@@ -2,6 +2,7 @@ import { createRofGame } from './game.js';
 import { SEED_SHAPES, shapePreview } from './dough.js';
 import { estimateRise } from './riseModel.js';
 import * as portions from './portions.js';
+import { packCutters } from './packing.js';
 
 // renderer.js is a classic script and can't `import`, so the game module registers itself on
 // window. Every instance is tracked so leaving the Recipe on Fire screen can tear its WebGL
@@ -12,6 +13,7 @@ window.RofGame = {
   shapes: SEED_SHAPES, // the four seed dough shapes (name, real size, unit weight)
   estimateRise,        // deterministic rise / browning model from ingredient rows
   portions,            // portion arithmetic: whole portions from grams, leftover, defaults
+  packCutters,         // cutter packing (pure geometry)
   shapePreview,        // outline + slash lines of a shape spec, for the Shapes modal preview
   create(container, opts) {
     const game = createRofGame(container, opts);

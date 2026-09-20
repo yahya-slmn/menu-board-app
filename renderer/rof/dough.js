@@ -243,10 +243,15 @@ const GLSL_COLOR = /* glsl */`
     float e = 0.3;
     float edge = clamp(abs(maskAt(vPlan + vec2(e, 0.0)) - m) + abs(maskAt(vPlan - vec2(e, 0.0)) - m) + abs(maskAt(vPlan + vec2(0.0, e)) - m) + abs(maskAt(vPlan - vec2(0.0, e)) - m), 0.0, 1.0);
     base *= 1.0 - 0.4 * edge; // the cut line
-    // Scrap (everything outside the cutters) is dimmed and greyed once there are cuts to compare against.
+    // Scrap (everything outside the cutters) is tinted red once there are cuts to compare against, with diagonal
+    // hatching drawn in plan space (it stays put as the camera moves) so it never relies on colour alone.
     float scrap = (1.0 - m) * uScrap * uHasCuts;
-    vec3 grey = vec3(dot(base, vec3(0.3, 0.59, 0.11)));
-    base = mix(base, mix(grey, vec3(0.30, 0.38, 0.52), 0.35) * 0.8, scrap * 0.62);
+    float tri = abs(fract((vPlan.x + vPlan.y) * 0.45) - 0.5) * 2.0;
+    float hatch = smoothstep(0.42, 0.58, tri);
+    vec3 red = vec3(0.80, 0.16, 0.13);
+    vec3 tinted = mix(base * 0.9, red, 0.6);
+    tinted = mix(tinted, red * 0.55, hatch * 0.5);
+    base = mix(base, tinted, scrap);
   }
 #endif
 

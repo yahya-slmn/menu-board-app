@@ -9,6 +9,8 @@ import { createDoughPiece } from './dough.js';
 import { createOven } from './oven.js';
 import { prefersReducedMotion } from './quality.js';
 import { createSheet } from './sheet.js';
+import { packCutters } from './packing.js';
+import { analyzeScrap } from './scrap.js';
 
 // Public entry point for the Recipe on Fire game view. renderer.js (a classic script) reaches this
 // through window.RofGame (see boot.js) and only ever passes plain data in: the tray/cutter shape
@@ -231,7 +233,83 @@ export function createRofGame(container, opts = {}) {
     sheet.setHasCuts(cs.length);
     stage.requestRender();
     emit('cutters', cs.map(describeCutter));
+    scheduleScrap();
   }
+
+  // ---- scrap: where it is, how much, and red flags on it -------------------------------------------------
+  // Each separate uncut region can carry a flag with its grams and its share of the dough on the tray; a chip
+  // shows the total; hovering any scrap shows that spot's numbers. The share is of the DOUGH ON THE TRAY (the
+  // sheet is uniform, so area share = weight share).
+  let sheetGrams = 0, scrap = null, scrapOn = true, scrapTimer = null, flagLayer = null, chipEl = null, tipEl = null;
+  const flagEls = [];
+  const fmtG = (g) => (g >= 10 ? String(Math.round(g)) : String(Math.round(g * 10) / 10));
+  const fmtPct = (f) => { const p = f * 100; return (p >= 10 ? String(Math.round(p)) : String(Math.round(p * 10) / 10)); };
+  const scrapSummary = () => scrap && {
+    totalGrams: (scrap.totalArea / scrap.interiorArea) * sheetGrams, totalPct: (scrap.totalArea / scrap.interiorArea) * 100,
+    regions: scrap.regions.map(r => ({ grams: r.fraction * sheetGrams, pct: r.fraction * 100, x: r.px, y: r.py })),
+  };
+  function scheduleScrap() { clearTimeout(scrapTimer); scrapTimer = setTimeout(runScrap, 90); }
+  function runScrap() {
+    if (!sheet || !tray || tray.region.kind === 'cups') { scrap = null; renderFlags(); return; }
+    const cs = cutterItems();
+    // A round cutter's outline is a 32-gon; use its true circle area so the numbers match the panel's exactly.
+    const exact = (c) => (c.data.shapeType === 'round' ? Math.PI * (c.data.dims.diameterCm / 2) ** 2 : undefined);
+    scrap = cs.length ? analyzeScrap({ region: tray.region, cutters: cs.map(c => ({ poly: c.poly, x: c.tx, y: c.ty, rot: c.rotT, area: exact(c) })) }) : null;
+    renderFlags();
+    emit('scrap', scrapSummary());
+  }
+  function ensureScrapDom() {
+    if (flagLayer) return;
+    flagLayer = document.createElement('div');
+    flagLayer.setAttribute('aria-hidden', 'true');
+    flagLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;';
+    chipEl = document.createElement('div'); chipEl.className = 'rof-scrap-chip'; chipEl.hidden = true;
+    tipEl = document.createElement('div'); tipEl.className = 'rof-scrap-tip'; tipEl.hidden = true;
+    container.append(flagLayer, chipEl, tipEl);
+    stage.addFrameHook(positionFlags);
+  }
+  function renderFlags() {
+    ensureScrapDom();
+    flagEls.splice(0).forEach(f => f.el.remove());
+    const show = scrapOn && scrap && scrap.regions.length && sheetGrams > 0;
+    chipEl.hidden = !show; if (tipEl && !show) tipEl.hidden = true;
+    if (!show) { stage.requestRender(); return; }
+    const total = scrapSummary();
+    chipEl.textContent = `Scrap ${fmtG(total.totalGrams)} g · ${fmtPct(total.totalPct / 100)}% of the dough`;
+    // A flag on each region big enough to read (2% of the dough or more), at most five.
+    scrap.regions.filter(r => r.fraction >= 0.02).slice(0, 5).forEach((r) => {
+      const el = document.createElement('div'); el.className = 'rof-flag';
+      el.innerHTML = `<span class="rof-flag-pole"></span><span class="rof-flag-label">${fmtG(r.fraction * sheetGrams)} g · ${fmtPct(r.fraction)}%</span>`;
+      flagLayer.appendChild(el); flagEls.push({ el, x: r.px, y: r.py });
+    });
+    stage.requestRender();
+  }
+  const _v = new THREE.Vector3();
+  function positionFlags() {
+    if (!flagEls.length || !tray) return;
+    const w = container.clientWidth, h = container.clientHeight, y = tray.floorTopY + (sheet ? sheet.topY() : 0);
+    for (const f of flagEls) {
+      _v.set(f.x, y, -f.y).project(stage.camera);
+      const off = _v.z > 1 || Math.abs(_v.x) > 1.05 || Math.abs(_v.y) > 1.05;
+      f.el.style.display = off ? 'none' : '';
+      if (!off) f.el.style.transform = `translate(${((_v.x + 1) / 2) * w}px, ${((1 - _v.y) / 2) * h}px)`;
+    }
+  }
+  // Hover: which scrap region is under the pointer, and its numbers.
+  stage.canvas.addEventListener('pointermove', (e) => {
+    if (!tipEl) return;
+    if (!scrapOn || !scrap || ghost || interaction.isDragging() || sheetGrams <= 0) { tipEl.hidden = true; return; }
+    if (interaction.pickAt(e)) { tipEl.hidden = true; return; }                       // over a cutter
+    const p = interaction.planePoint(e, tray.floorTopY + (sheet ? sheet.topY() : 0));
+    const id = p ? scrap.regionAt(p.x, p.y) : -1;
+    const r = id >= 0 ? scrap.regions.find(q => q.id === id) : null;
+    if (!r) { tipEl.hidden = true; return; }
+    const rect = container.getBoundingClientRect();
+    tipEl.textContent = `Scrap: ${fmtG(r.fraction * sheetGrams)} g · ${fmtPct(r.fraction)}% of the dough (${fmtPct(r.area / scrap.totalArea)}% of the scrap)`;
+    tipEl.hidden = false;
+    tipEl.style.left = `${e.clientX - rect.left + 14}px`; tipEl.style.top = `${e.clientY - rect.top + 14}px`;
+  });
+  stage.canvas.addEventListener('pointerleave', () => { if (tipEl) tipEl.hidden = true; });
 
   // Puts the dough in the tray as one sheet `thicknessCm` thick (raw). Returns false on a muffin tray.
   function beginSheet({ thicknessCm }) {
@@ -247,6 +325,8 @@ export function createRofGame(container, opts = {}) {
     disarmCutter();
     clearItems();
     if (sheet) { stage.scene.remove(sheet.group); sheet.dispose(); sheet = null; }
+    scrap = null; clearTimeout(scrapTimer);
+    if (flagLayer) renderFlags();
   }
 
   // Arms a cutter: a see-through copy follows the pointer over the tray (red where it can't go) and a
@@ -349,8 +429,18 @@ export function createRofGame(container, opts = {}) {
     cuttersChanged();
     return cutterItems().length;
   }
+  // Auto-arrange: pack as many of this cutter as the tray holds (alternating up / down for triangles, see
+  // packing.js) and lay them out with the rotation the packer chose -- the orientation is what makes the
+  // triangles tessellate, so it must reach the cutter, not just the position.
+  function autoArrangeCutters({ shapeType, dims, materialId, marginCm = 0.3, gapCm = 0.2 }) {
+    if (!tray || tray.region.kind === 'cups') return { count: 0, frameDeg: 0 };
+    const res = packCutters({ region: tray.region, shapeType, dims, marginCm, gapCm });
+    const n = setCutters(res.placements.map(p => ({ shapeType, dims, x: p.x, y: p.y, rot: p.rot, materialId })));
+    return { count: n, frameDeg: res.frameDeg, planned: res.placements.length };
+  }
   function clearCutters() { cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
-  function setScrapHighlight(on) { sheet?.setScrapHighlight(on); stage.requestRender(); }
+  function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); }
+  function setSheetGrams(g) { sheetGrams = g; renderFlags(); }
 
   // ---- bake director -------------------------------------------------------------------------------
   // Doneness is how far the browning goes; shapes need different amounts of "bake" to look equally done
@@ -475,13 +565,13 @@ export function createRofGame(container, opts = {}) {
   }
 
   // Drops a cutter onto the tray (it falls in and lands with a small squash).
-  function addCutter({ shapeType, dims, x = 0, y = 0, data = {}, collision = 'lifted' }) {
+  function addCutter({ shapeType, dims, x = 0, y = 0, rot = 0, data = {}, collision = 'lifted' }) {
     if (!tray) return null;
     const built = buildCutter({ shapeType, dims }, surfaces);
     if (!built) return null;
     const item = new PlacedItem({
       id: nextId++, kind: 'cutter', group: built.group, poly: built.poly, baseY: tray.floorTopY,
-      height: built.height, data: { shapeType, dims, ...data }, collision,
+      height: built.height, data: { shapeType, dims, ...data }, collision, rot,
     });
     items.push(item);
     if (!interaction.place(item, x, y)) {          // nowhere to put it: drop it rather than overlap another
@@ -609,7 +699,8 @@ export function createRofGame(container, opts = {}) {
   const api = {
     setTray, clearTray, addCutter, addDough, setDoughState, showLookdev, removeItem, clearItems, on,
     beginPlacement, endPlacement, autoArrange, returnAllToBench, playBake, resetBake, setInteractive,
-    beginSheet, endSheet, armCutter, disarmCutter, setCutters, clearCutters, setScrapHighlight,
+    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, clearCutters, setScrapHighlight, setSheetGrams,
+    getScrap: scrapSummary,
     getCutters: () => cutterItems().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },
     setSfx: (fns) => Object.assign(sfx, fns),
@@ -632,6 +723,6 @@ export function createRofGame(container, opts = {}) {
     },
     _stage: stage, // exposed for the test harness
   };
-  stage.onDispose(() => { clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
+  stage.onDispose(() => { clearTimeout(scrapTimer); flagLayer?.remove(); chipEl?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
   return api;
 }
