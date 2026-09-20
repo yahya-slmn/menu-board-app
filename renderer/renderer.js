@@ -8615,6 +8615,9 @@ function renderRecipeOnFireView(main) {
   let placeSession = null; // { count, shape } while a Shape & Place session is running
   let placeFresh = true;   // true when entering the place step from Setup (start a new session)
   let placeNote = '';
+  let placeGrams = null;         // portion weight the chef chose (g); null = start from the default
+  let placeGramsUser = false;    // true once the chef set it -- kept when the shape changes
+  let recipePortionGrams = null; // the recipe's own portion_weight_grams, when it has one
   let bakeDoneness = 'golden';   // 'light' | 'golden' | 'dark' (session-only)
   let bakeState = 'ready';       // 'ready' | 'baking' | 'done'
   let bakeCtl = null;            // { promise, skip() } while a bake is running
@@ -8704,6 +8707,7 @@ function renderRecipeOnFireView(main) {
   function resetGameSession() {
     if (rofGame) { rofGame.endPlacement(); rofGame.endSheet(); rofGame.clearItems(); }
     placeSession = null; placeCount = null; placeNote = '';
+    placeGrams = null; placeGramsUser = false;
     cutterList = []; armedCutterId = null; trimNote = ''; sheetInfo = null;
     riseScale = 1;
   }
@@ -8716,6 +8720,7 @@ function renderRecipeOnFireView(main) {
     rofStep = 'setup';
     bakeSnapshot = null;
     lastMaterialId = null;
+    recipePortionGrams = null;
     processField.style.display = 'none';
     processChecksEl.innerHTML = '';
     summaryEl.innerHTML = '';
@@ -9094,40 +9099,93 @@ function renderRecipeOnFireView(main) {
   // Lays the dough out on the bench as `placeCount` equal pieces. Piece size follows its weight (the
   // cube root, since a piece scales in all three directions), so dividing into fewer pieces makes
   // each one bigger. A muffin tray overrides both: one piece per cup.
+  const portionCups = () => (isMuffinTray() ? bakeSnapshot.dims.cupRows * bakeSnapshot.dims.cupColumns : 0);
+  // The plan for the current dough: portion weight (the chef's, else the recipe's, else the shape's) -> whole
+  // portions -> exactly what is left over. A muffin tray is one portion per cup.
+  function currentPortionPlan(gramsOverride) {
+    const P = window.RofGame.portions, shape = currentShape();
+    const grams = gramsOverride ?? placeGrams ?? P.defaultGrams({ recipePortionGrams, shapeWeight: shape && shape.weight });
+    return P.planPortions({ net: bakeSnapshot.netWeight, grams, cups: portionCups() });
+  }
+
+  // Lays the dough out on the bench as whole portions of the chosen weight. A piece's size follows its weight
+  // (the cube root, since it scales in every direction); a muffin tray overrides both: one piece per cup.
   async function startPlacementSession() {
     const game = await ensureRofGame();
-    // A muffin tray sizes its own pieces (one per cup), so it only needs a stand-in here for the count.
+    // A muffin tray sizes its own pieces (one per cup), so it only needs a stand-in here.
     const shape = currentShape() || (isMuffinTray() ? { archetype: 'ball', lengthCm: 9.5, widthCm: 9.5, heightCm: 4.6, weight: 90 } : null);
     if (!shape) return null; // no shapes defined yet -- the panel says so
-    const net = bakeSnapshot.netWeight;
-    const count = Math.min(60, Math.max(1, placeCount ?? Math.round(net / shape.weight)));
-    const k = Math.min(1.9, Math.max(0.55, Math.cbrt((net / count) / shape.weight)));
-    const spec = { ...shape, lengthCm: shape.lengthCm * k, widthCm: shape.widthCm * k, heightCm: shape.heightCm * k };
+    const plan = currentPortionPlan();
     riseModel = computeRiseModel(); // how much room the dough will need once it has risen
-    const used = game.beginPlacement({ spec, count, spread: riseModel.wMul });
-    placeSession = { count: used.count, shape };
+    if (plan.count < 1) {          // nothing to lay out (portion bigger than the dough, or not a valid weight)
+      game.endPlacement(); game.clearItems();
+      placeSession = { count: 0, shape, grams: plan.grams, leftover: plan.leftover, plan };
+      placeNote = '';
+      return null;
+    }
+    const k = Math.min(1.9, Math.max(0.55, Math.cbrt(plan.grams / shape.weight)));
+    const spec = { ...shape, lengthCm: shape.lengthCm * k, widthCm: shape.widthCm * k, heightCm: shape.heightCm * k };
+    const used = game.beginPlacement({ spec, count: plan.count, spread: riseModel.wMul });
+    placeSession = { count: used.count, shape, grams: plan.grams, leftover: plan.leftover, plan };
     placeCount = used.count;
     placeNote = '';
     return used;
+  }
+
+  // The line under the portion inputs: how many whole portions, and -- in red -- exactly what is not used.
+  function portionLineHtml(plan) {
+    const P = window.RofGame.portions, net = bakeSnapshot.netWeight;
+    if (plan.invalid) return `<span class="rof-leftover">Enter a portion weight of at least ${P.MIN_GRAMS} g.</span>`;
+    if (plan.tooBig) return `<span class="rof-leftover">${P.fmtGrams(plan.grams)} g is more than the ${P.fmtGrams(net)} g of dough -- not even one whole portion.</span>`;
+    const left = plan.leftover > 0
+      ? ` <span class="rof-leftover">${P.fmtGrams(plan.leftover)} g not used</span>`
+      : ' <span class="rof-noleft">No dough left over</span>';
+    const cap = plan.capped ? `<div class="rof-leftover" style="margin-top:2px;">Capped at ${P.MAX_PIECES} pieces (${plan.wanted} would fit by weight).</div>` : '';
+    return `<strong>${plan.count}</strong> whole portion${plan.count === 1 ? '' : 's'} &times; ${P.fmtGrams(plan.grams)} g${left}${cap}`;
+  }
+  function refreshPortionLine(plan) {
+    const el = document.getElementById('rof-portion-line');
+    if (el && bakeSnapshot) el.innerHTML = portionLineHtml(plan);
+  }
+  // Fill the inputs from the session (not while the chef is typing in them).
+  function refreshPortionUi() {
+    if (!placeSession || !bakeSnapshot) return;
+    const P = window.RofGame.portions;
+    const input = document.getElementById('rof-grams-input');
+    if (input && document.activeElement !== input) input.value = P.fmtGrams(placeSession.grams);
+    refreshPortionLine(currentPortionPlan());
+    const hint = document.getElementById('rof-portion-hint');
+    if (hint) {
+      const shape = currentShape();
+      hint.textContent = placeGramsUser ? 'Set by you.'
+        : recipePortionGrams ? `Starts from the recipe's portion weight (${P.fmtGrams(recipePortionGrams)} g).`
+        : shape ? `Starts from the ${shape.label} shape's weight.` : '';
+    }
   }
 
   function updatePlaceSummary(state) {
     const el = document.getElementById('rof-place-summary');
     if (!el || !placeSession || !bakeSnapshot) return;
     const { placed, total } = state || rofGame.getPlacement();
-    const net = bakeSnapshot.netWeight, unit = net / placeSession.count;
+    if (placeSession.count === 0) {
+      el.innerHTML = '';
+      const b0 = document.getElementById('rof-bake-btn'); if (b0) b0.disabled = true;
+      const c0 = document.getElementById('rof-count-val'); if (c0) c0.textContent = '0';
+      return;
+    }
+    const net = bakeSnapshot.netWeight, unit = placeSession.grams;
     const bakeBtn = document.getElementById('rof-bake-btn');
     if (bakeBtn) bakeBtn.disabled = placed === 0;
     const status = placeNote || (placed === 0 ? 'Nothing placed yet.'
       : placed < total ? `${total - placed} piece(s) still on the bench.` : 'Everything is on the tray.');
     const countEl = document.getElementById('rof-count-val');
     if (countEl) countEl.textContent = total;
-    const unitEl = document.getElementById('rof-unit-weight');
-    if (unitEl) unitEl.textContent = `${roundNice(unit)} g each`;
+    const left = placeSession.leftover > 0
+      ? `<div class="rof-leftover" style="margin-top:4px; font-size:12.5px;">${window.RofGame.portions.fmtGrams(placeSession.leftover)} g of dough not used (left over after whole portions).</div>` : '';
     el.innerHTML = `
       <div class="computed-value-box" style="margin:12px 0;">
         <div><strong>${placed}</strong> of ${total} pieces placed &nbsp;·&nbsp; <strong>${roundNice(placed * unit)} g</strong> of ${roundNice(net)} g</div>
-        <div style="margin-top:4px; color:${placeNote ? 'var(--danger, #c0392b)' : 'var(--neutral)'}; font-size:12.5px;">${status}</div>
+        <div style="margin-top:4px; color:${placeNote ? 'var(--danger, #c0392b)' : 'var(--neutral)'}; font-size:12.5px;">${status}</div>${left}
       </div>`;
   }
 
@@ -9145,37 +9203,73 @@ function renderRecipeOnFireView(main) {
             </button>`).join('')}
         </div>
         <div style="margin:-4px 0 10px;"><button type="button" class="rof-link-btn" id="rof-edit-shapes-btn" style="padding-left:0;">Edit shapes…</button></div>
-        <div class="rof-count-row">
-          <label>Pieces</label>
-          <button type="button" class="secondary" id="rof-count-minus" aria-label="Fewer pieces">−</button>
-          <span id="rof-count-val" style="min-width:26px; text-align:center; font-weight:600;"></span>
-          <button type="button" class="secondary" id="rof-count-plus" aria-label="More pieces">+</button>
-          <span id="rof-unit-weight" style="color:var(--neutral); font-size:12.5px;"></span>
+        <div class="rof-portion">
+          <div class="rof-portion-input">
+            <label for="rof-grams-input">Portion weight</label>
+            <input id="rof-grams-input" type="number" min="${window.RofGame.portions.MIN_GRAMS}" step="1" inputmode="decimal" aria-describedby="rof-portion-line rof-portion-hint" />
+            <span>g</span>
+          </div>
+          <div class="rof-count-row">
+            <label>Pieces</label>
+            <button type="button" class="secondary" id="rof-count-minus" aria-label="Fewer pieces (heavier portions)">−</button>
+            <span id="rof-count-val" style="min-width:26px; text-align:center; font-weight:600;"></span>
+            <button type="button" class="secondary" id="rof-count-plus" aria-label="More pieces (lighter portions)">+</button>
+          </div>
+          <div id="rof-portion-line" class="rof-portion-line"></div>
+          <div id="rof-portion-hint" class="rof-portion-hint"></div>
         </div>`}
       <div id="rof-place-summary"></div>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
         <button type="button" class="secondary" id="rof-auto-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-return-btn">Return all</button>
       </div>
-      <div style="display:flex; gap:8px;">
+      <div class="rof-actions">
         <button type="button" class="secondary" id="rof-edit-setup-btn">← Edit Setup</button>
         <button type="button" class="primary" id="rof-bake-btn" disabled>Bake →</button>
       </div>
     `;
 
-    const restart = async () => { await startPlacementSession(); updatePlaceSummary(); };
+    const restart = async () => { await startPlacementSession(); refreshPortionUi(); updatePlaceSummary(); };
     const confirmReset = () => !rofGame || rofGame.getPlacement().placed === 0 || confirm('Changing this puts every placed piece back on the bench.');
     panel.querySelectorAll('[data-shape]').forEach(btn => btn.addEventListener('click', async () => {
       if (btn.dataset.shape === placeShapeKey || !confirmReset()) return;
       placeShapeKey = btn.dataset.shape; placeCount = null;
+      if (!placeGramsUser) placeGrams = null; // an untouched default follows the shape; the chef's own weight is kept
       panel.querySelectorAll('[data-shape]').forEach(b => { b.classList.toggle('active', b === btn); b.setAttribute('aria-pressed', String(b === btn)); });
       await restart();
     }));
+    // The stepper sets the portion weight that divides the dough into exactly that many pieces (kept exact,
+    // not rounded, so it really gives that count with nothing left over).
+    let pendingCount = null; // the count the last click asked for, so a quick double-click steps twice
     const step = async (d) => {
       if (!placeSession || !confirmReset()) return;
-      placeCount = Math.min(60, Math.max(1, placeSession.count + d));
+      const P = window.RofGame.portions;
+      const count = Math.min(P.MAX_PIECES, Math.max(1, (pendingCount ?? placeSession.count) + d));
+      pendingCount = count;
+      placeGrams = P.gramsForCount(bakeSnapshot.netWeight, count); placeGramsUser = true;
       await restart();
+      if (pendingCount === count) pendingCount = null;
+      rofGame.announce(`${count} pieces of ${P.fmtGrams(placeGrams)} grams.`);
     };
+    const gramsInput = document.getElementById('rof-grams-input');
+    if (gramsInput) {
+      // Typing previews the count and leftover straight away; the pieces on the stage only change on commit
+      // (Enter / leaving the field), because that puts everything back on the bench.
+      gramsInput.addEventListener('input', () => {
+        const g = parseFloat(gramsInput.value);
+        refreshPortionLine(currentPortionPlan(Number.isFinite(g) ? g : NaN));
+      });
+      gramsInput.addEventListener('change', async () => {
+        const g = parseFloat(gramsInput.value), P = window.RofGame.portions;
+        if (!(g >= P.MIN_GRAMS)) { gramsInput.value = P.fmtGrams(placeSession ? placeSession.grams : 0); refreshPortionUi(); return; }
+        if (placeSession && Math.abs(g - placeSession.grams) < 0.05) { refreshPortionUi(); return; }
+        if (!confirmReset()) { gramsInput.value = P.fmtGrams(placeSession.grams); refreshPortionUi(); return; }
+        placeGrams = g; placeGramsUser = true;
+        await restart();
+        const plan = currentPortionPlan();
+        rofGame.announce(plan.count < 1 ? 'Not even one whole portion.' : `${plan.count} whole portions of ${P.fmtGrams(g)} grams.${plan.leftover > 0 ? ` ${P.fmtGrams(plan.leftover)} grams not used.` : ''}`);
+      });
+    }
     document.getElementById('rof-count-minus')?.addEventListener('click', () => step(-1));
     document.getElementById('rof-count-plus')?.addEventListener('click', () => step(1));
     document.getElementById('rof-edit-shapes-btn')?.addEventListener('click', async () => {
@@ -9188,7 +9282,7 @@ function renderRecipeOnFireView(main) {
       await ensureShapePresets(true);
       const after = currentShape();
       // Keep the session if the shape being used is untouched; otherwise start over on the bench.
-      if (!(before && after && JSON.stringify(before) === JSON.stringify(after))) { placeFresh = true; placeCount = null; }
+      if (!(before && after && JSON.stringify(before) === JSON.stringify(after))) { placeFresh = true; placeCount = null; if (!placeGramsUser) placeGrams = null; }
       renderTrayStepPanel();
     });
     document.getElementById('rof-auto-btn').addEventListener('click', () => {
@@ -9314,7 +9408,7 @@ function renderRecipeOnFireView(main) {
         </div>
       </div>` : ''}
       <div id="rof-place-summary">${sheetMode ? sheetSummaryHtml() : ''}</div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <div class="rof-actions">
         <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
         ${ready ? '<button type="button" class="primary" id="rof-start-bake-btn">Start baking</button>'
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
@@ -9431,7 +9525,7 @@ function renderRecipeOnFireView(main) {
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
       </div>
-      <button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button>`;
+      <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button></div>`;
     rofGame.setScrapHighlight(true);
     document.getElementById('rof-scrap-toggle').addEventListener('change', (e) => rofGame.setScrapHighlight(e.target.checked));
     document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
@@ -9515,6 +9609,7 @@ function renderRecipeOnFireView(main) {
     const full = await currentNs().api.get(recipe.id);
     if (!selectedRecipe || selectedRecipe.id !== recipe.id) return; // superseded by a later pick
 
+    recipePortionGrams = Number(full.portion_weight_grams) > 0 ? Number(full.portion_weight_grams) : null;
     workingProcesses = (full.processes || []).map(proc => buildProcessFromSaved(proc));
     populateProcessChecks();
     syncRecipeBlock();

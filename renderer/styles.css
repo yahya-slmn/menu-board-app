@@ -770,6 +770,16 @@ table.items-table.shapes-table td:not(:first-child) { white-space: nowrap; }
 .shape-preview { display: block; width: 100%; max-width: 360px; background: var(--paper-dim); border: 1px solid var(--line); border-radius: 8px; margin-top: 4px; }
 .rof-link-btn { background: none; border: 0; padding: 0 0 0 8px; color: var(--sage-dark); font: inherit; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
 #rof-rise-slider { width: 100%; }
+/* The step's main action row stays reachable at the bottom of the panel however long the controls above it get. */
+.rof-actions { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 0 12px; margin-top: 8px; background: var(--paper); border-top: 1px solid var(--line); }
+.rof-portion { margin-bottom: 4px; }
+.rof-portion-input { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.rof-portion-input label { margin: 0; }
+.rof-portion-input input { width: 92px; }
+.rof-portion-line { font-size: 13px; margin: 6px 0 2px; line-height: 1.5; }
+.rof-portion-hint { font-size: 11.5px; color: var(--neutral); margin-bottom: 6px; }
+.rof-leftover { color: var(--danger, #c0392b); font-weight: 700; }
+.rof-noleft { color: var(--neutral); }
 .rof-count-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .rof-count-row label { margin: 0; }
 .rof-count-row button { width: 30px; height: 30px; padding: 0; }
