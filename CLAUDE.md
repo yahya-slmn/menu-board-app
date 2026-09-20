@@ -207,8 +207,26 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   `supabase/migrations/20260920100000_dough_shape_presets.sql` (additive only). Until it is applied,
   `list-dough-shape-presets` answers `{ available: false }` and the screen falls back to the four built-in
   shapes (`SEED_SHAPES`, read-only; the Edit button explains why) -- nothing breaks.
-- Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake and the shape presets are done. Left: applying
-  the shapes migration to Supabase (needs an explicit go-ahead) and removing the old Dough Shapes screen,
+- Performance (measured on an M2, full-Retina 2560x1440-class buffer, 46 pieces): the frame was ~53 ms; the dough
+  shader (~24 ms), ambient occlusion (~12 ms) and 4x MSAA (~7 ms) were the big costs. Now: the dough noise is a
+  shared precomputed texture (`noise.js` `tileableNoiseData`), AO runs at half resolution (`aoScale`), MSAA is
+  used only where the pixel ratio is under 1.75 (a dense display doesn't need it), and each tier has a pixel
+  budget (`maxPixels`) so a huge window renders below native density instead of missing frames. Result: at or
+  under the 60 Hz cap (16.7 ms). Profile by toggling features on a 46-piece scene and measuring average frame
+  time under `stage.animate` -- values at 16.7 mean "at vsync", not "exactly".
+- Graphics setting (bottom-right of the stage): Auto (default: the GPU probe picks a tier and the FPS governor
+  steps down under ~38 fps, with an on-stage notice) or a fixed High / Medium / Low; stored in
+  `localStorage.rofGameQuality`. A fixed choice is never overridden by the governor.
+- Accessibility: the stage canvas is a focusable `role="application"` with described keys; a visually hidden
+  live region (`game.announce`) says what happened. Keys: `]` / `[` choose a piece, Enter moves it between bench
+  and tray, arrows nudge (Shift = bigger), R rotates, Delete returns it to the bench; with a cutter picked,
+  arrows position it, Enter stamps it, Escape puts it down. Panels use `aria-pressed`, `aria-current="step"`, a
+  real progressbar and labelled slider; the Shapes modal is a dialog (labels tied to inputs, Escape, focus
+  moved in and returned, Tab kept inside). `prefers-reduced-motion` skips the camera intro, drop-ins and landing
+  squash and shortens the bake (~3.4 s).
+- Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake, the shape presets, performance tiers and
+  accessibility are done (shape-presets migration applied to Supabase 2026-09-20). Left:
+  removing the old Dough Shapes screen,
   `dough_shape_photos`, the `dough-shape-photos` bucket, the `generate-dough-shape-image` edge function and
   `lib/doughShapes.js` / `lib/generateDoughShapeImage.js` (gated on the photo backup -- see
   `scripts/backup-dough-photos.js`).
