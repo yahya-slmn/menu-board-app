@@ -68,6 +68,15 @@
        section for the (hand-rolled, since three.js dropped its own classic-script OrbitControls
        before 0.160.0) drag-to-orbit/scroll-to-zoom camera controls. -->
   <script src="../node_modules/three/build/three.min.js"></script>
+  <!-- Recipe on Fire's game view (renderer/rof/) is this app's first ES-module code. It imports the
+       module build of the SAME three.js release through this import map, straight from node_modules
+       -- still no bundler. Its addons are vendored under rof/vendor/ (electron-builder drops every
+       node_modules/**/examples/ folder from the packaged app; see the README there). renderer.js stays a classic script; rof/boot.js hands
+       it window.RofGame. The classic build above already set window.__THREE__, which would make the
+       module build log a harmless but noisy "multiple instances" warning, so it's cleared first. -->
+  <script>delete window.__THREE__;</script>
+  <script type="importmap">{"imports":{"three":"../node_modules/three/build/three.module.js","three/addons/":"./rof/vendor/three-addons/"}}</script>
   <script src="renderer.js"></script>
+  <script type="module" src="rof/boot.js"></script>
 </body>
 </html>

@@ -507,6 +507,10 @@ table.items-table td.cat-cell {
    a changed row, so its slot is reserved (invisible, not display:none) -- otherwise a row with
    Update showing would push the amount columns left of the rows without it. */
 .process-waste-row [data-update-waste][hidden] { display: inline-block !important; visibility: hidden; }
+/* Recipe on Fire's combined wastage panel -- name / % / note / remove, same fixed-column idea. */
+.rof-waste-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.rof-waste-name { flex: 0 0 160px; min-width: 0; font-size: 13px; }
+.rof-waste-note { flex: 0 0 200px; font-size: 11px; color: var(--neutral); }
 .process-waste-empty { padding: 8px 10px; color: var(--neutral); font-size: 12.5px; }
 
 .warning-banner {
@@ -718,6 +722,54 @@ table.materials-table td.cat-cell {
 }
 .material-preview-wrap canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .material-preview-wrap canvas:active { cursor: grabbing; }
+/* Recipe on Fire: controls in a column beside a sticky stage, so the stage is on screen at the default
+   window size instead of below a stack of setup cards. */
+.rof-layout { display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); gap: 22px; align-items: start; }
+.rof-side { min-width: 0; }
+.rof-stage-col { position: sticky; top: 0; min-width: 0; }
+.rof-stage-col .material-preview-wrap { height: calc(100vh - 226px); min-height: 440px; max-height: 780px; }
+.rof-side .generate-controls { padding: 16px; gap: 12px; margin-bottom: 14px; }
+.rof-side .rof-control-strip { max-width: none; margin: 0 0 16px; }
+.rof-side .rof-steps { gap: 6px; padding: 12px 0; margin-bottom: 14px; }
+.rof-side .rof-step-pill { padding: 6px 12px; font-size: 12px; }
+.rof-side #rof-process-summary .computed-value-box { max-width: none !important; margin: 0 0 12px !important; padding: 10px 14px; }
+.rof-side #rof-process-summary .computed-value-box > div { margin-bottom: 2px !important; }
+.rof-side #rof-setup-block .field { margin-bottom: 10px !important; }
+.rof-waste-details > summary { list-style: revert; }
+@media (max-width: 1000px) {
+  .rof-layout { grid-template-columns: minmax(0, 1fr); }
+  .rof-stage-col { position: static; order: -1; }
+  .rof-stage-col .material-preview-wrap { height: 56vh; }
+}
+.main[data-view="recipeOnFire"] .topbar { margin-bottom: 14px; padding-bottom: 12px; }
+.rof-side #rof-step-panel .generate-controls { padding: 0; background: none; border: 0; box-shadow: none; margin-bottom: 8px; }
+.rof-compact { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; margin-bottom: 12px; background: var(--sage-fill); border: 1px solid var(--line); border-radius: var(--radius); }
+.rof-compact-text { display: flex; flex-direction: column; min-width: 0; }
+.rof-compact-text strong { font-size: 14px; overflow-wrap: anywhere; }
+.rof-compact-text span { font-size: 12px; color: var(--neutral); }
+.rof-compact button { flex: 0 0 auto; padding: 6px 12px; font-size: 12px; }
+.rof-side .mode-toggle-btn { padding: 7px 9px; font-size: 12px; white-space: nowrap; }
+.rof-shape-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.rof-shape-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 9px 11px; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-family: inherit; color: var(--ink);
+}
+.rof-shape-card:hover { border-color: var(--sage); }
+.rof-shape-card.active { border-color: var(--sage); background: var(--sage-fill); box-shadow: inset 0 0 0 1px var(--sage); }
+.rof-shape-name { font-size: 13px; font-weight: 600; }
+.rof-shape-meta { font-size: 11.5px; color: var(--neutral); }
+.rof-rise-notes { margin: 0 0 12px; padding-left: 18px; font-size: 12.5px; color: var(--ink); line-height: 1.55; }
+.rof-progress { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.rof-progress-fill { height: 100%; width: 0; background: var(--sage); border-radius: 999px; }
+.rof-link-btn { background: none; border: 0; padding: 0 0 0 8px; color: var(--sage-dark); font: inherit; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
+#rof-rise-slider { width: 100%; }
+.rof-count-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.rof-count-row label { margin: 0; }
+.rof-count-row button { width: 30px; height: 30px; padding: 0; }
+/* Recipe on Fire's WebGL game view fills the same preview frame; it sets its own cursor per hover/drag. */
+.rof-game-wrap { position: absolute; inset: 0; }
+.material-preview-wrap .rof-game-wrap canvas { cursor: default; }
+.material-preview-wrap .rof-game-wrap canvas:active { cursor: default; }
 .material-preview-hint {
   position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
   font-size: 11px; color: var(--neutral); background: rgba(247,245,239,.95);
