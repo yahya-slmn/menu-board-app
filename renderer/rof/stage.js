@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { TIERS, probeGpu, lowerTier, FrameGovernor } from './quality.js';
+import { TIERS, probeGpu, lowerTier, FrameGovernor, prefersReducedMotion } from './quality.js';
 import { createPost } from './post.js';
 
 // The stage owns the renderer, the fixed "game" camera, the lights and the bench the tray sits on,
@@ -83,7 +83,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
     Object.assign(key.shadow.camera, { left: -s, right: s, top: s, bottom: -s, near: 1, far: rig.radius * 12 });
     key.shadow.camera.updateProjectionMatrix();
     rig.zoom = rig.zoomTarget = 1;
-    rig.intro = 0; rig.introStart = performance.now();
+    rig.intro = prefersReducedMotion() ? 1 : 0; rig.introStart = performance.now();
     placeCamera();
     requestRender();
   }

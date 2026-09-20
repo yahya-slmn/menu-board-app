@@ -69,3 +69,9 @@ export class FrameGovernor {
   }
   reset() { this.samples.length = 0; }
 }
+
+// The OS "reduce motion" setting. Drop-in animations, the camera intro and the landing squash are skipped when it
+// is on, and the bake plays much faster.
+export function prefersReducedMotion() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
+}

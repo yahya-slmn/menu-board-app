@@ -171,7 +171,7 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
     if (!item) { hooks.emptyDown?.(e); return; }
     const p = planePoint(e, item.baseY);
     if (!p) return;
-    dragging = item; activePointer = e.pointerId;
+    dragging = item; activePointer = e.pointerId; lastValid = true;
     grab = { x: item.x - p.x, y: item.y - p.y };
     item.startX = item.tx; item.startY = item.ty; item.startRot = item.rotT; item.startHome = item.home;
     item.dragging = true;
@@ -187,6 +187,7 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
       if (!p) return;
       const [x, y] = follow(dragging, p.x + grab.x, p.y + grab.y);
       dragging.tx = x; dragging.ty = y;
+      if (dragging.invalid === lastValid) { lastValid = !dragging.invalid; emit('validity', { valid: lastValid }); } // announced once per change
       wake(dragging);
       emit('move', dragging);
     } else if (!dragging) {
@@ -206,6 +207,7 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
     emit('drop', item);
   };
   const onLeave = () => { if (!dragging) setHover(null); };
+  let lastValid = true;
   function rotate(item, delta) {
     const before = item.rotT;
     item.rotT += delta;
@@ -230,8 +232,20 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
     rotate(dragging, Math.sign(e.deltaY) * (e.shiftKey ? 0.087 : 0.26));
     return true;
   };
+  // Keyboard selection: ] / [ walk through the pieces on the stage (in the order they were added).
+  function cycle(dir) {
+    const list = getItems();
+    if (!list.length) return;
+    const i = selected ? list.indexOf(selected) : -1;
+    const next = list[(i + dir + list.length) % list.length];
+    select(next);
+    emit('cycle', { item: next, index: list.indexOf(next), total: list.length });
+  }
   const onKey = (e) => {
-    if (!selected || !enabled) return;
+    if (!enabled || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === ']' || e.key === '[') { e.preventDefault(); cycle(e.key === ']' ? 1 : -1); return; }
+    if (!selected) { hooks.keyNoSelection?.(e); return; }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); emit('activate', selected); return; }
     const step = e.shiftKey ? 2 : 0.5;
     if ((e.key === 'r' || e.key === 'R') && !e.metaKey && !e.ctrlKey) { e.preventDefault(); rotate(selected, e.shiftKey ? -0.26 : 0.26); return; }
     const nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] }[e.key];

@@ -7,6 +7,7 @@ import { createPlacement } from './placement.js';
 import { createBench } from './bench.js';
 import { createDoughPiece } from './dough.js';
 import { createOven } from './oven.js';
+import { prefersReducedMotion } from './quality.js';
 import { createSheet } from './sheet.js';
 
 // Public entry point for the Recipe on Fire game view. renderer.js (a classic script) reaches this
@@ -50,17 +51,70 @@ export function createRofGame(container, opts = {}) {
   const emit = (evt, payload) => (listeners[evt] || []).forEach(fn => fn(payload));
   const sfx = {}; // pickup / place / refuse / arrange, supplied by renderer.js (synthesized sounds)
 
+  // ---- accessibility ---------------------------------------------------------------------------------
+  // A visually hidden live region says what happened (placed, refused, selected, ...), so the stage is usable
+  // without seeing it; the canvas is a focusable "application" with its keys described.
+  const HIDDEN = 'position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;';
+  const liveEl = document.createElement('div');
+  liveEl.setAttribute('aria-live', 'polite'); liveEl.setAttribute('aria-atomic', 'true'); liveEl.style.cssText = HIDDEN;
+  const hintEl = document.createElement('div');
+  hintEl.id = `rof-stage-hint-${Math.random().toString(36).slice(2, 8)}`; hintEl.style.cssText = HIDDEN;
+  hintEl.textContent = 'Keys: ] and [ choose the next or previous piece. Enter moves the chosen piece between the bench and the tray. Arrow keys nudge it, hold Shift for bigger steps. R turns it. Delete sends it back to the bench. When a cutter is picked: arrow keys move it, Enter stamps it, Escape puts it down.';
+  container.append(liveEl, hintEl);
+  stage.canvas.setAttribute('role', 'application');
+  stage.canvas.setAttribute('aria-label', 'Baking tray. Focus here to move pieces with the keyboard.');
+  stage.canvas.setAttribute('aria-describedby', hintEl.id);
+  let liveTimer = null;
+  function announce(text) {
+    // Clearing first makes a repeated identical message be read again.
+    liveEl.textContent = '';
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(() => { liveEl.textContent = text; }, 30);
+  }
+
   const placement = createPlacement({ getItems: () => items, getTray: () => tray, getBench: () => bench });
+  function describeForSpeech(it, index, total) {
+    if (it.kind === 'dough') return `Piece ${index + 1} of ${total}, on the ${it.home}. Enter moves it to the ${it.home === 'tray' ? 'bench' : 'tray'}.`;
+    if (it.kind === 'cutter') return `Cutter ${index + 1} of ${total} on the sheet. Arrow keys move it, R turns it, Delete removes it.`;
+    return `Item ${index + 1} of ${total}.`;
+  }
+  // Enter / Space on the chosen piece: a bench piece goes to the first free spot on the tray, a tray piece goes back.
+  function activateItem(item) {
+    if (item.kind !== 'dough' || !placing) return;
+    const it = items.find(i => i.id === item.id);
+    if (!it) return;
+    if (it.home === 'tray') { sendToBench(it); announce('Moved to the bench.'); return; }
+    const n = placement.autoArrange([it]);
+    if (n) { it.lift = fall(1.5); interaction.wake(it); sfx.place?.(it, 'tray'); emit('change', items.map(describe)); reportPlacement(); const p = api.getPlacement(); announce(`Moved to the tray. ${p.placed} of ${p.total} on the tray.`); }
+    else { sfx.refuse?.(it); announce('No room on the tray for it.'); }
+  }
   const describe = (it) => ({ id: it.id, kind: it.kind, x: it.tx, y: it.ty, rot: it.rotT, home: it.home, data: it.data });
 
   const interaction = createInteraction({
     stage, placement,
-    sfx: { pickup: (i) => sfx.pickup?.(i), place: (i, where) => sfx.place?.(i, where), refuse: (i) => sfx.refuse?.(i) },
+    sfx: {
+      pickup: (i) => sfx.pickup?.(i),
+      place: (i, where) => {
+        sfx.place?.(i, where);
+        if (i && i.kind === 'dough') { const p = api.getPlacement(); announce(`Placed on the ${where}. ${p.placed} of ${p.total} on the tray.`); }
+        else if (i && i.kind === 'cutter') announce(`Cutter moved. ${cutterItems().length} on the sheet.`);
+      },
+      refuse: (i) => { sfx.refuse?.(i); announce("Can't place it there. It went back where it was."); },
+    },
     getItems: () => items,
     getRegion: () => tray?.region,
     getFloorY: () => tray?.floorTopY ?? 0,
     emit: (evt, item) => {
-      if (evt === 'delete') { if (placing && item.kind === 'dough') sendToBench(item); else removeItem(item.id); return; }
+      if (evt === 'validity') { announce(item.valid ? 'Can drop here.' : "Can't drop here."); return; }
+      if (evt === 'cycle') { announce(describeForSpeech(item.item, item.index, item.total)); return; }
+      if (evt === 'activate') { activateItem(item); return; }
+      if (evt === 'delete') {
+        if (placing && item.kind === 'dough') {
+          if (item.home === 'bench') announce('Already on the bench.');
+          else { sendToBench(item); announce('Moved to the bench.'); }
+        } else { const wasCutter = item.kind === 'cutter'; removeItem(item.id); if (wasCutter) announce(`Cutter removed. ${cutterItems().length} on the sheet.`); }
+        return;
+      }
       emit(evt, item && describe(item));
       if (evt === 'drop' || evt === 'dragstart') { emit('change', items.map(describe)); reportPlacement(); }
       if (evt === 'drop' || evt === 'move') cuttersChanged();
@@ -124,9 +178,10 @@ export function createRofGame(container, opts = {}) {
       stage.scene.add(item.group, item.outline);
     }
     placement.packOnBench(items);
-    items.forEach((it, i) => { it.x = it.tx; it.y = it.ty; it.baseY = it.baseYT; it.lift = 4 + (i % 5) * 0.6; interaction.wake(it); });
+    items.forEach((it, i) => { it.x = it.tx; it.y = it.ty; it.baseY = it.baseYT; it.lift = fall(4 + (i % 5) * 0.6); interaction.wake(it); });
 
     hud = document.createElement('div');
+    hud.setAttribute('aria-hidden', 'true'); // the live region already says it
     hud.style.cssText = 'position:absolute;top:10px;left:10px;padding:5px 11px;border-radius:999px;background:rgba(15,28,22,.72);color:#e6eee6;font:600 12px system-ui,sans-serif;pointer-events:none;';
     container.appendChild(hud);
     fitToStage();
@@ -143,7 +198,7 @@ export function createRofGame(container, opts = {}) {
   function autoArrange() {
     const pieces = doughItems().filter(i => i.home === 'bench');
     const n = placement.autoArrange(pieces);
-    pieces.forEach(it => { it.lift = 2.2; interaction.wake(it); });
+    pieces.forEach(it => { it.lift = fall(2.2); interaction.wake(it); });
     if (n) sfx.arrange?.();
     emit('change', items.map(describe));
     reportPlacement();
@@ -152,7 +207,7 @@ export function createRofGame(container, opts = {}) {
   function sendToBench(item) {
     item.startX = item.tx; item.startY = item.ty; item.startRot = item.rotT; item.startHome = item.home;
     placement.packOnBench([item]);
-    item.lift = 1.5;
+    item.lift = fall(1.5);
     interaction.wake(item);
     emit('change', items.map(describe));
     reportPlacement();
@@ -160,7 +215,7 @@ export function createRofGame(container, opts = {}) {
   function returnAllToBench() {
     const onTray = doughItems().filter(i => i.home === 'tray');
     placement.packOnBench(onTray);
-    onTray.forEach(it => { it.lift = 1.5; interaction.wake(it); });
+    onTray.forEach(it => { it.lift = fall(1.5); interaction.wake(it); });
     emit('change', items.map(describe));
     reportPlacement();
   }
@@ -259,9 +314,27 @@ export function createRofGame(container, opts = {}) {
     return prevWheel ? prevWheel(e) : false;
   };
   const onGhostKey = (e) => {
-    if (!ghost) return;
-    if (e.key === 'Escape') { disarmCutter(); }
-    else if ((e.key === 'r' || e.key === 'R') && !interaction.selected) rotateGhost(e.shiftKey ? -0.26 : 0.26);
+    if (!ghost || interaction.selected || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape') { disarmCutter(); announce('Cutter put down.'); return; }
+    if (e.key === 'r' || e.key === 'R') { rotateGhost(e.shiftKey ? -0.26 : 0.26); return; }
+    const step = e.shiftKey ? 2 : 0.5;
+    const move = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] }[e.key];
+    if (move) {
+      e.preventDefault();
+      // First arrow key shows the cutter in the middle of the tray; after that it moves.
+      const from = ghost.group.visible ? [ghost.tx, ghost.ty] : [tray.center.x, tray.center.y];
+      const p = interaction.probe(ghost, from[0] + (ghost.group.visible ? move[0] : 0), from[1] + (ghost.group.visible ? move[1] : 0));
+      ghost.x = ghost.tx = p.x; ghost.y = ghost.ty = p.y; ghost.invalid = !p.valid;
+      ghost.group.visible = true; ghost.sync(); ghost.outline.visible = true; stage.requestRender();
+      announce(p.valid ? 'Clear.' : 'Blocked.');
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (!ghost.group.visible) { announce('Move the cutter first with the arrow keys.'); return; }
+      const before = cutterItems().length;
+      stampAtGhost();
+      const after = cutterItems().length;
+      announce(after > before ? `Stamped. ${after} on the sheet.` : "Can't stamp there.");
+    }
   };
   const onGhostLeave = () => { if (ghost) { ghost.group.visible = false; ghost.outline.visible = false; stage.requestRender(); } };
   stage.canvas.addEventListener('pointermove', moveGhost);
@@ -272,7 +345,7 @@ export function createRofGame(container, opts = {}) {
   // Replaces every cutter with `list` ([{ shapeType, dims, x, y, materialId }]) -- used by auto-arrange.
   function setCutters(list) {
     cutterItems().forEach(c => removeItem(c.id, { quiet: true }));
-    list.forEach((c, i) => { const d = addCutter({ ...c, data: { materialId: c.materialId } }); const it = d && items.find(x => x.id === d.id); if (it) it.lift = 4 + (i % 6) * 0.5; });
+    list.forEach((c, i) => { const d = addCutter({ ...c, data: { materialId: c.materialId } }); const it = d && items.find(x => x.id === d.id); if (it) it.lift = fall(4 + (i % 6) * 0.5); });
     cuttersChanged();
     return cutterItems().length;
   }
@@ -284,7 +357,8 @@ export function createRofGame(container, opts = {}) {
   // (a dome catches the heat on top and browns early; a long thin loaf browns later).
   const DONENESS = { light: 0.52, golden: 0.68, dark: 0.88 };
   const SHAPE_K = { ball: 1.0, disc: 0.95, oval: 1.0, log: 1.14, sheet: 1.05 };
-  const reducedMotion = () => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } };
+  const reducedMotion = prefersReducedMotion;
+  const fall = (h) => (reducedMotion() ? 0 : h); // how far a piece drops in from (skipped with reduced motion)
 
   // Runs proof -> oven -> out. `model` is the deterministic rise model (see riseModel.js): how tall /
   // wide the pieces grow, how much of the rise happens before the oven, how fast they brown. Only
@@ -390,6 +464,7 @@ export function createRofGame(container, opts = {}) {
     oven = createOven({ scene: stage.scene, tier: stage.tier, plan: tray.plan, baseY: tray.floorTopY });
     fitToStage();
     const t0 = performance.now();
+    if (reducedMotion()) return true; // no drop-in
     tray.group.position.y = 5;
     stage.animate(() => {
       const t = Math.min(1, (performance.now() - t0) / 520);
@@ -413,7 +488,7 @@ export function createRofGame(container, opts = {}) {
       items.pop(); item.dispose();
       return null;
     }
-    item.lift = 7;
+    item.lift = fall(7);
     stage.scene.add(item.group, item.outline);
     interaction.wake(item);
     emit('change', items.map(describe));
@@ -538,6 +613,8 @@ export function createRofGame(container, opts = {}) {
     getCutters: () => cutterItems().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },
     setSfx: (fns) => Object.assign(sfx, fns),
+    announce,
+    focusStage: () => stage.canvas.focus({ preventScroll: true }),
     getBench: () => bench && { cx: bench.cx, cy: bench.cy, hw: bench.hw, hh: bench.hh },
     getPlacement: () => { const all = doughItems(); return { placed: all.filter(i => i.home === 'tray').length, total: all.length }; },
     setView: (v) => stage.setView(v),
@@ -555,6 +632,6 @@ export function createRofGame(container, opts = {}) {
     },
     _stage: stage, // exposed for the test harness
   };
-  stage.onDispose(() => { clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
+  stage.onDispose(() => { clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
   return api;
 }

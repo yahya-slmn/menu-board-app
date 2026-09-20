@@ -775,6 +775,7 @@ table.items-table.shapes-table td:not(:first-child) { white-space: nowrap; }
 .rof-count-row button { width: 30px; height: 30px; padding: 0; }
 /* Recipe on Fire's WebGL game view fills the same preview frame; it sets its own cursor per hover/drag. */
 .rof-game-wrap { position: absolute; inset: 0; }
+.rof-game-wrap canvas:focus-visible { outline: 3px solid #2d7dd2; outline-offset: -3px; }
 .material-preview-wrap .rof-game-wrap canvas { cursor: default; }
 .material-preview-wrap .rof-game-wrap canvas:active { cursor: default; }
 .material-preview-hint {

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { offsetConvexPolygon } from './trayModels.js';
+import { prefersReducedMotion } from './quality.js';
 
 // A draggable object on the tray (a cutter now; dough pieces later). Holds its plan-space pose
 // plus the little bit of physical state that makes dragging feel good: a target it springs toward,
@@ -88,7 +89,7 @@ export class PlacedItem {
     const prevLift = this.lift;
     this.lift += (liftTarget - this.lift) * (1 - Math.exp(-16 * dt));
     if (prevLift > 0.4 && this.lift < prevLift && !this.dragging && this.lift < 0.35 && this._landed !== true) {
-      this._landed = true; this.squashV = 0.9; // touchdown: one small squash-and-recover
+      this._landed = true; if (!prefersReducedMotion()) this.squashV = 0.9; // touchdown: one small squash-and-recover
     }
     if (this.dragging) this._landed = false;
     this.squashV += (-170 * this.squash - 15 * this.squashV) * dt;

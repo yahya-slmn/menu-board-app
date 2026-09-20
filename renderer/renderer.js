@@ -7031,10 +7031,22 @@ function openShapesModal() {
     let shapes = [];
     let form = null; // null = the list, else the shape being edited / created
     let changed = false;
+    const opener = document.activeElement; // focus goes back here when the dialog closes
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     document.body.appendChild(overlay);
-    const close = () => { overlay.remove(); resolve(changed); };
+    const close = () => { document.removeEventListener('keydown', onKeydown, true); overlay.remove(); if (opener && opener.focus) opener.focus(); resolve(changed); };
+    // Escape backs out of the form (or closes the list); Tab stays inside the dialog.
+    function onKeydown(e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (form) { form = null; renderList(); } else close(); return; }
+      if (e.key !== 'Tab') return;
+      const focusable = [...overlay.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled && el.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
+    document.addEventListener('keydown', onKeydown, true);
     const sizeText = (r) => (r.archetype === 'ball' || r.archetype === 'disc'
       ? `⌀ ${roundNice(Number(r.length_cm))} × H ${roundNice(Number(r.height_cm))} cm`
       : `${roundNice(Number(r.length_cm))} × ${roundNice(Number(r.width_cm))} × H ${roundNice(Number(r.height_cm))} cm`);
@@ -7046,17 +7058,17 @@ function openShapesModal() {
 
     function renderList() {
       overlay.innerHTML = `
-        <div class="modal shapes-modal">
-          <h2>Dough Shapes</h2>
-          <div class="table-scroll"><table class="items-table shapes-table">
+        <div class="modal shapes-modal" role="dialog" aria-modal="true" aria-labelledby="sh-title">
+          <h2 id="sh-title">Dough Shapes</h2>
+          <div class="table-scroll"><table class="items-table shapes-table" aria-label="Dough shapes">
             <thead><tr><th>Name</th><th>Type</th><th>Weight</th><th>Size</th><th></th></tr></thead>
             <tbody>
               ${shapes.length === 0 ? '<tr><td colspan="5" style="color:var(--neutral);">No shapes yet.</td></tr>' : shapes.map(r => `
                 <tr>
                   <td>${r.name}</td><td>${TYPE_SHORT[r.archetype] || r.archetype}</td><td>${roundNice(Number(r.unit_weight_grams))} g</td><td>${sizeText(r)}</td>
                   <td style="text-align:right; white-space:nowrap;">
-                    <button class="icon-btn" data-edit-shape="${r.id}">Edit</button>
-                    <button class="icon-btn danger" data-delete-shape="${r.id}">Delete</button>
+                    <button class="icon-btn" data-edit-shape="${r.id}" aria-label="Edit ${r.name}">Edit</button>
+                    <button class="icon-btn danger" data-delete-shape="${r.id}" aria-label="Delete ${r.name}">Delete</button>
                   </td>
                 </tr>`).join('')}
             </tbody>
@@ -7065,6 +7077,7 @@ function openShapesModal() {
           <div class="actions"><button class="primary" id="sh-close">Close</button></div>
         </div>`;
       overlay.querySelector('#sh-close').addEventListener('click', close);
+      overlay.querySelector('#sh-add-btn').focus();
       overlay.querySelector('#sh-add-btn').addEventListener('click', () => {
         form = { id: null, name: '', archetype: 'ball', weight: 90, lengthCm: 9.5, widthCm: 9.5, heightCm: 4.6, taperPct: 80, scoreCount: 0 };
         renderForm();
@@ -7086,23 +7099,23 @@ function openShapesModal() {
     function renderForm() {
       const isRound = () => form.archetype === 'ball' || form.archetype === 'disc';
       overlay.innerHTML = `
-        <div class="modal shapes-modal">
-          <h2>${form.id ? 'Edit Shape' : 'New Shape'}</h2>
-          <div class="field"><label>Name</label><input id="sh-name" value="${form.name.replace(/"/g, '&quot;')}" dir="auto" /></div>
-          <div class="field"><label>Type</label>
+        <div class="modal shapes-modal" role="dialog" aria-modal="true" aria-labelledby="sh-title">
+          <h2 id="sh-title">${form.id ? 'Edit Shape' : 'New Shape'}</h2>
+          <div class="field"><label for="sh-name">Name</label><input id="sh-name" value="${form.name.replace(/"/g, '&quot;')}" dir="auto" /></div>
+          <div class="field"><label for="sh-type">Type</label>
             <select id="sh-type" class="builder-select">${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${k === form.archetype ? 'selected' : ''}>${v}</option>`).join('')}</select>
           </div>
           <div class="shape-form-grid">
-            <div class="field"><label>Weight (g)</label><input id="sh-weight" type="number" min="5" max="5000" step="1" value="${form.weight}" /></div>
-            <div class="field"><label id="sh-length-label">${isRound() ? 'Diameter (cm)' : 'Length (cm)'}</label><input id="sh-length" type="number" min="2" max="120" step="0.1" value="${form.lengthCm}" /></div>
-            <div class="field" data-for="log oval"><label>Width (cm)</label><input id="sh-width" type="number" min="1" max="60" step="0.1" value="${form.widthCm}" /></div>
-            <div class="field"><label>Height (cm)</label><input id="sh-height" type="number" min="0.5" max="20" step="0.1" value="${form.heightCm}" /></div>
-            <div class="field" data-for="log"><label>Pointed ends (%)</label><input id="sh-taper" type="number" min="0" max="100" step="5" value="${form.taperPct}" /></div>
-            <div class="field" data-for="log oval"><label>Slashes</label><input id="sh-score" type="number" min="0" max="9" step="1" value="${form.scoreCount}" /></div>
+            <div class="field"><label for="sh-weight">Weight (g)</label><input id="sh-weight" type="number" min="5" max="5000" step="1" value="${form.weight}" /></div>
+            <div class="field"><label id="sh-length-label" for="sh-length">${isRound() ? 'Diameter (cm)' : 'Length (cm)'}</label><input id="sh-length" type="number" min="2" max="120" step="0.1" value="${form.lengthCm}" /></div>
+            <div class="field" data-for="log oval"><label for="sh-width">Width (cm)</label><input id="sh-width" type="number" min="1" max="60" step="0.1" value="${form.widthCm}" /></div>
+            <div class="field"><label for="sh-height">Height (cm)</label><input id="sh-height" type="number" min="0.5" max="20" step="0.1" value="${form.heightCm}" /></div>
+            <div class="field" data-for="log"><label for="sh-taper">Pointed ends (%)</label><input id="sh-taper" type="number" min="0" max="100" step="5" value="${form.taperPct}" /></div>
+            <div class="field" data-for="log oval"><label for="sh-score">Slashes</label><input id="sh-score" type="number" min="0" max="9" step="1" value="${form.scoreCount}" /></div>
           </div>
-          <canvas id="sh-preview" width="360" height="120" class="shape-preview"></canvas>
+          <canvas id="sh-preview" width="360" height="120" class="shape-preview" role="img" aria-label="Preview of the shape's outline and slashes"></canvas>
           <div style="font-size:11.5px; color:var(--neutral); margin:6px 0 4px;">Raw size at this weight. Pieces scale up or down when the dough is divided into more or fewer.</div>
-          <div id="sh-error" style="color:var(--danger, #c0392b); font-size:12.5px; min-height:18px;"></div>
+          <div id="sh-error" role="alert" style="color:var(--danger, #c0392b); font-size:12.5px; min-height:18px;"></div>
           <div class="actions"><button class="secondary" id="sh-cancel">Cancel</button><button class="primary" id="sh-save">Save</button></div>
         </div>`;
       const $ = (id) => overlay.querySelector(id);
@@ -7133,6 +7146,7 @@ function openShapesModal() {
         slashes.forEach(([x1, y1, x2, y2]) => { ctx.beginPath(); ctx.moveTo(X(x1), Y(y1)); ctx.lineTo(X(x2), Y(y2)); ctx.stroke(); });
       };
       syncVisibility(); drawPreview();
+      $('#sh-name').focus();
       overlay.querySelectorAll('input, select').forEach(el => el.addEventListener('input', () => { readForm(); syncVisibility(); drawPreview(); $('#sh-error').textContent = ''; }));
       $('#sh-cancel').addEventListener('click', () => { form = null; renderList(); });
       $('#sh-save').addEventListener('click', async () => {
@@ -8896,7 +8910,7 @@ function renderRecipeOnFireView(main) {
       sheetBtn.title = muffin ? 'Each cup is already a portion -- nothing to trim' : '';
       if (muffin && rofMode === 'sheet') {
         rofMode = 'shape';
-        document.querySelectorAll('#rof-mode-toggle [data-rof-mode]').forEach(b => b.classList.toggle('active', b.dataset.rofMode === 'shape'));
+        document.querySelectorAll('#rof-mode-toggle [data-rof-mode]').forEach(b => { b.classList.toggle('active', b.dataset.rofMode === 'shape'); b.setAttribute('aria-pressed', String(b.dataset.rofMode === 'shape')); });
         renderStepHeader();
       }
     }
@@ -8948,7 +8962,8 @@ function renderRecipeOnFireView(main) {
   function renderStepHeader() {
     const stepsEl = document.getElementById('rof-steps');
     if (!stepsEl) return;
-    stepsEl.innerHTML = rofStepLabels().map(s => `<span class="rof-step-pill ${s.key === rofStep ? 'active' : ''}">${s.label}</span>`).join('');
+    stepsEl.setAttribute('role', 'list'); stepsEl.setAttribute('aria-label', 'Steps');
+    stepsEl.innerHTML = rofStepLabels().map(s => `<span role="listitem" class="rof-step-pill ${s.key === rofStep ? 'active' : ''}" ${s.key === rofStep ? 'aria-current="step"' : ''}>${s.label}</span>`).join('');
   }
 
   function renderTrayStepPanel() {
@@ -8976,9 +8991,9 @@ function renderRecipeOnFireView(main) {
       <div id="rof-fill-summary"></div>
       <div class="field" style="margin-bottom:12px;">
         <label>Method</label>
-        <div class="mode-toggle" id="rof-mode-toggle">
-          <button type="button" class="mode-toggle-btn ${rofMode === 'shape' ? 'active' : ''}" data-rof-mode="shape">Shape &amp; Place</button>
-          <button type="button" class="mode-toggle-btn ${rofMode === 'sheet' ? 'active' : ''}" data-rof-mode="sheet">Sheet &amp; Trim</button>
+        <div class="mode-toggle" id="rof-mode-toggle" role="group" aria-label="Method">
+          <button type="button" class="mode-toggle-btn ${rofMode === 'shape' ? 'active' : ''}" data-rof-mode="shape" aria-pressed="${rofMode === 'shape'}">Shape &amp; Place</button>
+          <button type="button" class="mode-toggle-btn ${rofMode === 'sheet' ? 'active' : ''}" data-rof-mode="sheet" aria-pressed="${rofMode === 'sheet'}">Sheet &amp; Trim</button>
         </div>
         <div id="rof-mode-hint" style="font-size:12px; color:var(--neutral); margin-top:6px;"></div>
       </div>
@@ -8993,7 +9008,7 @@ function renderRecipeOnFireView(main) {
     showModeHint();
     panel.querySelectorAll('[data-rof-mode]').forEach(btn => btn.addEventListener('click', () => {
       rofMode = btn.dataset.rofMode;
-      panel.querySelectorAll('[data-rof-mode]').forEach(b => b.classList.toggle('active', b === btn));
+      panel.querySelectorAll('[data-rof-mode]').forEach(b => { b.classList.toggle('active', b === btn); b.setAttribute('aria-pressed', String(b === btn)); });
       showModeHint();
       renderStepHeader();
     }));
@@ -9122,9 +9137,9 @@ function renderRecipeOnFireView(main) {
       <h3 style="margin-bottom:6px;">Shape &amp; Place</h3>
       <div style="font-size:12.5px; color:var(--neutral); margin-bottom:10px;">Drag pieces from the bench onto the tray. Scroll while holding one to rotate it.</div>
       ${muffin ? `<div style="font-size:12.5px; margin-bottom:8px;" id="rof-muffin-note"></div>` : `
-        <div class="rof-shape-cards" id="rof-shape-cards">
+        <div class="rof-shape-cards" id="rof-shape-cards" role="group" aria-label="Shape">
           ${placeShapes().length === 0 ? '<div style="grid-column:1/-1; font-size:12.5px; color:var(--neutral);">No shapes yet -- add one.</div>' : placeShapes().map(sh => `
-            <button type="button" class="rof-shape-card ${sh.key === placeShapeKey ? 'active' : ''}" data-shape="${sh.key}">
+            <button type="button" class="rof-shape-card ${sh.key === placeShapeKey ? 'active' : ''}" data-shape="${sh.key}" aria-pressed="${sh.key === placeShapeKey}">
               <span class="rof-shape-name">${sh.label}</span>
               <span class="rof-shape-meta">${sh.weight} g &middot; ${sh.lengthCm} cm</span>
             </button>`).join('')}
@@ -9153,7 +9168,7 @@ function renderRecipeOnFireView(main) {
     panel.querySelectorAll('[data-shape]').forEach(btn => btn.addEventListener('click', async () => {
       if (btn.dataset.shape === placeShapeKey || !confirmReset()) return;
       placeShapeKey = btn.dataset.shape; placeCount = null;
-      panel.querySelectorAll('[data-shape]').forEach(b => b.classList.toggle('active', b === btn));
+      panel.querySelectorAll('[data-shape]').forEach(b => { b.classList.toggle('active', b === btn); b.setAttribute('aria-pressed', String(b === btn)); });
       await restart();
     }));
     const step = async (d) => {
@@ -9222,13 +9237,17 @@ function renderRecipeOnFireView(main) {
     await bakeCtl.promise;
     bakeCtl = null;
     bakeState = 'done';
+    lastAnnouncedPhase = null;
+    rofGame.announce('Baked.');
     if (rofStep === 'bake') renderTrayStepPanel();
   }
   const BAKE_PHASE_LABEL = { proof: 'Proofing', oven: 'In the oven', out: 'Coming out' };
+  let lastAnnouncedPhase = null;
   function updateBakeProgress({ phase, progress }) {
     const bar = document.getElementById('rof-bake-bar'), label = document.getElementById('rof-bake-phase');
-    if (bar) bar.style.width = `${Math.round(progress * 100)}%`;
+    if (bar) { bar.style.width = `${Math.round(progress * 100)}%`; bar.parentElement.setAttribute('aria-valuenow', String(Math.round(progress * 100))); }
     if (label) label.textContent = BAKE_PHASE_LABEL[phase] || '';
+    if (phase !== lastAnnouncedPhase) { lastAnnouncedPhase = phase; if (rofGame) rofGame.announce(BAKE_PHASE_LABEL[phase] || ''); }
   }
 
   // ---- Sheet & Trim: the dough as one sheet ------------------------------------------------------
@@ -9273,7 +9292,7 @@ function renderRecipeOnFireView(main) {
     if (bakeState === 'baking') {
       panel.innerHTML = `
         <h3 style="margin-bottom:10px;">Baking…</h3>
-        <div class="rof-progress"><div class="rof-progress-fill" id="rof-bake-bar"></div></div>
+        <div class="rof-progress" role="progressbar" aria-label="Bake progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="rof-bake-progress"><div class="rof-progress-fill" id="rof-bake-bar"></div></div>
         <div id="rof-bake-phase" style="font-size:12.5px; color:var(--neutral); margin:6px 0 14px;">Proofing</div>
         <button type="button" class="secondary" id="rof-skip-bake-btn">Skip</button>`;
       document.getElementById('rof-skip-bake-btn').addEventListener('click', () => bakeCtl && bakeCtl.skip());
@@ -9284,14 +9303,14 @@ function renderRecipeOnFireView(main) {
       <h3 style="margin-bottom:8px;">${ready ? 'Bake' : `Baked · ${doneLabel}`}</h3>
       ${ready ? `<ul class="rof-rise-notes">${(riseModel?.notes || []).map(n => `<li>${n}</li>`).join('')}</ul>
       <div class="field" style="margin-bottom:10px;">
-        <label>Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span> <button type="button" class="rof-link-btn" id="rof-rise-reset" ${riseScale === 1 ? 'hidden' : ''}>Reset</button></label>
-        <input type="range" id="rof-rise-slider" min="30" max="160" step="5" value="${Math.round(riseScale * 100)}" />
+        <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label> <button type="button" class="rof-link-btn" id="rof-rise-reset" ${riseScale === 1 ? 'hidden' : ''}>Reset</button>
+        <input type="range" id="rof-rise-slider" min="30" max="160" step="5" value="${Math.round(riseScale * 100)}" aria-describedby="rof-rise-hint" />
         <div id="rof-rise-hint" style="font-size:11.5px; color:var(--neutral); margin-top:3px;"></div>
       </div>
       <div class="field" style="margin-bottom:12px;">
         <label>Doneness</label>
-        <div class="mode-toggle" id="rof-doneness-toggle">
-          ${['light', 'golden', 'dark'].map(d => `<button type="button" class="mode-toggle-btn ${d === bakeDoneness ? 'active' : ''}" data-doneness="${d}">${d[0].toUpperCase() + d.slice(1)}</button>`).join('')}
+        <div class="mode-toggle" id="rof-doneness-toggle" role="group" aria-label="Doneness">
+          ${['light', 'golden', 'dark'].map(d => `<button type="button" class="mode-toggle-btn ${d === bakeDoneness ? 'active' : ''}" data-doneness="${d}" aria-pressed="${d === bakeDoneness}">${d[0].toUpperCase() + d.slice(1)}</button>`).join('')}
         </div>
       </div>` : ''}
       <div id="rof-place-summary">${sheetMode ? sheetSummaryHtml() : ''}</div>
@@ -9303,7 +9322,7 @@ function renderRecipeOnFireView(main) {
       </div>`;
     panel.querySelectorAll('[data-doneness]').forEach(btn => btn.addEventListener('click', () => {
       bakeDoneness = btn.dataset.doneness;
-      panel.querySelectorAll('[data-doneness]').forEach(b => b.classList.toggle('active', b === btn));
+      panel.querySelectorAll('[data-doneness]').forEach(b => { b.classList.toggle('active', b === btn); b.setAttribute('aria-pressed', String(b === btn)); });
     }));
     // Manual correction of the rise estimate (the model matches ingredient NAMES, so it can be wrong).
     const slider = document.getElementById('rof-rise-slider');
@@ -9311,6 +9330,7 @@ function renderRecipeOnFireView(main) {
       const hint = document.getElementById('rof-rise-hint');
       const refresh = () => {
         document.getElementById('rof-rise-val').textContent = `${Math.round(riseScale * 100)}%`;
+        slider.setAttribute('aria-valuetext', `${Math.round(riseScale * 100)} percent of the estimated rise`);
         document.getElementById('rof-rise-reset').hidden = riseScale === 1;
         hint.textContent = riseScale === 1 ? 'As estimated from the ingredients.'
           : rofMode === 'shape' && riseScale > 1.02 ? 'More than the room reserved on the tray -- pieces may touch.' : 'Adjusted by hand.';
@@ -9343,7 +9363,7 @@ function renderRecipeOnFireView(main) {
     return cutterMaterials;
   }
   function syncCutterCards() {
-    document.querySelectorAll('[data-cutter]').forEach(b => b.classList.toggle('active', String(b.dataset.cutter) === String(armedCutterId)));
+    document.querySelectorAll('[data-cutter]').forEach(b => { const on = String(b.dataset.cutter) === String(armedCutterId); b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); });
   }
   function armCutterById(id) {
     const m = cutterMaterials.find(x => String(x.id) === String(id));
@@ -9351,6 +9371,9 @@ function renderRecipeOnFireView(main) {
     if (String(armedCutterId) === String(id)) { rofGame.disarmCutter(); return; } // click the armed card again to put it down
     lastCutterId = m.id;
     rofGame.armCutter({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id });
+    // Move focus to the stage so the arrow keys position the cutter and Enter stamps it.
+    rofGame.focusStage();
+    rofGame.announce(`${m.name} picked. Arrow keys move it, Enter stamps it, Escape puts it down.`);
   }
 
   // Per-piece weight, count, utilization and waste -- the same area math as before, driven by however
@@ -9389,8 +9412,9 @@ function renderRecipeOnFireView(main) {
     const { material, dims: trayDims, footprint } = bakeSnapshot;
     // The pure 2D packing (0.5 cm margin from the wall, 0.3 cm between pieces, from the top-left).
     const result = computeCutterLayout(material.shape_type, footprint, trayDims, m.shape_type, dims, 0.5, 0.3, ROF_LAYOUT_CORNERS.tl, sheetInfo.sessionGrams);
-    rofGame.setCutters(result.placements.map(p => ({ shapeType: m.shape_type, dims, x: p.x, y: p.z, materialId: m.id })));
+    const placedN = rofGame.setCutters(result.placements.map(p => ({ shapeType: m.shape_type, dims, x: p.x, y: p.z, materialId: m.id })));
     playArrangeSound();
+    rofGame.announce(`${placedN} cutters arranged.`);
   }
 
   async function renderTrimStepPanel(panel) {
@@ -9423,7 +9447,7 @@ function renderRecipeOnFireView(main) {
     cards.innerHTML = cutterMaterials.length === 0
       ? '<div style="font-size:12.5px; color:var(--neutral);">No cutters yet -- add one in Materials.</div>'
       : cutterMaterials.map(m => `
-        <button type="button" class="rof-shape-card" data-cutter="${m.id}">
+        <button type="button" class="rof-shape-card" data-cutter="${m.id}" aria-pressed="false">
           <span class="rof-shape-name">${m.name}</span>
           <span class="rof-shape-meta">${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))}</span>
         </button>`).join('');
