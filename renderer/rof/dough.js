@@ -1,5 +1,19 @@
 import * as THREE from 'three';
-import { fbm2, rng } from './noise.js';
+import { fbm2, rng, tileableNoiseData } from './noise.js';
+
+// One shared noise texture for every dough material (see tileableNoiseData). Created lazily, never
+// disposed -- 64 KB, and a new WebGL context simply re-uploads it.
+let _noiseTex = null;
+function noiseTexture() {
+  if (!_noiseTex) {
+    _noiseTex = new THREE.DataTexture(tileableNoiseData(256, 32, 5), 256, 256, THREE.RedFormat, THREE.UnsignedByteType);
+    _noiseTex.wrapS = _noiseTex.wrapT = THREE.RepeatWrapping;
+    _noiseTex.minFilter = THREE.LinearMipmapLinearFilter; _noiseTex.magFilter = THREE.LinearFilter;
+    _noiseTex.generateMipmaps = true;
+    _noiseTex.needsUpdate = true;
+  }
+  return _noiseTex;
+}
 
 // Procedural dough pieces. One generator covers every shape: a piece is a plan outline (half-width
 // W(s) along its length s in [-1, 1]) plus a dome height profile, roughened with seeded noise so no
@@ -142,6 +156,7 @@ export function shapePreview(spec) {
 const GLSL_PARS = /* glsl */`
 uniform float uBake, uRise, uSeed, uTint, uH, uFlour, uScore, uLen, uWid;
 uniform vec3 uColRaw, uColGold, uColDeep, uColScore, uColFlour;
+uniform sampler2D uNoise;
 varying float vRho; varying vec2 vPlan; varying float vHt; varying vec3 vWN;
 #ifdef SHEET
 uniform sampler2D uMask; uniform vec4 uMaskBox; uniform float uScrap, uHasCuts;
@@ -149,12 +164,9 @@ uniform sampler2D uMask; uniform vec4 uMaskBox; uniform float uScrap, uHasCuts;
 float maskAt(vec2 p) { return texture2D(uMask, (vec2(p.x, -p.y) - uMaskBox.xy) / uMaskBox.zw).r; }
 #endif
 
-float hash13(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
-float vnoise(vec3 p){
-  vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(mix(hash13(i), hash13(i + vec3(1,0,0)), f.x), mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y),
-             mix(mix(hash13(i + vec3(0,0,1)), hash13(i + vec3(1,0,1)), f.x), mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y), f.z);
-}
+// Value noise, read from a precomputed tileable texture (1 lattice cell = 1 unit of p.xy; the seed in p.z
+// just offsets where in the texture we look). Was ~8 hashed lattice points per call, ~160 per pixel.
+float vnoise(vec3 p){ return texture2D(uNoise, p.xy * (1.0 / 32.0) + p.zz * vec2(0.3761, 0.6173)).r; }
 float fbm3(vec3 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p *= 2.03; a *= 0.5; } return s; }
 
 // Score slashes: diagonal cuts across the piece that open up as it rises. groove = the cut itself,
@@ -253,6 +265,7 @@ export function createDoughMaterial({ seed = 1, tint = 0, archetype = 'ball', sc
     uColRaw: { value: new THREE.Color(BAKE_COLORS.raw) }, uColGold: { value: new THREE.Color(BAKE_COLORS.gold) },
     uColDeep: { value: new THREE.Color(BAKE_COLORS.deep) }, uColScore: { value: new THREE.Color(BAKE_COLORS.scoreInterior) },
     uColFlour: { value: new THREE.Color(BAKE_COLORS.flour) },
+    uNoise: { value: noiseTexture() },
   };
   if (sheet) {
     // Sheet & Trim: the cutter mask, which covers the tray's plan bounds (minX, minY, width, height in cm).

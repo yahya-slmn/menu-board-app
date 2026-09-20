@@ -493,6 +493,44 @@ export function createRofGame(container, opts = {}) {
     }
   } catch { /* no storage -- no badge */ }
 
+  // ---- Graphics setting ------------------------------------------------------------------------------
+  // Auto (default): start from what the GPU suggests and let the frame-rate governor step down if it can't hold
+  // ~38 fps. Or fix High / Medium / Low. The choice is a personal, per-device preference (localStorage).
+  const QUALITY_KEY = 'rofGameQuality';
+  const QUALITY_LABEL = { auto: 'Auto', high: 'High', medium: 'Medium', low: 'Low' };
+  let qualityBox = null, noticeEl = null, noticeTimer = null;
+  function readQuality() { try { const q = localStorage.getItem(QUALITY_KEY); return QUALITY_LABEL[q] ? q : 'auto'; } catch { return 'auto'; } }
+  function showNotice(text) {
+    if (!noticeEl) {
+      noticeEl = document.createElement('div');
+      noticeEl.setAttribute('role', 'status');
+      noticeEl.style.cssText = 'position:absolute;left:50%;bottom:44px;transform:translateX(-50%);padding:6px 14px;border-radius:999px;background:rgba(15,28,22,.82);color:#e6eee6;font:12.5px system-ui,sans-serif;pointer-events:none;transition:opacity .4s;';
+      container.appendChild(noticeEl);
+    }
+    noticeEl.textContent = text; noticeEl.style.opacity = '1';
+    clearTimeout(noticeTimer); noticeTimer = setTimeout(() => { if (noticeEl) noticeEl.style.opacity = '0'; }, 4500);
+  }
+  function buildQualityControl() {
+    qualityBox = document.createElement('label');
+    qualityBox.style.cssText = 'position:absolute;right:10px;bottom:10px;display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:8px;background:rgba(15,28,22,.72);color:#e6eee6;font:11.5px system-ui,sans-serif;';
+    qualityBox.textContent = 'Graphics';
+    const sel = document.createElement('select');
+    sel.setAttribute('aria-label', 'Graphics quality');
+    sel.style.cssText = 'font:inherit;color:#0f1c16;background:#e6eee6;border:0;border-radius:5px;padding:1px 4px;';
+    Object.entries(QUALITY_LABEL).forEach(([k, v]) => { const o = document.createElement('option'); o.value = k; o.textContent = v; sel.appendChild(o); });
+    sel.value = readQuality();
+    sel.addEventListener('change', () => {
+      try { localStorage.setItem(QUALITY_KEY, sel.value); } catch { /* not persisted */ }
+      stage.setQuality(sel.value);
+      showNotice(`Graphics: ${QUALITY_LABEL[sel.value]}${sel.value === 'auto' ? ` (${stage.tier.name})` : ''}`);
+    });
+    qualityBox.appendChild(sel);
+    container.appendChild(qualityBox);
+  }
+  stage.onTierChange = (name) => { showNotice(`Graphics lowered to ${name} to keep things smooth. You can change this under Graphics.`); emit('quality', { tier: name, auto: true }); };
+  stage.setQuality(readQuality());
+  buildQualityControl();
+
   const api = {
     setTray, clearTray, addCutter, addDough, setDoughState, showLookdev, removeItem, clearItems, on,
     beginPlacement, endPlacement, autoArrange, returnAllToBench, playBake, resetBake, setInteractive,
@@ -506,6 +544,7 @@ export function createRofGame(container, opts = {}) {
     getItems: () => items.map(describe),
     resize: () => stage.resize(),
     setTier: (name) => stage.setTier(name),
+    setQuality: (q) => stage.setQuality(q),
     getStats: () => ({
       tier: stage.tier.name, family: stage.gpu.family, gpu: stage.gpu.raw, fps: stage.fps,
       drawCalls: stage.renderer.info.render.calls, triangles: stage.renderer.info.render.triangles,
@@ -516,6 +555,6 @@ export function createRofGame(container, opts = {}) {
     },
     _stage: stage, // exposed for the test harness
   };
-  stage.onDispose(() => { stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
+  stage.onDispose(() => { clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
   return api;
 }

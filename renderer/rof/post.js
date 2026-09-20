@@ -16,7 +16,8 @@ export function createPost({ renderer, scene, camera, tier }) {
   const pr = renderer.getPixelRatio();
   const target = new THREE.WebGLRenderTarget(size.x * pr, size.y * pr, {
     type: THREE.HalfFloatType,
-    samples: tier.msaa ? 4 : 0,
+    // Multisampling only on a low-density display; at 2x pixel density it costs a lot for little.
+    samples: tier.msaa && pr < 1.75 ? 4 : 0,
   });
   const composer = new EffectComposer(renderer, target);
   composer.setPixelRatio(pr);
@@ -24,6 +25,13 @@ export function createPost({ renderer, scene, camera, tier }) {
   composer.addPass(new RenderPass(scene, camera));
 
   const gtao = new GTAOPass(scene, camera, size.x, size.y);
+  // The AO pass (and the normal pass it renders) runs at a fraction of the frame size. The composer calls
+  // setSize with the full size, so scale it here.
+  if (tier.aoScale && tier.aoScale < 1) {
+    const fullSetSize = gtao.setSize.bind(gtao);
+    gtao.setSize = (w, h) => fullSetSize(Math.max(1, Math.round(w * tier.aoScale)), Math.max(1, Math.round(h * tier.aoScale)));
+    gtao.setSize(size.x * pr, size.y * pr);
+  }
   gtao.output = GTAOPass.OUTPUT.Default;
   // Scene units are centimetres, so the radius is "how far around a point occluders count".
   gtao.updateGtaoMaterial({ radius: 3.2, distanceExponent: 1.3, thickness: 1.4, scale: 2.0, samples: tier.aoSamples, distanceFallOff: 1.0, screenSpaceRadius: false });

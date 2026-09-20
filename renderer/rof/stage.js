@@ -16,7 +16,9 @@ export function createStage(container, { tier: forcedTier } = {}) {
   const gpu = probeGpu();
   let tier = TIERS[forcedTier] || TIERS[gpu.tierName];
 
-  const renderer = new THREE.WebGLRenderer({ antialias: tier.msaa, powerPreference: 'high-performance' });
+  // Context-level antialiasing only matters when rendering straight to the canvas; skip it on a dense display
+  // (and the post-processing path renders offscreen anyway -- see post.js).
+  const renderer = new THREE.WebGLRenderer({ antialias: tier.msaa && (window.devicePixelRatio || 1) < 1.75, powerPreference: 'high-performance' });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -114,8 +116,18 @@ export function createStage(container, { tier: forcedTier } = {}) {
     requestRender();
   }
 
+  // The ratio to render at: the display's, capped by the tier, then scaled down further if the drawing buffer
+  // would exceed the tier's pixel budget (a maximized window on a big display).
+  function effectivePixelRatio() {
+    let pr = Math.min(window.devicePixelRatio || 1, tier.dprCap);
+    const w = container.clientWidth || 1, h = container.clientHeight || 1;
+    const px = w * h * pr * pr;
+    if (px > tier.maxPixels) pr *= Math.sqrt(tier.maxPixels / px);
+    return Math.max(0.75, pr);
+  }
+
   function applyTier() {
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, tier.dprCap));
+    renderer.setPixelRatio(effectivePixelRatio());
     if (post) { post.dispose(); post = null; }
     if (tier.ao) post = createPost({ renderer, scene, camera, tier });
     if (post && ovenT > 0) post.setOvenFx({ bloom: 0.36 * ovenT, heat: ovenT, time: ovenTime });
@@ -131,7 +143,9 @@ export function createStage(container, { tier: forcedTier } = {}) {
   // ---- render loop (on demand) -----------------------------------------------------------------
   const tickers = new Set();
   let raf = 0, dirty = true, last = 0, disposed = false, hooks = [];
+  let locked = false; // a fixed quality was chosen: the governor must not change it
   const governor = new FrameGovernor(() => {
+    if (locked) return;
     const next = lowerTier(tier.name);
     if (!next) return;
     tier = TIERS[next];
@@ -178,6 +192,8 @@ export function createStage(container, { tier: forcedTier } = {}) {
   function resize(force) {
     const w = container.clientWidth, h = container.clientHeight;
     if (!w || !h) return;
+    const pr = effectivePixelRatio();
+    if (Math.abs(pr - renderer.getPixelRatio()) > 0.01) renderer.setPixelRatio(pr);
     renderer.setSize(w, h, false);
     post?.setSize(w, h);
     canvas.style.width = '100%'; canvas.style.height = '100%';
@@ -203,6 +219,14 @@ export function createStage(container, { tier: forcedTier } = {}) {
     fit, animate, requestRender, resize, setView, setOvenLook,
     get post() { return post; }, // exposed for tuning/tests
     setTier(name) { if (TIERS[name]) { tier = TIERS[name]; applyTier(); } },
+    // 'auto' starts from what the GPU probe suggests and lets the governor step down; a tier name fixes it.
+    setQuality(q) {
+      locked = q !== 'auto';
+      const name = q === 'auto' ? gpu.tierName : q;
+      if (TIERS[name] && tier.name !== name) { tier = TIERS[name]; applyTier(); }
+      governor.reset();
+    },
+    get locked() { return locked; },
     onTierChange: null,
     wheelHook: null,
     dispose() {

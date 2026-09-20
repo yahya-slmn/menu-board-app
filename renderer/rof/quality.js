@@ -3,10 +3,16 @@
 // one notch lower), and FrameGovernor steps it down further at runtime if the measured frame rate
 // can't hold -- so a slow machine degrades gracefully instead of stuttering.
 
+// dprCap       highest device-pixel-ratio to render at.
+// maxPixels    budget for the drawing buffer: a very large window renders below the display's native density
+//              rather than blow the frame time (the stage scales the ratio down to fit).
+// msaa         allow multisampling -- but only where the ratio is under 1.75 (see post.js): on a dense
+//              (Retina) display edges are already sharp and 4x MSAA on a half-float target costs ~7 ms.
+// aoScale      ambient occlusion is computed at this fraction of the frame size (it is soft anyway).
 export const TIERS = {
-  high:   { name: 'high',   dprCap: 2,   shadowMap: 2048, msaa: true,  ao: true,  aoSamples: 16, bloom: true,  particles: 1.0 },
-  medium: { name: 'medium', dprCap: 1.5, shadowMap: 1024, msaa: true,  ao: true,  aoSamples: 8,  bloom: true,  particles: 0.6 },
-  low:    { name: 'low',    dprCap: 1,   shadowMap: 512,  msaa: false, ao: false, aoSamples: 0,  bloom: false, particles: 0.3 },
+  high:   { name: 'high',   dprCap: 2,   maxPixels: 3.6e6, shadowMap: 2048, msaa: true,  ao: true,  aoSamples: 16, aoScale: 0.5, bloom: true,  particles: 1.0 },
+  medium: { name: 'medium', dprCap: 1.5, maxPixels: 2.4e6, shadowMap: 1024, msaa: true,  ao: true,  aoSamples: 8,  aoScale: 0.5, bloom: true,  particles: 0.6 },
+  low:    { name: 'low',    dprCap: 1,   maxPixels: 1.3e6, shadowMap: 512,  msaa: false, ao: false, aoSamples: 0,  aoScale: 1,   bloom: false, particles: 0.3 },
 };
 const TIER_ORDER = ['high', 'medium', 'low'];
 
