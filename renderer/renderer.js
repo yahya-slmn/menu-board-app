@@ -13,14 +13,18 @@ const state = {
   currentGeneratedMenuId: null,
   builder: { label: '', createdBy: '', startDate: '', endDate: '', numWeekdays: 20, activeSection: null, days: [], sections: {} },
   // Menu Ingredients Generator -- purely in-memory, nothing here is ever saved to Supabase.
-  // `rows` is the flat { sheetName, rowNumber, date, weekday, category, dishName, ingredients }
-  // list parse-and-suggest-menu-ingredients returned, kept here (not a local variable in
+  // `files` is one entry per file selected in the last upload action (whether that was one file
+  // or several at once -- mi-file-input carries `multiple`): { fileIndex, fileName, rows, failures,
+  // error }, where `rows` is the flat { sheetName, rowNumber, date, weekday, category, dishName,
+  // ingredients, allergens } list parse-and-suggest-menu-ingredients returned for THAT file (empty
+  // + `error` set if that one file failed to parse -- the rest of the batch still succeeds
+  // independently, see main.js's processOneMenuIngredientsFile). Kept here (not a local variable in
   // renderMenuIngredientsView) so navigating away and back doesn't lose an in-progress review.
-  // `uploadToken` identifies which upload these rows belong to -- generated fresh per upload
-  // attempt and echoed back by main.js once its parse actually wins the race to be "current"; a
-  // later export sends it back so main.js can refuse to export against a superseded upload's
-  // in-memory workbook (see main.js's own comment on menuIngredientsToken).
-  menuIngredients: { fileName: '', rows: [], failures: [], uploadToken: null },
+  // `uploadToken` identifies which upload batch these files belong to -- generated fresh per
+  // upload attempt and echoed back by main.js once its parse actually wins the race to be
+  // "current"; a later export sends it back so main.js can refuse to export against a superseded
+  // upload's in-memory workbooks (see main.js's own comment on menuIngredientsToken).
+  menuIngredients: { files: [], uploadToken: null },
   // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
   // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
   // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
@@ -1758,145 +1762,181 @@ async function renderExportAllView(main) {
 // ============================================================
 function renderMenuIngredientsView(main) {
   const mi = state.menuIngredients;
+  const hasUpload = mi.files.length > 0;
+  const exportableFiles = mi.files.filter(f => f.rows && f.rows.length);
+  const totalRows = exportableFiles.reduce((sum, f) => sum + f.rows.length, 0);
 
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Menu Ingredients Generator</h1><span class="section-pill">Upload a menu, review AI-suggested ingredients, export -- nothing is saved</span></div>
     </div>
     <div class="generate-controls" style="align-items:center;">
-      <button class="primary" id="mi-upload-btn">${mi.rows.length ? 'Upload a Different File' : 'Upload Menu File'}</button>
-      <input type="file" id="mi-file-input" accept=".xlsx" hidden />
-      ${mi.rows.length ? `<button class="secondary" id="mi-export-btn">Export to Excel</button>` : ''}
+      <button class="primary" id="mi-upload-btn">${hasUpload ? 'Upload Different File(s)' : 'Upload Menu File(s)'}</button>
+      <input type="file" id="mi-file-input" accept=".xlsx" multiple hidden />
+      ${exportableFiles.length ? `<button class="secondary" id="mi-export-btn">Export to Excel</button>` : ''}
       <span id="mi-export-status" style="color:var(--neutral); font-size:12.5px;"></span>
     </div>
     <div id="mi-progress-wrap"></div>
-    ${mi.fileName ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${mi.rows.length} dish row(s) parsed from "${mi.fileName}"</div>` : ''}
+    ${hasUpload ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${totalRows} dish row(s) parsed across ${exportableFiles.length} of ${mi.files.length} file(s)</div>` : ''}
     <div id="mi-review"></div>
   `;
-  // mi.failures (layout-inference notes, and any dish the AI genuinely couldn't suggest
+  // Per-file `failures` (layout-inference notes, and any dish the AI genuinely couldn't suggest
   // anything for) is intentionally not rendered here anymore -- it's still returned from
   // parse-and-suggest-menu-ingredients and logged there (main.js, log.warn), just not shown as
   // a yellow box in this view. A dish the AI failed on still appears below as a normal row with
   // an empty Ingredients input -- category and dish name are still populated, so a genuinely
   // blank one stays visually obvious as a gap in an otherwise-filled column, just without the
-  // explanatory text.
+  // explanatory text. A file that failed to parse AT ALL (its own `.error`) DOES still get a
+  // visible marker -- see renderMenuIngredientsFiles below -- since that's not a per-row gap, it's
+  // the entire file missing from the export.
 
   document.getElementById('mi-upload-btn').addEventListener('click', () => {
     document.getElementById('mi-file-input').click();
   });
 
   document.getElementById('mi-file-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
+    const files = [...e.target.files];
     e.target.value = '';
-    if (!file) return;
+    if (files.length === 0) return;
     // Temporary diagnostic logging for the "hangs on second upload" investigation -- mirrors
     // main.js's own miLog calls so a live repro shows definitively whether the renderer or the
     // main process is the one that actually stops making progress. Remove once confirmed fixed.
     const miLog = (msg) => console.log(`[mi-renderer ${new Date().toISOString()}] ${msg}`);
-    miLog(`file selected: "${file.name}", ${file.size} bytes`);
+    miLog(`${files.length} file(s) selected: ${files.map(f => `"${f.name}" (${f.size}b)`).join(', ')}`);
 
-    // Disabled for the whole parse -- previously clickable the entire time, so a chef who saw no
-    // movement (nothing updated the "Reading file..." label during parsing -- see the new
+    // Disabled for the whole batch -- previously clickable the entire time, so a chef who saw no
+    // movement (nothing updated the "Reading file..." label during parsing -- see the
     // e.sender.send calls in main.js fixing that) could click Upload again mid-parse, kicking off
-    // a second concurrent parse. Both would eventually race to set the same shared in-memory
-    // workbook, and whichever finished LAST silently won regardless of which one's rows were on
+    // a second concurrent batch. Both would eventually race to populate the same shared in-memory
+    // file map, and whichever finished LAST silently won regardless of which one's rows were on
     // screen -- root cause of the earlier stale-export bug. uploadToken (below) closes that race
     // even if this ever gets bypassed some other way; this disable just prevents the easy trigger.
     const uploadBtn = document.getElementById('mi-upload-btn');
     uploadBtn.disabled = true;
 
-    // Clear the previous upload's review table (if any) before this one starts, rather than
+    // Clear the previous upload's review table(s) (if any) before this one starts, rather than
     // waiting for a successful parse to replace it -- a large prior table (potentially thousands
     // of rows, each with its own input) otherwise sits fully live in the DOM for the entire
     // duration of this new upload's file-read/parse/AI-suggest work, and a renderer window
     // carrying that much retained DOM can feel unresponsive everywhere, not just in this view --
     // easy to mistake for the whole app being frozen.
     document.getElementById('mi-review').innerHTML = '';
-    miLog('old review table cleared, upload button disabled');
+    miLog('old review table(s) cleared, upload button disabled');
 
     const uploadToken = crypto.randomUUID();
     miLog(`uploadToken generated: ${uploadToken}`);
     const progressWrap = document.getElementById('mi-progress-wrap');
-    const panel = createProgressPanel(progressWrap, { label: 'Reading file…' });
-    const unsubscribe = window.api.onMenuIngredientsProgress((payload) => {
-      miLog(`progress event received from main: ${JSON.stringify(payload)}`);
-      panel.update(payload);
+    // One progress row per file (same spinner/message pattern Clean Menu for Sharing already uses
+    // for its own multi-file upload -- see renderCleanMenuView), since each file's parse/AI-suggest
+    // status here is genuinely independent, not a single shared percentage.
+    progressWrap.innerHTML = `
+      <div class="progress-panel">
+        ${files.map((f, i) => `
+          <div class="progress-panel-row" data-file-row="${i}">
+            <span class="progress-panel-spinner" data-file-icon style="display:inline-block; width:14px;"></span>
+            <span class="progress-panel-message">${f.name}</span>
+            <span class="progress-panel-meta" data-file-status>Queued…</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    function setRowStatus(fileIndex, stage, message) {
+      const row = progressWrap.querySelector(`[data-file-row="${fileIndex}"]`);
+      if (!row) return;
+      const statusEl = row.querySelector('[data-file-status]');
+      const iconEl = row.querySelector('[data-file-icon]');
+      if (statusEl && message != null) statusEl.textContent = message;
+      if (iconEl && (stage === 'done' || stage === 'error')) {
+        iconEl.className = '';
+        iconEl.style.cssText = 'display:inline-block; width:14px; text-align:center; font-weight:600;';
+        iconEl.textContent = stage === 'done' ? '✓' : '✕';
+        iconEl.style.color = stage === 'done' ? 'var(--sage-dark)' : 'var(--danger, #c0392b)';
+      }
+    }
+    const unsubscribe = window.api.onMenuIngredientsProgress(({ fileIndex, stage, message, current, total }) => {
+      miLog(`progress event received from main: file ${fileIndex} -- ${message}`);
+      const meta = typeof total === 'number' && total > 0 ? ` (${current}/${total})` : '';
+      setRowStatus(fileIndex, stage, `${message}${meta}`);
     });
     try {
-      miLog('starting FileReader.readAsDataURL()');
-      const base64 = await new Promise((resolve, reject) => {
+      miLog('reading all files as base64…');
+      const filesPayload = await Promise.all(files.map((file) => new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onload = () => resolve({ fileName: file.name, base64: reader.result.split(',')[1] });
         reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(file);
-      });
-      miLog(`FileReader finished -- base64 length=${base64.length} -- invoking parseAndSuggestMenuIngredients`);
-      const result = await window.api.parseAndSuggestMenuIngredients({ base64, uploadToken });
+      })));
+      miLog(`all files read -- invoking parseAndSuggestMenuIngredients with ${filesPayload.length} file(s)`);
+      const result = await window.api.parseAndSuggestMenuIngredients({ files: filesPayload, uploadToken });
       miLog(`parseAndSuggestMenuIngredients invoke RESOLVED -- success=${result.success}, cancelled=${!!result.cancelled}`);
       if (!result.success) {
-        if (!result.cancelled) alert(`Couldn't process this file: ${result.error}`);
+        if (!result.cancelled) alert(`Couldn't process these file(s): ${result.error}`);
         return;
       }
-      state.menuIngredients = { fileName: file.name, rows: result.rows, failures: result.failures || [], uploadToken };
+      // Reconciles every row against the final per-file results, same reasoning as Clean Menu for
+      // Sharing's own post-loop reconcile -- guaranteed to reflect the true final state even if a
+      // progress event was somehow missed.
+      result.files.forEach((f) => setRowStatus(f.fileIndex, f.success ? 'done' : 'error', f.success ? 'Done' : f.error));
+      state.menuIngredients = { files: result.files, uploadToken };
       renderMenuIngredientsView(main);
-      miLog('view re-rendered with new rows');
+      miLog('view re-rendered with new files');
     } catch (err) {
       miLog(`caught error: ${err.message}`);
-      alert(`Couldn't process this file: ${err.message}`);
+      alert(`Couldn't process these file(s): ${err.message}`);
     } finally {
       // Unconditional, regardless of which branch above ran -- renderMenuIngredientsView(main)
-      // on the success path replaces this whole view's innerHTML, which would otherwise orphan
-      // the panel's own setInterval (clearing a container's innerHTML doesn't stop a JS timer
-      // that already captured references to nodes inside it) and leave it silently ticking
-      // forever against detached DOM.
+      // on the success path replaces this whole view's innerHTML, so there's nothing stateful
+      // left to unwind there; on a failure path the progress rows just stay as their last status.
       unsubscribe();
-      panel.destroy();
-      // Only reachable here on failure -- a successful parse already replaced this whole view
-      // (including this exact button) via renderMenuIngredientsView(main) above, so there's
-      // nothing left to re-enable on that path.
       if (document.body.contains(uploadBtn)) uploadBtn.disabled = false;
       miLog('finally block done');
     }
   });
 
-  if (mi.rows.length) {
-    renderMenuIngredientsReview(document.getElementById('mi-review'), mi.rows);
+  if (hasUpload) {
+    renderMenuIngredientsFiles(document.getElementById('mi-review'), mi.files);
 
-    document.getElementById('mi-export-btn').addEventListener('click', async () => {
-      const miLog = (msg) => console.log(`[mi-renderer ${new Date().toISOString()}] ${msg}`);
-      const btn = document.getElementById('mi-export-btn');
-      const statusEl = document.getElementById('mi-export-status');
-      btn.disabled = true;
-      statusEl.textContent = 'Exporting…';
-      miLog(`export clicked -- invoking exportMenuIngredients, uploadToken=${mi.uploadToken}`);
-      try {
-        const result = await window.api.exportMenuIngredients({ rows: mi.rows, uploadToken: mi.uploadToken });
-        miLog(`exportMenuIngredients invoke RESOLVED -- success=${result.success}, cancelled=${!!result.cancelled}`);
-        if (result.success) statusEl.textContent = `Exported to ${result.path}`;
-        else if (!result.cancelled) statusEl.textContent = `Export failed: ${result.error || 'unknown error'}`;
-        else statusEl.textContent = '';
-      } catch (err) {
-        statusEl.textContent = `Export failed: ${err.message}`;
-      } finally {
-        btn.disabled = false;
-      }
-    });
+    if (exportableFiles.length) {
+      document.getElementById('mi-export-btn').addEventListener('click', async () => {
+        const miLog = (msg) => console.log(`[mi-renderer ${new Date().toISOString()}] ${msg}`);
+        const btn = document.getElementById('mi-export-btn');
+        const statusEl = document.getElementById('mi-export-status');
+        btn.disabled = true;
+        statusEl.textContent = 'Exporting…';
+        const exportPayload = exportableFiles.map(f => ({ fileIndex: f.fileIndex, rows: f.rows }));
+        miLog(`export clicked -- invoking exportMenuIngredients for ${exportPayload.length} file(s), uploadToken=${mi.uploadToken}`);
+        try {
+          const result = await window.api.exportMenuIngredients({ files: exportPayload, uploadToken: mi.uploadToken });
+          miLog(`exportMenuIngredients invoke RESOLVED -- success=${result.success}, cancelled=${!!result.cancelled}`);
+          if (result.success) {
+            statusEl.textContent = result.count > 1
+              ? `Exported ${result.count} files to ${result.path}`
+              : `Exported to ${result.path}`;
+          } else if (!result.cancelled) {
+            statusEl.textContent = `Export failed: ${result.error || 'unknown error'}`;
+          } else {
+            statusEl.textContent = '';
+          }
+        } catch (err) {
+          statusEl.textContent = `Export failed: ${err.message}`;
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
   } else {
     // Pre-upload empty state -- otherwise this screen is just bare space until a file's
     // uploaded and processed. Mirrors .empty-state's usual centered heading+sentence
     // convention (see e.g. Recipe Book's "No recipes yet"), extended with a 3-step visual
-    // guide and its own prominent CTA -- reuses the SAME hidden #mi-file-input/'change'
-    // handler wired above (mi-upload-btn's own), just a second button that opens the same
-    // picker, so there's no separate upload code path to keep in sync.
+    // guide. Purely explanatory -- the one upload entry point is the top-bar mi-upload-btn.
     document.getElementById('mi-review').innerHTML = `
       <div class="empty-state mi-empty-state">
         <div class="display">Upload a menu to get started</div>
-        <div class="mi-empty-tagline">Upload a menu, review AI-suggested ingredients, export -- nothing is saved.</div>
         <div class="mi-steps">
           <div class="mi-step">
             <div class="mi-step-num">1</div>
-            <div class="mi-step-title">Upload a menu file</div>
-            <div class="mi-step-desc">An export from Generate Menu, Build Menu, or Export All Sections</div>
+            <div class="mi-step-title">Upload menu file(s)</div>
+            <div class="mi-step-desc">One or more exports from Generate Menu, Build Menu, or Export All Sections</div>
           </div>
           <div class="mi-step">
             <div class="mi-step-num">2</div>
@@ -1906,16 +1946,38 @@ function renderMenuIngredientsView(main) {
           <div class="mi-step">
             <div class="mi-step-num">3</div>
             <div class="mi-step-title">Review, edit, export</div>
-            <div class="mi-step-desc">Adjust anything, then export the annotated menu back to Excel</div>
+            <div class="mi-step-desc">Adjust anything, then export. One file exports directly; several bundle into one zip</div>
           </div>
         </div>
-        <button class="primary" id="mi-upload-empty-btn">Upload Menu File</button>
       </div>
     `;
-    document.getElementById('mi-upload-empty-btn').addEventListener('click', () => {
-      document.getElementById('mi-file-input').click();
-    });
   }
+}
+
+// Wraps the existing per-file renderMenuIngredientsReview (unchanged below -- it already only
+// needs a container + a rows array, so it works as-is per file) in a heading per uploaded file, so
+// N files uploaded together each get their own clearly-labeled review table rather than one
+// table with no indication of which file a row came from. A file that failed to parse entirely
+// (f.error set, f.rows empty) shows its error inline instead of an empty table.
+function renderMenuIngredientsFiles(container, files) {
+  const multi = files.length > 1;
+  container.innerHTML = files.map((f, i) => `
+    <div class="mi-file-block" style="margin-bottom:28px;">
+      ${multi ? `
+        <div style="font-weight:700; font-size:15px; margin-bottom:8px; padding-bottom:6px; border-bottom:2px solid var(--line);">
+          ${f.fileName}
+          ${f.rows && f.rows.length ? '' : `<span style="font-weight:400; font-size:12.5px; color:var(--danger, #c0392b); margin-left:8px;">${(f.error || 'No rows found').replace(/</g, '&lt;')}</span>`}
+        </div>
+      ` : ''}
+      <div id="mi-file-review-${i}"></div>
+    </div>
+  `).join('');
+  files.forEach((f, i) => {
+    if (f.rows && f.rows.length) renderMenuIngredientsReview(document.getElementById(`mi-file-review-${i}`), f.rows);
+    else if (!multi) {
+      document.getElementById(`mi-file-review-${i}`).innerHTML = `<div style="color:var(--danger, #c0392b); font-size:13px;">${(f.error || 'No rows found').replace(/</g, '&lt;')}</div>`;
+    }
+  });
 }
 
 // Groups the flat rows list by sheet (section) then by date, preserving the source file's own
