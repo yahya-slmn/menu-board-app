@@ -409,6 +409,7 @@ async function init() {
   state.proteinTypes = await window.api.getProteinTypes();
   state.currentSection = state.sections[0].code;
 
+  wireSidebarToggle();
   renderSectionNav();
   wireNav();
   wireRefreshButton();
@@ -588,6 +589,11 @@ function renderSectionNav() {
   el.querySelectorAll('[data-section]').forEach(btn => {
     btn.addEventListener('click', () => {
       state.currentSection = btn.dataset.section;
+      if (state.currentView !== 'items') {
+        resetDrilldownScreens();
+        state.currentView = 'items';
+        state.itemCatalogExpanded = true;
+      }
       renderSectionNav();
       renderView();
     });
@@ -600,6 +606,12 @@ const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll', 'menuIngredients', '
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
+      // Collapsed rail: Dish Catalog's sections live in a flyout beside the rail rather than an
+      // inline sub-list -- clicking the icon just opens/closes that flyout (see wireSidebarToggle).
+      if (btn.dataset.view === 'items' && isSidebarCollapsed()) {
+        toggleRailFlyout(btn, document.getElementById('section-nav'));
+        return;
+      }
       // Clicking Dish Catalog while it's already open toggles its own section sub-list
       // open/closed, like a normal collapsible nav section; clicking it from anywhere else
       // always opens it expanded. Picking a different nav item just switches views -- the
@@ -620,6 +632,10 @@ function wireNav() {
   // sub-list, landing on the first child (Generate Menu) the first time you enter the group,
   // same interaction as Dish Catalog above.
   document.getElementById('menu-parent-btn').addEventListener('click', () => {
+    if (isSidebarCollapsed()) {
+      toggleRailFlyout(document.getElementById('menu-parent-btn'), document.getElementById('menu-sublist'));
+      return;
+    }
     if (MENU_GROUP_VIEWS.includes(state.currentView)) {
       state.menuGroupExpanded = !state.menuGroupExpanded;
     } else {
@@ -629,6 +645,74 @@ function wireNav() {
     }
     renderView();
   });
+}
+
+// ---- Collapsible sidebar. Collapsed state is a personal, per-device preference (like the sound
+// mute above), so it lives in localStorage, not Supabase -- and survives view changes/restarts.
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'menuBoard.sidebarCollapsed';
+
+function isSidebarCollapsed() {
+  return document.getElementById('app').classList.contains('sidebar-collapsed');
+}
+
+function closeRailFlyout() {
+  document.querySelectorAll('.section-sublist.flyout-open').forEach(el => el.classList.remove('flyout-open'));
+}
+
+// The rail has no room for text sub-lists, so a group's children (Dish Catalog's sections, the
+// Menu screens) open as a fixed-position panel next to the group's icon. Fixed (not absolute)
+// because .sidebar scrolls (overflow-y:auto), which would clip an absolutely-positioned flyout.
+function toggleRailFlyout(parentBtn, sublistEl) {
+  const wasOpen = sublistEl.classList.contains('flyout-open');
+  closeRailFlyout();
+  if (wasOpen) return;
+  const rect = parentBtn.getBoundingClientRect();
+  const top = Math.max(8, Math.min(rect.top, window.innerHeight - sublistEl.scrollHeight - 24));
+  sublistEl.style.setProperty('--flyout-top', `${top}px`);
+  sublistEl.classList.add('flyout-open');
+}
+
+function applySidebarState(collapsed) {
+  const app = document.getElementById('app');
+  app.classList.toggle('sidebar-collapsed', collapsed);
+  const toggle = document.getElementById('sidebar-toggle');
+  const label = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  toggle.setAttribute('aria-label', label);
+  toggle.setAttribute('title', label);
+  toggle.setAttribute('aria-expanded', String(!collapsed));
+  // Icon-only buttons need a name on hover; the visible label is hidden in the rail.
+  document.querySelectorAll('.sidebar > .nav-btn').forEach(btn => {
+    const name = btn.querySelector('.nav-label')?.textContent.trim();
+    if (collapsed && name) btn.setAttribute('title', name);
+    else btn.removeAttribute('title');
+  });
+  closeRailFlyout();
+}
+
+function wireSidebarToggle() {
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1'; } catch { /* no storage -- start expanded */ }
+  applySidebarState(collapsed);
+
+  document.getElementById('sidebar-toggle').addEventListener('click', () => {
+    const next = !isSidebarCollapsed();
+    applySidebarState(next);
+    try { localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0'); } catch { /* just doesn't persist */ }
+    // The 3D views (Recipe on Fire, Dough Shapes) size their canvas from window 'resize' --
+    // fire one once the width transition settles so they pick up the new main-area width.
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 220);
+  });
+
+  // Capture phase, so this runs before a sub-list button's own handler re-renders (and detaches)
+  // it. Any click inside the sidebar closes an open flyout -- picking a flyout item, or going to
+  // another rail icon -- except on the two group icons themselves, whose own handlers toggle it.
+  document.querySelector('.sidebar').addEventListener('click', (e) => {
+    if (!e.target.closest('#menu-parent-btn, .nav-btn[data-view="items"]')) closeRailFlyout();
+  }, true);
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.sidebar')) closeRailFlyout();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeRailFlyout(); });
 }
 
 function updateActiveViewButtons() {

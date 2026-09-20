@@ -1029,3 +1029,38 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .dough-gallery-tile { aspect-ratio: 1; border: 1px solid var(--line); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .dough-gallery-tile img { max-width: 100%; max-height: 100%; object-fit: contain; }
 @media (max-width: 760px) { .dough-gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ---------------- Collapsible sidebar (icon rail) ----------------
+   #app.sidebar-collapsed shrinks the sidebar to a 64px strip of the nav icons and hands the rest
+   of the width to <main>. Every rule is scoped to direct-child .nav-btn / labels so the text-only
+   sub-list buttons (Dish Catalog sections, Menu screens) keep their normal look -- in the rail
+   they appear as a flyout panel beside it (see openRailFlyout in renderer.js). */
+#app { transition: grid-template-columns .18s ease; }
+.sidebar-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.sidebar-title { min-width: 0; }
+.sidebar-toggle {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; margin-top: 2px; padding: 0; border-radius: 8px;
+  background: none; border: 1px solid transparent; color: #c9d6c9; cursor: pointer;
+}
+.sidebar-toggle:hover { background: rgba(255,255,255,0.08); color: #fffaf0; }
+.sidebar-toggle svg { width: 18px; height: 18px; }
+#app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+#app.sidebar-collapsed .sidebar { padding: 20px 9px 12px; align-items: stretch; }
+#app.sidebar-collapsed .sidebar-head { justify-content: center; margin-bottom: 6px; }
+#app.sidebar-collapsed .sidebar-title,
+#app.sidebar-collapsed .sidebar-footer,
+#app.sidebar-collapsed .sidebar > .nav-btn .nav-label,
+#app.sidebar-collapsed .sidebar > .nav-btn .nav-caret { display: none; }
+#app.sidebar-collapsed .sidebar .section-label {
+  height: 1px; margin: 12px 12px; padding: 0; overflow: hidden; font-size: 0; line-height: 0;
+  color: transparent; background: #3d5a4d;
+}
+#app.sidebar-collapsed .sidebar > .nav-btn { justify-content: center; padding: 10px 0; }
+#app.sidebar-collapsed .sidebar > .nav-btn .nav-icon { width: 19px; height: 19px; flex-basis: 19px; opacity: 1; }
+#app.sidebar-collapsed .section-sublist { display: none !important; }
+#app.sidebar-collapsed .section-sublist.flyout-open {
+  display: block !important; position: fixed; left: 70px; top: var(--flyout-top, 100px); z-index: 40;
+  min-width: 220px; margin: 0; padding: 6px; border: 1px solid #537060; border-radius: 10px;
+  background: #203c32; box-shadow: 0 12px 32px rgba(10, 24, 18, .35);
+}
