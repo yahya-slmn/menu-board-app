@@ -71,36 +71,50 @@ const NUT_RESTRICTION = `CRITICAL DIETARY RESTRICTION -- this school strictly pr
 // examples inline -- concrete examples anchor this kind of behavioral instruction far more
 // reliably than the abstract rule alone.
 //
-// Bread/dough specifically needs a SPLIT rule, not a blanket one: whether to decompose it depends
-// on whether it's the dish's own preparation focus (pizza dough, pie crust -- decompose) or just a
-// carrier/component alongside a protein or filling that's the dish's actual focus (sandwich bread,
-// a burger bun -- name it as itself instead). Earlier versions of this rule told the model to
-// decompose sandwich bread the same way as pizza dough (see the removed "Grilled Chicken Sandwich"
-// example below, now flipped) -- that was wrong in practice: a chef reviewing "brown bread" can
-// correct it to whatever bread is actually used in one edit, but "all-purpose flour - yeast - salt
-// - sugar - olive oil" for the bread in a sandwich is not a real, editable ingredient in that sense
-// -- nobody bakes bread from scratch to make a sandwich, so decomposing it just produces noise she
-// has to delete. Batter/breading/crust/filling/glaze/frosting/marinade are NOT bread and are
-// unaffected by this split -- none of those are a real standalone product the way a loaf or baguette
-// is, so they always decompose regardless of whether they coat/fill a "focus" or "carrier" dish.
+// Bread specifically is now a BLANKET never-decompose rule, not a "carrier vs. focus" split. An
+// earlier version of this rule only carved out the carrier case (sandwich/burger bread), while
+// still telling the model to decompose bread when it was framed as the dish's own "preparation
+// focus" -- and its own example list for that focus case literally included "a loaf of bread"
+// alongside pizza dough and cake. That was still wrong: a standalone bread dish ("Bread with
+// Butter", "Toast with Butter", a plain baguette on its own) has no protein/filling to carry, so
+// under the old wording it fell into the "focus -> decompose" bucket instead, defeating the whole
+// point -- decomposing "toast" into flour/yeast/salt/sugar/milk is exactly as useless to a chef
+// reviewing a bread-and-butter dish as it was for a sandwich. Bread is bread regardless of context:
+// whether it IS the entire dish, carries a simple topping, or carries a protein/filling, nobody
+// bakes it from scratch to serve it, so decomposing it always just produces noise she has to
+// delete. The one real distinction that still matters is bread vs. a DIFFERENT baked good made
+// from a similar starting point (pizza, pie/tart, cake, muffin, pancake, waffle, crepe, danish,
+// croissant) -- those are unaffected by this rule and keep decomposing exactly as before, since
+// there the dough/batter itself IS the thing being prepared, not a loaf/baguette/bun eaten as bread.
 const DECOMPOSITION_RULE = `Never name a non-bread sub-preparation (batter, crust, breading, filling, glaze, frosting, marinade, etc.) as an ingredient by itself -- always decompose it into the real base ingredients it is made from (flour, sugar, butter, eggs, yeast, milk, salt, oil, etc.), even when it's only part of a larger dish. A sub-preparation name is a placeholder, not an ingredient, and must never appear in your output. Exception: a simple, single-purpose condiment/sauce that is commonly used and sourced as one finished product (ketchup, mustard, soy sauce, mayonnaise, plain tomato/pizza sauce) may still be named as itself -- only decompose a sauce or filling further if it's itself a multi-component preparation specific to this dish (a curry sauce, gravy, or fruit pie filling), the same way "batter" must be decomposed.
 
-Bread and dough (bread, bun, roll, dough, baguette, ciabatta, pita, tortilla, toast, etc.) follow a DIFFERENT rule, because which treatment is correct depends on what the dish actually is:
+BREAD ITSELF (a loaf, baguette, ciabatta, pita, tortilla, toast, bun, roll, samoli, or any other plain bread product) is a permanent exception to the rule above -- it is NEVER decomposed into baking components (flour, yeast, sugar, salt, oil, milk, etc.), in ANY context, no matter how the dish is framed:
+- Not when bread IS the entire dish or its main event ("Bread with Butter", "Toast with Butter", a plain baguette served on its own).
+- Not when bread carries a simple topping (butter, jam, cheese) with nothing else going on.
+- Not when bread is just a carrier alongside a protein or filling (a sandwich, burger, wrap, slider, hot dog).
+Always name the specific real bread type as a single, real, editable ingredient instead (e.g. "toast", "baguette", "ciabatta", "brown bread", "burger bun", "pita bread", "samoli", "flour tortilla") -- never its baking components, regardless of which of the three cases above it is.
 
-- If the bread/dough IS the dish's own preparation focus -- the thing that's actually being made, such that the dish wouldn't exist or be recognizable without it (pizza dough, pie/tart crust, a loaf of bread, a cake, muffins, pancakes, flatbread served as the entree) -- decompose it into its real base ingredients, exactly like any other sub-preparation.
-- If the bread is just an accompanying carrier/component alongside a protein or filling that is the dish's actual focus -- such that the dish is still fundamentally the same dish without it (a sandwich, burger, wrap, slider, hot dog) -- do NOT decompose it. Instead name the specific real bread/wrap type as a single ingredient (e.g. "brown bread", "toast", "baguette", "ciabatta", "samoli", "pita bread", "burger bun", "flour tortilla") -- something a chef can directly edit to match what's actually used, not baking components she'd have to delete.
+This bread exception does NOT extend to a batter/dough-based preparation that becomes a DIFFERENT, distinctly-named baked good through real transformation -- pizza, pie/tart, cake, muffins, pancakes, waffles, crepes, danish, and croissant are not "bread" for this purpose, even though they start from a similar ingredient list. For those, the dough/batter itself IS the dish being prepared (not a loaf of bread being eaten as-is), so it keeps decomposing into its real base ingredients exactly like any other sub-preparation. Rule of thumb: if you'd hand someone "a piece of bread" or "a bread roll" to eat as-is or build a sandwich with, never decompose it -- just name the bread type. If it has its own distinct name as a baked good/pastry (pizza, pie, cake, muffin, pancake, waffle, crepe, danish, croissant), decompose its dough/batter as usual.
 
 Example -- WRONG (uses a sub-preparation as a placeholder):
 "Pizza" -> "dough - tomato sauce - mozzarella cheese"
-Example -- RIGHT (dough IS the preparation focus here, so it's decomposed into its real base ingredients; tomato sauce and mozzarella cheese are themselves finished ingredients, not further sub-preparations, so they stay as-is):
+Example -- RIGHT (dough IS the preparation here -- pizza is not "bread" for this rule -- so it's decomposed into its real base ingredients; tomato sauce and mozzarella cheese are themselves finished ingredients, not further sub-preparations, so they stay as-is):
 "Pizza" -> "all-purpose flour - sugar - salt - butter - milk - yeast - olive oil - tomato sauce - mozzarella cheese"
 
 Example -- WRONG (filling left as a placeholder):
 "Apple Pie" -> "pie crust - apple filling"
-Example -- RIGHT (crust IS the preparation focus of a pie, so both crust and filling are decomposed into real base ingredients):
+Example -- RIGHT (a pie is not "bread" either -- both crust and filling are decomposed into real base ingredients):
 "Apple Pie" -> "all-purpose flour - butter - salt - apples - sugar - cinnamon - cornstarch - lemon juice"
 
-Example -- WRONG (the bread is just a carrier here, not the preparation focus -- the dish is still "grilled chicken" without it -- so decomposing it into baking components is unwanted noise):
+Example -- WRONG (bread IS the whole dish here, and it's still been decomposed into baking components -- exactly the mistake this rule exists to prevent):
+"Toast with Butter" -> "all-purpose flour - yeast - salt - sugar - milk - butter"
+Example -- RIGHT (the bread is named as a real, editable ingredient, same as any other standalone bread dish):
+"Toast with Butter" -> "toast - butter"
+
+Example -- RIGHT (bread with no topping at all is still just named as itself -- there's nothing else to list):
+"Baguette" -> "baguette"
+
+Example -- WRONG (the bread is just a carrier here, not a distinct baked good -- the dish is still "grilled chicken" without it -- so decomposing it into baking components is unwanted noise):
 "Grilled Chicken Sandwich" -> "chicken breast - all-purpose flour - yeast - salt - sugar - olive oil - lettuce - tomato - mayonnaise"
 Example -- RIGHT (the bread is named as a real, editable ingredient instead):
 "Grilled Chicken Sandwich" -> "chicken breast - brown bread - lettuce - tomato - mayonnaise"
