@@ -35,6 +35,7 @@ const { generateDishImage } = require('./lib/generateDishImage');
 const {
   DOUGH_SHAPE_PHOTOS_BUCKET, createDoughShape, listDoughShapes, deleteDoughShape,
 } = require('./lib/doughShapes');
+const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const {
   normalizeProcessesToGrams, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
@@ -2831,6 +2832,13 @@ ipcMain.handle('get-dough-shape-photo', async (e, photoPath) => {
 });
 
 ipcMain.handle('list-dough-shapes', async () => listDoughShapes());
+
+// Chef-configurable shape presets for Recipe on Fire's Shape & Place (lib/doughShapePresets.js).
+// `list` answers { available: false } instead of throwing while the migration hasn't been applied, so
+// the renderer can fall back to its built-in presets. "Delete" archives (see the lib for why).
+ipcMain.handle('list-dough-shape-presets', async () => doughShapePresets.listPresets());
+ipcMain.handle('save-dough-shape-preset', async (e, input) => doughShapePresets.savePreset(input));
+ipcMain.handle('delete-dough-shape-preset', async (e, id) => doughShapePresets.deletePreset(id));
 
 ipcMain.handle('create-dough-shape', async (e, { name, unitWeightGrams, sizeCm }) => {
   const genToken = crypto.randomUUID();

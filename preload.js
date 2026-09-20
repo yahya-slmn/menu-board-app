@@ -70,6 +70,9 @@ contextBridge.exposeInMainWorld('api', {
   getMaterialPhoto: (photoPath) => ipcRenderer.invoke('get-material-photo', photoPath),
 
   listDoughShapes: () => ipcRenderer.invoke('list-dough-shapes'),
+  listDoughShapePresets: () => ipcRenderer.invoke('list-dough-shape-presets'),
+  saveDoughShapePreset: (input) => ipcRenderer.invoke('save-dough-shape-preset', input),
+  deleteDoughShapePreset: (id) => ipcRenderer.invoke('delete-dough-shape-preset', id),
   createDoughShape: (payload) => ipcRenderer.invoke('create-dough-shape', payload),
   deleteDoughShape: (id) => ipcRenderer.invoke('delete-dough-shape', id),
   getDoughShapePhoto: (photoPath) => ipcRenderer.invoke('get-dough-shape-photo', photoPath),

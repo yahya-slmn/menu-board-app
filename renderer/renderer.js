@@ -7021,6 +7021,135 @@ function openChoiceModal({ title, message, options, confirmLabel }) {
 // one. Name edits and brand-new rows are the only things still batched behind "Save" -- a rename
 // has no scoped-impact decision to make (the name is read live via join everywhere, never
 // snapshotted), so there's nothing to gain by making it immediate too.
+// Recipe on Fire: the dough shape presets (name, weight, geometry type, size, taper, slashes), edited in a
+// modal like Waste Types. Resolves true if anything was saved or deleted. `shapePreview` (from the game
+// module) gives the outline to draw, so the chef sees the shape before saving.
+function openShapesModal() {
+  return new Promise((resolve) => {
+    const TYPE_LABEL = { ball: 'Ball', disc: 'Disc (flat round)', log: 'Long loaf (baguette, roll)', oval: 'Oval (ciabatta, batard)' };
+    const TYPE_SHORT = { ball: 'Ball', disc: 'Disc', log: 'Long loaf', oval: 'Oval' };
+    let shapes = [];
+    let form = null; // null = the list, else the shape being edited / created
+    let changed = false;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    document.body.appendChild(overlay);
+    const close = () => { overlay.remove(); resolve(changed); };
+    const sizeText = (r) => (r.archetype === 'ball' || r.archetype === 'disc'
+      ? `⌀ ${roundNice(Number(r.length_cm))} × H ${roundNice(Number(r.height_cm))} cm`
+      : `${roundNice(Number(r.length_cm))} × ${roundNice(Number(r.width_cm))} × H ${roundNice(Number(r.height_cm))} cm`);
+
+    async function reload() {
+      const res = await window.api.listDoughShapePresets();
+      shapes = res.shapes || [];
+    }
+
+    function renderList() {
+      overlay.innerHTML = `
+        <div class="modal shapes-modal">
+          <h2>Dough Shapes</h2>
+          <div class="table-scroll"><table class="items-table shapes-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Weight</th><th>Size</th><th></th></tr></thead>
+            <tbody>
+              ${shapes.length === 0 ? '<tr><td colspan="5" style="color:var(--neutral);">No shapes yet.</td></tr>' : shapes.map(r => `
+                <tr>
+                  <td>${r.name}</td><td>${TYPE_SHORT[r.archetype] || r.archetype}</td><td>${roundNice(Number(r.unit_weight_grams))} g</td><td>${sizeText(r)}</td>
+                  <td style="text-align:right; white-space:nowrap;">
+                    <button class="icon-btn" data-edit-shape="${r.id}">Edit</button>
+                    <button class="icon-btn danger" data-delete-shape="${r.id}">Delete</button>
+                  </td>
+                </tr>`).join('')}
+            </tbody>
+          </table></div>
+          <button type="button" class="secondary" id="sh-add-btn" style="margin:10px 0 16px;">+ Add Shape</button>
+          <div class="actions"><button class="primary" id="sh-close">Close</button></div>
+        </div>`;
+      overlay.querySelector('#sh-close').addEventListener('click', close);
+      overlay.querySelector('#sh-add-btn').addEventListener('click', () => {
+        form = { id: null, name: '', archetype: 'ball', weight: 90, lengthCm: 9.5, widthCm: 9.5, heightCm: 4.6, taperPct: 80, scoreCount: 0 };
+        renderForm();
+      });
+      overlay.querySelectorAll('[data-edit-shape]').forEach(btn => btn.addEventListener('click', () => {
+        const r = shapes.find(x => String(x.id) === btn.dataset.editShape);
+        form = { id: r.id, name: r.name, archetype: r.archetype, weight: Number(r.unit_weight_grams), lengthCm: Number(r.length_cm),
+          widthCm: Number(r.width_cm), heightCm: Number(r.height_cm), taperPct: Math.round(Number(r.taper ?? 0) * 100), scoreCount: r.score_count || 0 };
+        renderForm();
+      }));
+      overlay.querySelectorAll('[data-delete-shape]').forEach(btn => btn.addEventListener('click', async () => {
+        const r = shapes.find(x => String(x.id) === btn.dataset.deleteShape);
+        if (!confirm(`Delete "${r.name}"?`)) return;
+        try { await window.api.deleteDoughShapePreset(r.id); changed = true; await reload(); renderList(); }
+        catch (err) { alert(`Couldn't delete "${r.name}": ${err.message}`); }
+      }));
+    }
+
+    function renderForm() {
+      const isRound = () => form.archetype === 'ball' || form.archetype === 'disc';
+      overlay.innerHTML = `
+        <div class="modal shapes-modal">
+          <h2>${form.id ? 'Edit Shape' : 'New Shape'}</h2>
+          <div class="field"><label>Name</label><input id="sh-name" value="${form.name.replace(/"/g, '&quot;')}" dir="auto" /></div>
+          <div class="field"><label>Type</label>
+            <select id="sh-type" class="builder-select">${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${k === form.archetype ? 'selected' : ''}>${v}</option>`).join('')}</select>
+          </div>
+          <div class="shape-form-grid">
+            <div class="field"><label>Weight (g)</label><input id="sh-weight" type="number" min="5" max="5000" step="1" value="${form.weight}" /></div>
+            <div class="field"><label id="sh-length-label">${isRound() ? 'Diameter (cm)' : 'Length (cm)'}</label><input id="sh-length" type="number" min="2" max="120" step="0.1" value="${form.lengthCm}" /></div>
+            <div class="field" data-for="log oval"><label>Width (cm)</label><input id="sh-width" type="number" min="1" max="60" step="0.1" value="${form.widthCm}" /></div>
+            <div class="field"><label>Height (cm)</label><input id="sh-height" type="number" min="0.5" max="20" step="0.1" value="${form.heightCm}" /></div>
+            <div class="field" data-for="log"><label>Pointed ends (%)</label><input id="sh-taper" type="number" min="0" max="100" step="5" value="${form.taperPct}" /></div>
+            <div class="field" data-for="log oval"><label>Slashes</label><input id="sh-score" type="number" min="0" max="9" step="1" value="${form.scoreCount}" /></div>
+          </div>
+          <canvas id="sh-preview" width="360" height="120" class="shape-preview"></canvas>
+          <div style="font-size:11.5px; color:var(--neutral); margin:6px 0 4px;">Raw size at this weight. Pieces scale up or down when the dough is divided into more or fewer.</div>
+          <div id="sh-error" style="color:var(--danger, #c0392b); font-size:12.5px; min-height:18px;"></div>
+          <div class="actions"><button class="secondary" id="sh-cancel">Cancel</button><button class="primary" id="sh-save">Save</button></div>
+        </div>`;
+      const $ = (id) => overlay.querySelector(id);
+      const readForm = () => {
+        form.name = $('#sh-name').value; form.archetype = $('#sh-type').value;
+        form.weight = $('#sh-weight').value; form.lengthCm = $('#sh-length').value; form.widthCm = $('#sh-width').value;
+        form.heightCm = $('#sh-height').value; form.taperPct = $('#sh-taper').value; form.scoreCount = $('#sh-score').value;
+      };
+      const syncVisibility = () => {
+        overlay.querySelectorAll('[data-for]').forEach(el => { el.style.display = el.dataset.for.split(' ').includes(form.archetype) ? '' : 'none'; });
+        $('#sh-length-label').textContent = isRound() ? 'Diameter (cm)' : 'Length (cm)';
+      };
+      const drawPreview = () => {
+        const cv = $('#sh-preview'), ctx = cv.getContext('2d');
+        ctx.clearRect(0, 0, cv.width, cv.height);
+        const L = parseFloat(form.lengthCm), H = parseFloat(form.heightCm);
+        const W = isRound() ? L : parseFloat(form.widthCm);
+        if (!(L > 0) || !(W > 0) || !(H > 0) || !window.RofGame) return;
+        const spec = { archetype: form.archetype, lengthCm: L, widthCm: W, heightCm: H, taper: (parseFloat(form.taperPct) || 0) / 100, score: form.archetype === 'ball' || form.archetype === 'disc' ? 0 : Math.min(9, Math.max(0, parseInt(form.scoreCount, 10) || 0)) };
+        const { outline, slashes } = window.RofGame.shapePreview(spec);
+        const k = Math.min((cv.width - 24) / L, (cv.height - 24) / W);
+        const X = (x) => cv.width / 2 + x * k, Y = (y) => cv.height / 2 - y * k;
+        ctx.beginPath();
+        outline.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+        ctx.closePath();
+        ctx.fillStyle = '#E8D6AD'; ctx.fill(); ctx.strokeStyle = '#B79C68'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.strokeStyle = '#8B6F3E'; ctx.lineWidth = 1.6;
+        slashes.forEach(([x1, y1, x2, y2]) => { ctx.beginPath(); ctx.moveTo(X(x1), Y(y1)); ctx.lineTo(X(x2), Y(y2)); ctx.stroke(); });
+      };
+      syncVisibility(); drawPreview();
+      overlay.querySelectorAll('input, select').forEach(el => el.addEventListener('input', () => { readForm(); syncVisibility(); drawPreview(); $('#sh-error').textContent = ''; }));
+      $('#sh-cancel').addEventListener('click', () => { form = null; renderList(); });
+      $('#sh-save').addEventListener('click', async () => {
+        readForm();
+        try {
+          const res = await window.api.saveDoughShapePreset({ id: form.id, name: form.name, archetype: form.archetype, weight: form.weight,
+            lengthCm: form.lengthCm, widthCm: form.widthCm, heightCm: form.heightCm, taper: (parseFloat(form.taperPct) || 0) / 100, scoreCount: form.scoreCount });
+          if (!res.success) { $('#sh-error').textContent = res.error; return; }
+          changed = true; form = null; await reload(); renderList();
+        } catch (err) { $('#sh-error').textContent = `Couldn't save: ${err.message}`; }
+      });
+    }
+
+    reload().then(renderList).catch((err) => { alert(`Couldn't load shapes: ${err.message}`); close(); });
+  });
+}
+
 async function openWasteTypesModal() {
   let types = await window.api.listWasteTypes();
   let rows = types.map(t => ({ localId: ++_recipeRowLocalIdCounter, id: t.id, name: t.name, defaultPercent: t.default_percent }));

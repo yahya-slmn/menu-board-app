@@ -761,6 +761,13 @@ table.materials-table td.cat-cell {
 .rof-rise-notes { margin: 0 0 12px; padding-left: 18px; font-size: 12.5px; color: var(--ink); line-height: 1.55; }
 .rof-progress { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
 .rof-progress-fill { height: 100%; width: 0; background: var(--sage); border-radius: 999px; }
+.modal.shapes-modal { width: 780px; }
+/* The shared .items-table rules fix a 740px minimum and per-position column widths; this table is narrower. */
+table.items-table.shapes-table { min-width: 0; table-layout: auto; }
+table.items-table.shapes-table th:nth-child(n), table.items-table.shapes-table td:nth-child(n) { width: auto; padding-left: 10px; padding-right: 10px; }
+table.items-table.shapes-table td:not(:first-child) { white-space: nowrap; }
+.shape-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.shape-preview { display: block; width: 100%; max-width: 360px; background: var(--paper-dim); border: 1px solid var(--line); border-radius: 8px; margin-top: 4px; }
 .rof-link-btn { background: none; border: 0; padding: 0 0 0 8px; color: var(--sage-dark); font: inherit; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
 #rof-rise-slider { width: 100%; }
 .rof-count-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
