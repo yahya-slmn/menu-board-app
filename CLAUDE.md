@@ -133,6 +133,86 @@ their source spreadsheets have fundamentally different column structures —
 adding a new section usually means adding a new builder function here, not
 extending an existing one.
 
+## Recipe on Fire game view (`renderer/rof/`)
+
+The one place the "classic scripts only" rule above doesn't apply. Recipe on Fire's tray/dough/bake
+view is a Three.js game written as **ES modules**, loaded straight from `node_modules` through an
+import map in `renderer/index.html` — still no bundler and no extra dependency (same pinned
+`three@0.160.0` as Materials' classic-script preview, which is untouched). `renderer.js` stays a
+classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / `disposeAll()`), and
+`renderView()` calls `disposeAll()` so leaving the screen frees the WebGL context.
+
+- `game.js` is the public API (`setTray`, `addCutter`, events). It takes plain data only — Materials'
+  shape type + dims, and the interior footprint `trayInteriorFootprint()` already computed — so
+  tray math stays in one place. Plan coordinates: cm, tray-centre origin, +y up the page (plan y →
+  world −z).
+- `stage.js` (renderer, fixed tilted camera with wheel zoom only — no orbit, lights, on-demand render
+  loop), `quality.js` (GPU-probed quality tier + FPS governor that steps the tier down at runtime),
+  `trayModels.js` (parametric trays/cutters using Materials' wall/floor formulas), `constraints.js`
+  (containment + SAT overlap), `items.js`/`interaction.js` (drag with spring follow, lift, settle;
+  `collision: 'solid' | 'lifted'`).
+- `dough.js` (procedural dough: one plan-outline + dome-profile generator for ball / disc / log /
+  oval, seeded per piece; rise is a **morph target** so shadows/AO see the risen shape; browning,
+  scoring, flour and crust relief are fragment shader; colours in `BAKE_COLORS`), `post.js` (AO +
+  output pass; skipped on the low tier).
+- Three addons live in `rof/vendor/three-addons/` (16 files, MIT, pinned to the same 0.160.0)
+  because electron-builder drops every `node_modules/**/examples/` folder from the packaged app —
+  an import map into `node_modules/three/examples/jsm` works in `npm start` and breaks in the built
+  `.app`. See the README there. Anything under `rof/` that adds a new addon import must vendor it too.
+- Dev flags (`localStorage`): `rofGameStats = '1'` shows a tier / GPU / fps badge on the stage;
+  `rofGameLookdev = '1'` drops draggable sample dough on the Setup tray with Rise / Bake sliders.
+- `scripts/backup-dough-photos.js` (read-only; run it yourself, it asks for your login) saves the
+  Dough Shapes rows + photos to `backups/` (gitignored) before that catalog is removed;
+  `scripts/sample-baked-colors.js` then reads those photos to calibrate `BAKE_COLORS`.
+- Shape & Place (Mode A) lives in the game: `placement.js` (rules: pieces are on the bench or the tray;
+  carried pieces move freely and their outline turns red where a drop would be refused; on drop they
+  settle at the nearest valid spot, snap into a free muffin cup, or return), `bench.js` (the board in
+  front of the tray; bench pieces use their raw footprint, tray pieces their risen one so they never
+  touch after proofing), `game.js` (`beginPlacement`, `autoArrange`, `playBake`). Piece size follows
+  weight (cube root), so dividing dough into fewer pieces makes bigger ones.
+- The Recipe on Fire screen is a two-column layout (controls beside a sticky stage). Method choice at
+  Setup: Shape & Place (steps setup -> place -> bake, all in the game) or Sheet & Trim (still the old 2D
+  dough/baked/cut flow until it is rebuilt in the game).
+- Bake (Shape & Place): `riseModel.js` is a deterministic, explainable model (no AI) that reads the
+  process's ingredient NAMES in baker's percentages (yeast / starter / baking powder, hydration, sugar,
+  fat, egg, salt) and returns height/width multipliers, how much of the rise happens before the oven,
+  and a browning speed, plus plain-language `notes` shown in the Bake panel. It also sizes the room
+  each piece reserves on the tray (placement uses the same model, so a slack dough needs more space).
+  `game.playBake` runs proof -> oven -> out (about 11.5 s, Skip available): pieces rise as two morph
+  targets (height / footprint) with oven-spring overshoot, brown by doneness (Light / Golden / Dark),
+  `oven.js` adds glowing rods, back glow, flickering heat lights and steam, and `post.js` adds bloom plus
+  a heat-shimmer/vignette/tint grade pass (only active during the bake). The point lights live in the
+  scene permanently at intensity 0: adding lights mid-bake recompiles every material (a ~1 s freeze).
+  `stage.animate` tickers may call `requestRender()` -- the loop guards against double-scheduling.
+- Sheet & Trim (Mode B): `sheet.js` builds the dough as ONE mesh over the tray's interior (a fine grid
+  whose height rolls off to zero at the wall, lumped with seeded noise; it rises via a morph target and
+  browns with the dough shader). A `CutterMask` canvas texture marks where cutters are so the shader can
+  dim the scrap outside them. Thickness = net weight / (interior area x 1.05 g/cm3 raw density); a tray
+  counts as full at ~70% of its rim height (`sheetInfo.capacityGrams`), and a bigger batch reports how many
+  trays it needs. Steps: setup -> bake -> trim. In Trim, `game.armCutter` shows a see-through cutter at the
+  pointer (red where it can't go), a click on empty sheet stamps one, clicking an existing cutter picks it
+  up instead, and unplaceable cutters are dropped rather than overlapped. Per-piece weight / count /
+  utilization / waste come from `updateTrimSummary` (share of tray area x grams in the tray);
+  `computeCutterLayout` (pure geometry, still in renderer.js) drives Auto-arrange. Not offered on muffin
+  trays (a portion per cup already).
+- The old 2D tray canvas and photo-sprite dough flow are gone; the game view is the only tray view. The
+  Bake panel (both methods) has a rise override slider (30-160%) scaling the model's height/width
+  multipliers -- it applies at bake time only, so raising it above what placement reserved can make
+  pieces touch (the panel says so).
+- Shape presets are chef-configurable: rows of `dough_shapes` (name, weight, `archetype` ball / disc / log /
+  oval, length / width / height, taper, slash count), edited in the "Edit shapes…" modal in Shape & Place
+  (`openShapesModal`, with a live 2D outline from `shapePreview`). `lib/doughShapePresets.js` validates and
+  saves; "Delete" ARCHIVES (`archived = true`) because `dough_shape_photos` cascades on delete, and
+  re-adding an archived name revives that row. The columns come from
+  `supabase/migrations/20260920100000_dough_shape_presets.sql` (additive only). Until it is applied,
+  `list-dough-shape-presets` answers `{ available: false }` and the screen falls back to the four built-in
+  shapes (`SEED_SHAPES`, read-only; the Edit button explains why) -- nothing breaks.
+- Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake and the shape presets are done. Left: applying
+  the shapes migration to Supabase (needs an explicit go-ahead) and removing the old Dough Shapes screen,
+  `dough_shape_photos`, the `dough-shape-photos` bucket, the `generate-dough-shape-image` edge function and
+  `lib/doughShapes.js` / `lib/generateDoughShapeImage.js` (gated on the photo backup -- see
+  `scripts/backup-dough-photos.js`).
+
 ## Adding a new section or category
 
 Touch points, in order: `sections`/`categories`/`age_groups` rows in the DB →
