@@ -4237,13 +4237,13 @@ async function renderRecipeFormView(main, ns) {
           updateNetWeightSum(ns);
           return;
         }
-        const result = computeMultiplierFromTarget(proc.ingredientRows, backSolve.targetTotalQuantity);
-        if (result.error) {
-          alert(result.error);
+        const solved = scaleSetsToNetWeight([proc.ingredientRows], [proc.wastes], backSolve.targetTotalQuantity, e.target.value);
+        if (solved.error) {
+          alert(solved.error);
           updateNetWeightSum(ns);
           return;
         }
-        proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+        proc.ingredientRows = solved.sets[0];
         renderProcessIngredientRows(ns, proc, tbody, onIngredientChange);
       });
 
@@ -4305,9 +4305,8 @@ async function renderRecipeFormView(main, ns) {
       updateNetWeightSum(ns); // revert the displayed value back to the real current total
       return;
     }
-    s.processes.forEach(proc => {
-      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
-    });
+    const scaledSets = scaleIngredientSets(s.processes.map(p => p.ingredientRows), result.multiplier);
+    s.processes.forEach((proc, i) => { proc.ingredientRows = scaledSets[i]; });
     renderProcessCards();
   });
 
@@ -4326,16 +4325,13 @@ async function renderRecipeFormView(main, ns) {
       updateNetWeightSum(ns);
       return;
     }
-    const allRows = s.processes.flatMap(p => p.ingredientRows);
-    const result = computeMultiplierFromTarget(allRows, backSolve.targetTotalQuantity);
-    if (result.error) {
-      alert(result.error);
+    const solved = scaleSetsToNetWeight(s.processes.map(p => p.ingredientRows), s.processes.map(p => p.wastes), backSolve.targetTotalQuantity, e.target.value);
+    if (solved.error) {
+      alert(solved.error);
       updateNetWeightSum(ns);
       return;
     }
-    s.processes.forEach(proc => {
-      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
-    });
+    s.processes.forEach((proc, i) => { proc.ingredientRows = solved.sets[i]; });
     renderProcessCards();
   });
 
@@ -4913,9 +4909,8 @@ function wireGeneratedTotalQuantityRescale(s, renderProcessCards) {
       updateGeneratedNetWeightSum(s); // revert the displayed value back to the real current total
       return;
     }
-    s.processes.forEach(proc => {
-      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
-    });
+    const scaledSets = scaleIngredientSets(s.processes.map(p => p.ingredientRows), result.multiplier);
+    s.processes.forEach((proc, i) => { proc.ingredientRows = scaledSets[i]; });
     renderProcessCards();
   });
 }
@@ -4937,16 +4932,13 @@ function wireGeneratedNetWeightRescale(s, renderProcessCards) {
       updateGeneratedNetWeightSum(s);
       return;
     }
-    const allRows = s.processes.flatMap(p => p.ingredientRows);
-    const result = computeMultiplierFromTarget(allRows, backSolve.targetTotalQuantity);
-    if (result.error) {
-      alert(result.error);
+    const solved = scaleSetsToNetWeight(s.processes.map(p => p.ingredientRows), s.processes.map(p => p.wastes), backSolve.targetTotalQuantity, input.value);
+    if (solved.error) {
+      alert(solved.error);
       updateGeneratedNetWeightSum(s);
       return;
     }
-    s.processes.forEach(proc => {
-      proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
-    });
+    s.processes.forEach((proc, i) => { proc.ingredientRows = solved.sets[i]; });
     renderProcessCards();
   });
 }
@@ -5239,13 +5231,13 @@ async function renderGeneratedRecipeFormView(main, ns) {
           updateGeneratedNetWeightSum(s);
           return;
         }
-        const result = computeMultiplierFromTarget(proc.ingredientRows, backSolve.targetTotalQuantity);
-        if (result.error) {
-          alert(result.error);
+        const solved = scaleSetsToNetWeight([proc.ingredientRows], [proc.wastes], backSolve.targetTotalQuantity, e.target.value);
+        if (solved.error) {
+          alert(solved.error);
           updateGeneratedNetWeightSum(s);
           return;
         }
-        proc.ingredientRows = scaleIngredients(proc.ingredientRows, result.multiplier);
+        proc.ingredientRows = solved.sets[0];
         renderGeneratedIngredientRows(proc, tbody, onIngredientChange);
       });
 
@@ -5390,15 +5382,109 @@ function scaleQuantityProducedText(text, multiplier) {
   return scaled;
 }
 
+// Turns exact (unrounded) quantities into whole hundredths of a gram that add up to `targetTicks` exactly: every value is
+// floored to a whole hundredth, then the hundredths still missing from the target go to the values with the LARGEST
+// fractional remainders (largest-remainder allocation). Rounding each value on its own instead makes the rounded parts drift
+// off the total in a third to two thirds of recipes (typing 150 into Total Quantity came back as 149.99 or 150.02), because
+// the individual errors don't cancel. Every value ends up within one hundredth of its exact value. Mirrored in
+// lib/recipeGenerator.js (allocateHundredths), which normalizes freshly generated recipes the same way -- this file is a
+// classic script and cannot require() it.
+function allocateHundredths(exact, targetTicks) {
+  const scaled = exact.map(v => v * 100);
+  const base = scaled.map(v => Math.floor(v + 1e-7));
+  let missing = targetTicks - base.reduce((a, b) => a + b, 0);
+  const byRemainder = scaled.map((v, i) => ({ i, r: v - base[i] })).sort((a, b) => b.r - a.r || a.i - b.i);
+  for (let k = 0; missing > 0 && byRemainder.length; k = (k + 1) % byRemainder.length, missing--) base[byRemainder[k].i] += 1;
+  // Only reachable through floating-point noise: take a hundredth back from the smallest remainders.
+  for (let k = byRemainder.length - 1; missing < 0 && k >= 0; k--) {
+    if (base[byRemainder[k].i] > 0) { base[byRemainder[k].i] -= 1; missing++; }
+  }
+  return base;
+}
+
+const isBlankQuantity = (q) => q === null || q === undefined || q === '';
+
+// Scales several processes' ingredient rows at once and returns new row arrays (same shape as `sets`). `multipliers` is one
+// number for all of them or one per set. Processes that share a multiplier are rounded TOGETHER, so what they add up to is
+// exactly the (correctly rounded) exact total -- the recipe-level Total Quantity a chef typed, not a total that wobbles by a
+// hundredth per process. A multiplier of 1 is just the stored values, rounded per row as before (nothing is being solved for).
+function scaleIngredientSets(sets, multipliers) {
+  const mult = (i) => (Array.isArray(multipliers) ? multipliers[i] : multipliers);
+  const out = sets.map(rows => rows.map(r => ({ ...r })));
+  const groups = new Map(); // multiplier -> [set indexes]
+  sets.forEach((_, i) => { const m = mult(i); if (!groups.has(m)) groups.set(m, []); groups.get(m).push(i); });
+  for (const [m, idxs] of groups) {
+    const slots = [], exact = [];
+    idxs.forEach(si => sets[si].forEach((row, ri) => {
+      if (isBlankQuantity(row.quantity)) return;
+      const q = parseFloat(row.quantity);
+      if (isNaN(q)) return;
+      slots.push([si, ri]); exact.push(q * m);
+    }));
+    if (m === 1) { slots.forEach(([si, ri], k) => { out[si][ri].quantity = roundNice(exact[k]); }); continue; }
+    const ticks = allocateHundredths(exact, Math.round(exact.reduce((a, b) => a + b, 0) * 100));
+    slots.forEach(([si, ri], k) => { out[si][ri].quantity = ticks[k] / 100; });
+  }
+  return out;
+}
+
 // Called once per process being scaled (renderCalculatorView/renderScaledRecipeResult) -- Recipe
-// Book and Recipe Extractor share this, since both are process-shaped now.
+// Book and Recipe Extractor share this, since both are process-shaped now. The quantities add up to the correctly
+// rounded exact total (see allocateHundredths); scale several processes together with scaleIngredientSets instead when
+// their combined total matters.
 function scaleIngredients(ingredients, multiplier) {
-  return ingredients.map(ing => ({
-    ...ing,
-    quantity: (ing.quantity === null || ing.quantity === undefined || ing.quantity === '')
-      ? ing.quantity
-      : roundNice(parseFloat(ing.quantity) * multiplier),
-  }));
+  return scaleIngredientSets([ingredients], multiplier)[0];
+}
+
+// Net Weight edits: computeTargetTotalQuantityFromNetWeight back-solves the Total Quantity that would give the typed Net
+// Weight through the wastes held fixed, but that total is rarely a whole hundredth, and every process's Net Weight is itself
+// rounded to 0.01 after its wastes -- so scaling to exactly that total can still display 149.99. This tries the totals around
+// it, a hundredth at a time, and keeps the first whose DISPLAYED Net Weight (the sum of every process's compoundWasteYield,
+// as updateNetWeightSum shows it) equals the typed one. `sets` are the processes' ingredient rows, `wastesList` their
+// waste rows, in the same order. Returns { sets } or { error }.
+function scaleSetsToNetWeight(sets, wastesList, targetTotalQuantity, targetNetText) {
+  const currentTotal = sets.reduce((acc, rows) => acc + rows.reduce((a, r) => {
+    const q = parseFloat(r.quantity); return isNaN(q) ? a : a + q;
+  }, 0), 0);
+  if (!currentTotal || currentTotal <= 0) return { error: 'This recipe has no ingredient quantities to scale against.' };
+  const targetNet = roundNice(parseFloat(targetNetText));
+  const shownNet = (scaled) => roundNice(scaled.reduce((acc, rows, i) => acc + compoundWasteYield(sumIngredientQuantities(rows), wastesList[i]), 0));
+  const centre = Math.round(targetTotalQuantity * 100);
+  let best = null;
+  for (let step = 0; step <= 12; step++) {
+    for (const k of (step === 0 ? [0] : [step, -step])) {
+      const total = (centre + k) / 100;
+      if (total <= 0) continue;
+      const scaled = scaleIngredientSets(sets, total / currentTotal);
+      const miss = Math.abs(shownNet(scaled) - targetNet);
+      if (!best || miss < best.miss) best = { sets: scaled, miss };
+      if (miss < 0.0005) return { sets: scaled };
+    }
+  }
+  // Several processes each round their own Net Weight, so no single total may land exactly (rare: a fraction of a percent of
+  // recipes with 3+ processes). Fine-tune: move one process's total by a few hundredths of a gram, on its largest ingredient
+  // (invisible next to the ingredient itself), and keep any change that gets closer.
+  let cur = best.sets, curMiss = best.miss;
+  for (let round = 0; round < 6 && curMiss >= 0.0005; round++) {
+    let improved = false;
+    for (let pi = 0; pi < cur.length && curMiss >= 0.0005; pi++) {
+      let ri = -1, biggest = -1;
+      cur[pi].forEach((r, i) => { const q = parseFloat(r.quantity); if (!isNaN(q) && q > biggest) { biggest = q; ri = i; } });
+      if (ri < 0) continue;
+      for (let k = 1; k <= 25 && curMiss >= 0.0005; k++) {
+        for (const sign of [1, -1]) {
+          const cand = cur.map(rows => rows.map(r => ({ ...r })));
+          const q = roundNice(parseFloat(cand[pi][ri].quantity) + sign * k / 100);
+          if (q < 0) continue;
+          cand[pi][ri].quantity = q;
+          const miss = Math.abs(shownNet(cand) - targetNet);
+          if (miss < curMiss - 1e-12) { cur = cand; curMiss = miss; improved = true; }
+        }
+      }
+    }
+    if (!improved) break;
+  }
+  return { sets: cur };
 }
 
 // Sums every ingredient's raw quantity number regardless of unit (120 GR + 5 PC = 125) --
@@ -6517,8 +6603,9 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
   // to 1 by renderResultView(true) -- see renderCalculatorView). Recomputed here up front so the
   // header's combined Net Weight/Quantity Produced figures below have something to read; each
   // process's own numbers are re-derived the same way by refreshProcessCalc as she edits.
-  processesShown.forEach(proc => {
-    proc.scaledIngredients = scaleIngredients(proc.ingredientRows, proc.multiplier ?? 1);
+  const scaledSets = scaleIngredientSets(processesShown.map(p => p.ingredientRows), processesShown.map(p => p.multiplier ?? 1));
+  processesShown.forEach((proc, i) => {
+    proc.scaledIngredients = scaledSets[i];
     proc.totalQuantity = sumIngredientQuantities(proc.scaledIngredients);
     proc.netWeight = compoundWasteYield(proc.totalQuantity, proc.wastes);
   });
