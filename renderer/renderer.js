@@ -8804,6 +8804,8 @@ function renderRecipeOnFireView(main) {
     renderStepHeader();
     const panel = document.getElementById('rof-step-panel');
     if (!panel) return;
+    const stepLabel = (rofStepLabels().find(x => x.key === rofStep) || {}).label || '';
+    panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', stepLabel.replace(/^\d+\.\s*/, ''));
     if (rofStep === 'setup') renderSetupPanel(panel);
     else if (rofStep === 'place') renderPlaceStepPanel(panel);
     else if (rofStep === 'bake') renderBakeStepPanel(panel);
@@ -9021,17 +9023,15 @@ function renderRecipeOnFireView(main) {
   function renderPlaceStepPanel(panel) {
     const muffin = isMuffinTray();
     panel.innerHTML = `
-      <h3 style="margin-bottom:6px;">Shape &amp; Place</h3>
-      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:10px;">Drag pieces from the bench onto the tray. Scroll while holding one to rotate it.</div>
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Drag pieces onto the tray. Scroll turns a held piece; right-drag turns the view.</div>
       ${muffin ? `<div style="font-size:12.5px; margin-bottom:8px;" id="rof-muffin-note"></div>` : `
-        <div class="rof-shape-cards" id="rof-shape-cards" role="group" aria-label="Shape">
-          ${placeShapes().length === 0 ? '<div style="grid-column:1/-1; font-size:12.5px; color:var(--neutral);">No shapes yet -- add one.</div>' : placeShapes().map(sh => `
-            <button type="button" class="rof-shape-card ${sh.key === placeShapeKey ? 'active' : ''}" data-shape="${sh.key}" aria-pressed="${sh.key === placeShapeKey}">
-              <span class="rof-shape-name">${sh.label}</span>
-              <span class="rof-shape-meta">${sh.weight} g &middot; ${sh.lengthCm} cm</span>
-            </button>`).join('')}
+        <div class="rof-shape-row">
+          <label for="rof-shape-select">Shape</label>
+          <select id="rof-shape-select" class="builder-select" ${placeShapes().length === 0 ? 'disabled' : ''}>
+            ${placeShapes().length === 0 ? '<option>No shapes yet -- add one</option>' : placeShapes().map(sh => `<option value="${sh.key}" ${sh.key === placeShapeKey ? 'selected' : ''}>${sh.label} — ${sh.weight} g · ${sh.lengthCm} cm</option>`).join('')}
+          </select>
+          <button type="button" class="rof-link-btn" id="rof-edit-shapes-btn">Edit…</button>
         </div>
-        <div style="margin:-4px 0 10px;"><button type="button" class="rof-link-btn" id="rof-edit-shapes-btn" style="padding-left:0;">Edit shapes…</button></div>
         <div class="rof-portion">
           <div class="rof-portion-input">
             <label for="rof-grams-input">Portion weight</label>
@@ -9047,11 +9047,11 @@ function renderRecipeOnFireView(main) {
           <div id="rof-portion-line" class="rof-portion-line"></div>
           <div id="rof-portion-hint" class="rof-portion-hint"></div>
         </div>`}
-      <div id="rof-place-summary"></div>
-      <div style="display:flex; gap:8px; margin-bottom:10px;">
+      <div style="display:flex; gap:8px; margin-bottom:4px;">
         <button type="button" class="secondary" id="rof-auto-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-return-btn">Return all</button>
       </div>
+      <div id="rof-place-summary"></div>
       <div class="rof-actions">
         <button type="button" class="secondary" id="rof-edit-setup-btn">← Edit Setup</button>
         <button type="button" class="primary" id="rof-bake-btn" disabled>Bake →</button>
@@ -9060,13 +9060,16 @@ function renderRecipeOnFireView(main) {
 
     const restart = async () => { await startPlacementSession(); refreshPortionUi(); updatePlaceSummary(); };
     const confirmReset = () => !rofGame || rofGame.getPlacement().placed === 0 || confirm('Changing this puts every placed piece back on the bench.');
-    panel.querySelectorAll('[data-shape]').forEach(btn => btn.addEventListener('click', async () => {
-      if (btn.dataset.shape === placeShapeKey || !confirmReset()) return;
-      placeShapeKey = btn.dataset.shape; placeCount = null;
+    const shapeSelect = document.getElementById('rof-shape-select');
+    if (shapeSelect) shapeSelect.addEventListener('change', async () => {
+      if (shapeSelect.value === placeShapeKey) return;
+      if (!confirmReset()) { shapeSelect.value = placeShapeKey; return; }
+      placeShapeKey = shapeSelect.value; placeCount = null;
       if (!placeGramsUser) placeGrams = null; // an untouched default follows the shape; the chef's own weight is kept
-      panel.querySelectorAll('[data-shape]').forEach(b => { b.classList.toggle('active', b === btn); b.setAttribute('aria-pressed', String(b === btn)); });
       await restart();
-    }));
+      const sh = currentShape();
+      if (sh) rofGame.announce(`${sh.label} chosen.`);
+    });
     // The stepper sets the portion weight that divides the dough into exactly that many pieces (kept exact,
     // not rounded, so it really gives that count with nothing left over).
     let pendingCount = null; // the count the last click asked for, so a quick double-click steps twice
@@ -9225,7 +9228,7 @@ function renderRecipeOnFireView(main) {
     }
     const ready = bakeState === 'ready';
     panel.innerHTML = `
-      <h3 style="margin-bottom:8px;">${ready ? 'Bake' : `Baked · ${doneLabel}`}</h3>
+      ${ready ? '' : `<h3 style="margin-bottom:8px;">Baked · ${doneLabel}</h3>`}
       ${ready ? `<ul class="rof-rise-notes">${(riseModel?.notes || []).map(n => `<li>${n}</li>`).join('')}</ul>
       <div class="field" style="margin-bottom:10px;">
         <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label> <button type="button" class="rof-link-btn" id="rof-rise-reset" ${riseScale === 1 ? 'hidden' : ''}>Reset</button>
@@ -9355,20 +9358,15 @@ function renderRecipeOnFireView(main) {
   async function renderTrimStepPanel(panel) {
     if (rofGame) rofGame.setInteractive(true); // the bake switches input off; cutters need it back
     panel.innerHTML = `
-      <h3 style="margin-bottom:6px;">Trim</h3>
-      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:10px;">Pick a cutter, then click the sheet to stamp it. Drag to move one, scroll to turn it, Delete removes it.</div>
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Pick a cutter, then click the sheet to stamp it. Drag to move one, scroll to turn it, Delete removes it. Right-drag turns the view.</div>
       <div class="rof-shape-cards" id="rof-cutter-cards"><div style="font-size:12px; color:var(--neutral);">Loading cutters…</div></div>
       <div style="display:flex; gap:8px; margin-bottom:6px;">
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
       </div>
       <div id="rof-trim-summary"></div>
-      <label style="display:flex; align-items:center; gap:8px; font-weight:normal; font-size:12.5px; margin-bottom:10px;">
-        <input type="checkbox" id="rof-scrap-toggle" checked /> Highlight scrap
-      </label>
       <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button></div>`;
     rofGame.setScrapHighlight(true);
-    document.getElementById('rof-scrap-toggle').addEventListener('change', (e) => rofGame.setScrapHighlight(e.target.checked));
     document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
     document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
     document.getElementById('rof-back-bake-btn').addEventListener('click', () => {

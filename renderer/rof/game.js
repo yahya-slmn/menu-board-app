@@ -240,7 +240,7 @@ export function createRofGame(container, opts = {}) {
   // Each separate uncut region can carry a flag with its grams and its share of the dough on the tray; a chip
   // shows the total; hovering any scrap shows that spot's numbers. The share is of the DOUGH ON THE TRAY (the
   // sheet is uniform, so area share = weight share).
-  let sheetGrams = 0, scrap = null, scrapOn = true, scrapTimer = null, flagLayer = null, chipEl = null, tipEl = null;
+  let sheetGrams = 0, scrap = null, scrapOn = true, scrapTimer = null, flagLayer = null, chipEl = null, tipEl = null, scrapRow = null, scrapBtn = null;
   const flagEls = [];
   const fmtG = (g) => (g >= 10 ? String(Math.round(g)) : String(Math.round(g * 10) / 10));
   const fmtPct = (f) => { const p = f * 100; return (p >= 10 ? String(Math.round(p)) : String(Math.round(p * 10) / 10)); };
@@ -263,14 +263,26 @@ export function createRofGame(container, opts = {}) {
     flagLayer = document.createElement('div');
     flagLayer.setAttribute('aria-hidden', 'true');
     flagLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;';
+    // Top-left of the stage: the Highlight-scrap switch and, beside it, the scrap total. (It used to be a checkbox at
+    // the bottom of the panel, below the fold at the default window size.)
+    scrapRow = document.createElement('div'); scrapRow.className = 'rof-scrap-row'; scrapRow.hidden = true;
+    scrapBtn = document.createElement('button');
+    scrapBtn.type = 'button'; scrapBtn.className = 'rof-tool-btn rof-scrap-toggle';
+    scrapBtn.setAttribute('aria-pressed', 'true'); scrapBtn.title = 'Show or hide the red scrap marking';
+    scrapBtn.innerHTML = '<span class="rof-tool-dot" aria-hidden="true"></span><span>Highlight scrap</span>';
+    scrapBtn.addEventListener('click', () => { setScrapHighlight(!scrapOn); announce(scrapOn ? 'Scrap highlighted.' : 'Scrap highlight off.'); });
     chipEl = document.createElement('div'); chipEl.className = 'rof-scrap-chip'; chipEl.hidden = true;
+    scrapRow.append(scrapBtn, chipEl);
     tipEl = document.createElement('div'); tipEl.className = 'rof-scrap-tip'; tipEl.hidden = true;
-    container.append(flagLayer, chipEl, tipEl);
+    container.append(flagLayer, scrapRow, tipEl);
     stage.addFrameHook(positionFlags);
   }
   function renderFlags() {
     ensureScrapDom();
     flagEls.splice(0).forEach(f => f.el.remove());
+    // The switch is there whenever there are cutters on a sheet; the chip and flags only while highlighting.
+    scrapRow.hidden = !(sheet && cutterItems().length);
+    scrapBtn.setAttribute('aria-pressed', String(scrapOn));
     const show = scrapOn && scrap && scrap.regions.length && sheetGrams > 0;
     chipEl.hidden = !show; if (tipEl && !show) tipEl.hidden = true;
     if (!show) { stage.requestRender(); return; }
@@ -439,7 +451,7 @@ export function createRofGame(container, opts = {}) {
     return { count: n, frameDeg: res.frameDeg, planned: res.placements.length };
   }
   function clearCutters() { cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
-  function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); }
+  function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); stage.requestRender(); }
   function setSheetGrams(g) { sheetGrams = g; renderFlags(); }
 
   // ---- bake director -------------------------------------------------------------------------------
@@ -723,6 +735,6 @@ export function createRofGame(container, opts = {}) {
     },
     _stage: stage, // exposed for the test harness
   };
-  stage.onDispose(() => { clearTimeout(scrapTimer); flagLayer?.remove(); chipEl?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
+  stage.onDispose(() => { clearTimeout(scrapTimer); flagLayer?.remove(); scrapRow?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
   return api;
 }
