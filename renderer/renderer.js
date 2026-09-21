@@ -2736,7 +2736,7 @@ function renderPreviewIngredientsTable(labels, ingredients, totalQuantity, showT
       <thead><tr><th>${labels.ingredientsHeader}</th><th>${labels.quantityHeader}</th><th>${labels.unitHeader}</th><th>${noteLabel}</th></tr></thead>
       <tbody>
         ${ingredients.length ? ingredients.map(ing => `
-          <tr><td>${ing.name}</td><td>${ing.quantity}</td><td>${ing.unit}</td><td>${ing.method}</td></tr>
+          <tr><td>${ing.name}</td><td>${formatIngredientQty(ing.quantity)}</td><td>${ing.unit}</td><td>${ing.method}</td></tr>
         `).join('') : `<tr><td colspan="4" class="preview-empty-note">${labels.noIngredientsPlaceholder}</td></tr>`}
         ${showTotal ? `<tr class="preview-total-row"><td>${labels.totalQuantity}</td><td>${totalQuantity}</td><td></td><td></td></tr>` : ''}
       </tbody>
@@ -3455,7 +3455,7 @@ function renderProcessIngredientRows(ns, process, tbodyEl, onChange) {
         <input class="rf-ing-name" value="${row.name}" autocomplete="off" />
         <div class="autocomplete-list" hidden></div>
       </td>
-      <td><input class="rf-ing-qty" value="${row.quantity}" /></td>
+      <td><input class="rf-ing-qty" value="${formatIngredientQty(row.quantity)}" /></td>
       <td><input class="rf-ing-unit" value="${row.unit}" /></td>
       <td><input class="rf-ing-method" value="${row.method}" dir="auto" /></td>
       <td style="text-align:right">
@@ -4956,7 +4956,7 @@ function renderGeneratedIngredientRows(process, tbodyEl, onChange) {
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
       <td><input class="rg-ing-name" value="${row.name}" dir="auto" /></td>
-      <td><input class="rg-ing-qty" value="${row.quantity}" /></td>
+      <td><input class="rg-ing-qty" value="${formatIngredientQty(row.quantity)}" /></td>
       <td><input class="rg-ing-unit" value="${row.unit}" /></td>
       <td><input class="rg-ing-method" value="${row.method}" dir="auto" /></td>
       <td style="text-align:right">
@@ -5403,6 +5403,19 @@ function allocateHundredths(exact, targetTicks) {
 }
 
 const isBlankQuantity = (q) => q === null || q === undefined || q === '';
+
+// How an ingredient quantity is SHOWN: one decimal place, two under 0.1 g (so 0.04 g of a spice stays visible instead of
+// reading 0), and no trailing ".0" (40, not 40.0). Display only: recipes keep their stored 0.01 g precision, exports keep
+// the exact number, and the totals are computed from the stored values, so the rows on screen can look a hair off their
+// total. Quantities that are not plain numbers ("a pinch", "1/2") are shown exactly as written. Mirrored for Excel cells in
+// lib/export.js (ingredientQtyNumFmt).
+function formatIngredientQty(value) {
+  if (isBlankQuantity(value)) return '';
+  const text = String(value).trim();
+  if (!/^-?\d*\.?\d+$/.test(text)) return String(value);
+  const n = parseFloat(text), abs = Math.abs(n), scale = abs > 0 && abs < 0.1 ? 100 : 10;
+  return String(Math.round(n * scale) / scale);
+}
 
 // Scales several processes' ingredient rows at once and returns new row arrays (same shape as `sets`). `multipliers` is one
 // number for all of them or one per set. Processes that share a multiplier are rounded TOGETHER, so what they add up to is
@@ -6341,8 +6354,8 @@ function renderCalcIngredientRows(process, tbodyEl, onChange) {
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
       <td><input class="calc-ing-name" value="${row.name}" dir="auto" /></td>
-      <td><input class="calc-ing-orig-qty" value="${row.quantity ?? ''}" title="This calculation's starting/base quantity -- editable, never saved to the recipe" /></td>
-      <td><input class="calc-ing-qty" value="${process.scaledIngredients[i].quantity ?? ''}" /></td>
+      <td><input class="calc-ing-orig-qty" value="${formatIngredientQty(row.quantity)}" title="This calculation's starting/base quantity -- editable, never saved to the recipe" /></td>
+      <td><input class="calc-ing-qty" value="${formatIngredientQty(process.scaledIngredients[i].quantity)}" /></td>
       <td><input class="calc-ing-unit" value="${row.unit}" /></td>
       <td><input class="calc-ing-method" value="${row.method}" dir="auto" /></td>
       <td style="text-align:right"><button type="button" class="icon-btn danger" data-row-remove="${row.localId}">Remove</button></td>
@@ -6371,7 +6384,7 @@ function renderCalcIngredientRows(process, tbodyEl, onChange) {
       row.quantity = e.target.value;
       const recomputed = scaleIngredients([row], process.multiplier ?? 1)[0];
       process.scaledIngredients[i] = { ...process.scaledIngredients[i], quantity: recomputed.quantity };
-      tr.querySelector('.calc-ing-qty').value = process.scaledIngredients[i].quantity ?? '';
+      tr.querySelector('.calc-ing-qty').value = formatIngredientQty(process.scaledIngredients[i].quantity);
       onChange();
     });
     tr.querySelector('.calc-ing-unit').addEventListener('input', (e) => {

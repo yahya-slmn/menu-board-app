@@ -133,6 +133,17 @@ their source spreadsheets have fundamentally different column structures —
 adding a new section usually means adding a new builder function here, not
 extending an existing one.
 
+**Recipe quantities (scaling, rounding, display):** ingredient quantities are stored at 0.01 g. Whenever a scale has a target
+(Total Quantity or Net Weight typed into a recipe form, the Calculator's target quantity, and the generation-time scaling to
+`REFERENCE_RECIPE_GRAMS` = 150 g in `lib/recipeGenerator.js`), the scaled quantities go through largest-remainder rounding
+(`allocateHundredths`, mirrored in `renderer.js` because it is a classic script) so they add up to the target EXACTLY;
+rounding each ingredient on its own let the total drift by a hundredth or two (149.99 for 150). Net Weight edits use
+`scaleSetsToNetWeight`, which picks the total whose displayed Net Weight equals the typed one. Processes that share a
+multiplier are rounded together (`scaleIngredientSets`). Quantities are DISPLAYED with `formatIngredientQty` (one decimal, two
+under 0.1 g, no trailing ".0") in the forms, previews and Calculator, and exports keep the exact number with an Excel number
+format (`ingredientQtyNumFmt`); on-screen rows can therefore look a hair off their total. Recipes generated before the 150 g
+change stay at ~100 g -- nothing rescales them.
+
 ## Recipe on Fire game view (`renderer/rof/`)
 
 The one place the "classic scripts only" rule above doesn't apply. Recipe on Fire's tray/dough/bake
