@@ -72,6 +72,9 @@ const state = {
     // returning to Drafts keeps her place; reset to null on a fresh upload so a new generation
     // run always lands on the folder list rather than some other menu's folder she had open.
     draftFolder: null,
+    // The category chosen in a folder's own drafts table ('' = all). Kept while she reviews or deletes drafts (the screen
+    // re-renders after each), cleared when she goes back to the folder list.
+    draftCategory: '',
   },
   // Materials/Trays catalog -- same list<->form drill-down shape as recipes/extractor above
   // (view/formId), single-photo model like Recipe Book (pendingPhoto/removePhoto). shapeType and
@@ -4538,6 +4541,34 @@ async function renderRecipeGeneratorTabs(main, ns) {
   else await renderGeneratedConfirmedList(content, ns, main);
 }
 
+// Category filter shared by the Recipe Generator's Drafts table and its Recipe Generated list. `category` is a plain text column
+// (set from the menu's own category heading, editable on the recipe), so the options are the distinct values in use, compared
+// ignoring case and extra spaces ("Main Dish" and "main dish " are one option, shown as first seen). Recipes with no category
+// are reachable through "Uncategorized", the same convention as the Ingredients view.
+const categoryFilterKey = (c) => String(c || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const matchesCategoryFilter = (recipe, key) => !key || (key === UNCATEGORIZED_FILTER_VALUE ? !categoryFilterKey(recipe.category) : categoryFilterKey(recipe.category) === key);
+// Fills `selectEl` and shows it, or leaves it hidden when there is nothing to choose between. Returns the option value now in
+// effect ('' when `wantedKey` no longer exists in this list).
+function fillCategoryFilter(selectEl, list, wantedKey = '') {
+  const options = new Map(); // key -> { label, count }
+  let uncategorized = 0;
+  for (const r of list) {
+    const key = categoryFilterKey(r.category);
+    if (!key) { uncategorized++; continue; }
+    if (!options.has(key)) options.set(key, { label: String(r.category).trim().replace(/\s+/g, ' '), count: 0 });
+    options.get(key).count++;
+  }
+  selectEl.textContent = '';
+  if (options.size + (uncategorized > 0 ? 1 : 0) < 2) { selectEl.hidden = true; return ''; }
+  const add = (value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; selectEl.appendChild(o); };
+  add('', 'All Categories');
+  if (uncategorized > 0) add(UNCATEGORIZED_FILTER_VALUE, `Uncategorized (${uncategorized})`);
+  [...options.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label)).forEach(([key, o]) => add(key, `${o.label} (${o.count})`));
+  selectEl.value = [...selectEl.options].some(o => o.value === wantedKey) ? wantedKey : '';
+  selectEl.hidden = false;
+  return selectEl.value;
+}
+
 // Drafts are grouped into per-menu "folders" (requirement: don't mix every upload's drafts into
 // one flat list) keyed by source_menu_label -- a pure client-side grouping of whatever
 // listGeneratedRecipeDrafts() currently returns, not a separately persisted entity (there's no
@@ -4608,6 +4639,7 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   function wireBack() {
     document.getElementById('rg-drafts-back-btn').addEventListener('click', () => {
       state[ns.stateKey].draftFolder = null;
+      state[ns.stateKey].draftCategory = '';
       renderRecipeGeneratorTabs(main, ns);
     });
   }
@@ -4648,24 +4680,40 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   // all today (see main.js's extractDishesWithAI) -- a lone "No day recorded" heading sitting over
   // literally every row would be noise, not a grouping aid.
   const hasAnyDayLabel = rows.some(d => d.source_day_label);
-  let tableRowsHtml;
-  if (hasAnyDayLabel) {
-    const dayGroups = new Map(); // day label (or null) -> rows
-    for (const d of rows) {
-      const key = d.source_day_label || null;
-      if (!dayGroups.has(key)) dayGroups.set(key, []);
-      dayGroups.get(key).push(d);
-    }
-    tableRowsHtml = [...dayGroups.entries()].map(([day, groupRows]) => `
-      <tr><td colspan="5" style="background:var(--paper-dim); font-weight:600; padding-top:10px;">${day || 'No day recorded'}</td></tr>
-      ${groupRows.map(rowMarkup).join('')}
-    `).join('');
-  } else {
-    tableRowsHtml = rows.map(rowMarkup).join('');
-  }
 
   container.innerHTML = `
     ${backBtn}
+    <div class="search-bar"><select id="rg-draft-category-filter" aria-label="Filter by category" hidden></select></div>
+    <div id="rg-draft-table"></div>
+  `;
+  wireBack();
+  const s = state[ns.stateKey];
+  const filterEl = document.getElementById('rg-draft-category-filter');
+  s.draftCategory = fillCategoryFilter(filterEl, rows, s.draftCategory);
+  filterEl.parentElement.hidden = filterEl.hidden; // no empty gap above the table when there is nothing to filter
+
+  // The table itself is unchanged; the category filter only decides which rows go into it.
+  function renderTable() {
+    const shown = rows.filter(d => matchesCategoryFilter(d, filterEl.value));
+    let tableRowsHtml;
+    if (shown.length === 0) {
+      tableRowsHtml = `<tr><td colspan="5" style="color:var(--neutral);">No drafts in this category.</td></tr>`;
+    } else if (hasAnyDayLabel) {
+      const dayGroups = new Map(); // day label (or null) -> rows
+      for (const d of shown) {
+        const key = d.source_day_label || null;
+        if (!dayGroups.has(key)) dayGroups.set(key, []);
+        dayGroups.get(key).push(d);
+      }
+      tableRowsHtml = [...dayGroups.entries()].map(([day, groupRows]) => `
+      <tr><td colspan="5" style="background:var(--paper-dim); font-weight:600; padding-top:10px;">${day || 'No day recorded'}</td></tr>
+      ${groupRows.map(rowMarkup).join('')}
+    `).join('');
+    } else {
+      tableRowsHtml = shown.map(rowMarkup).join('');
+    }
+    const tableEl = document.getElementById('rg-draft-table');
+    tableEl.innerHTML = `
     <div class="table-scroll"><table class="recipes-table rg-drafts-table">
       <thead><tr><th>Dish</th><th>Category</th><th>Source Menu</th><th>Generated</th><th></th></tr></thead>
       <tbody>
@@ -4673,18 +4721,20 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
       </tbody>
     </table></div>
   `;
-  wireBack();
-  container.querySelectorAll('[data-rg-review]').forEach(btn => {
-    btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.rgReview, 10)));
-  });
-  container.querySelectorAll('[data-rg-delete]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const d = rows.find(x => x.id === parseInt(btn.dataset.rgDelete, 10));
-      if (!confirm(`Delete the draft "${d.name}"? This cannot be undone.`)) return;
-      await window.api.deleteGeneratedRecipe(d.id);
-      renderRecipeGeneratorTabs(main, ns);
+    tableEl.querySelectorAll('[data-rg-review]').forEach(btn => {
+      btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.rgReview, 10)));
     });
-  });
+    tableEl.querySelectorAll('[data-rg-delete]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const d = rows.find(x => x.id === parseInt(btn.dataset.rgDelete, 10));
+        if (!confirm(`Delete the draft "${d.name}"? This cannot be undone.`)) return;
+        await window.api.deleteGeneratedRecipe(d.id);
+        renderRecipeGeneratorTabs(main, ns);
+      });
+    });
+  }
+  filterEl.addEventListener('change', () => { s.draftCategory = filterEl.value; renderTable(); });
+  renderTable();
 }
 
 // Adapted from renderRecipeListView's own content logic (search/month-group/export-selected/
@@ -4721,28 +4771,8 @@ async function renderGeneratedConfirmedList(container, ns, main) {
     return;
   }
 
-  // Category filter. `category` is a plain text column on generated_recipes (set from the menu's own category
-  // heading, and editable on the recipe), so the options are the distinct values actually in use. Values are compared
-  // ignoring case and extra spaces ("Main Dish" / "main dish " are one option, shown as first seen); recipes with no
-  // category are reachable through "Uncategorized", the same convention as the Ingredients view.
-  const categoryKey = (c) => String(c || '').trim().replace(/\s+/g, ' ').toLowerCase();
   const categoryFilter = document.getElementById('rg-category-filter');
-  const categoryOptions = new Map(); // key -> { label, count }
-  let uncategorizedCount = 0;
-  for (const r of recipes) {
-    const key = categoryKey(r.category);
-    if (!key) { uncategorizedCount++; continue; }
-    if (!categoryOptions.has(key)) categoryOptions.set(key, { label: String(r.category).trim().replace(/\s+/g, ' '), count: 0 });
-    categoryOptions.get(key).count++;
-  }
-  if (categoryOptions.size > 0) {
-    const addOption = (value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; categoryFilter.appendChild(o); };
-    addOption('', 'All Categories');
-    if (uncategorizedCount > 0) addOption(UNCATEGORIZED_FILTER_VALUE, `Uncategorized (${uncategorizedCount})`);
-    [...categoryOptions.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label))
-      .forEach(([key, o]) => addOption(key, `${o.label} (${o.count})`));
-    categoryFilter.hidden = false;
-  }
+  fillCategoryFilter(categoryFilter, recipes);
 
   // What Export Selected / Delete Selected act on: the ticked recipes that are on screen right now. A recipe ticked
   // before a search or category filter hid it stays ticked (it reappears ticked when the filter is cleared) but is
@@ -4764,7 +4794,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
     const cat = categoryFilter.value;
     const filtered = recipes.filter(r =>
       (!query || r.name.toLowerCase().includes(query) || r.code.toLowerCase().includes(query)) &&
-      (!cat || (cat === UNCATEGORIZED_FILTER_VALUE ? !categoryKey(r.category) : categoryKey(r.category) === cat))
+      matchesCategoryFilter(r, cat)
     );
     shownIds = new Set(filtered.map(r => r.id));
     updateExportBtn();
