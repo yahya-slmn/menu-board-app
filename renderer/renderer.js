@@ -75,6 +75,9 @@ const state = {
     // The category chosen in a folder's own drafts table ('' = all). Kept while she reviews or deletes drafts (the screen
     // re-renders after each), cleared when she goes back to the folder list.
     draftCategory: '',
+    // Where the page was scrolled when a draft was opened for Review (or deleted), so coming back to the list -- after Save Draft,
+    // Confirm & Save, Back or Delete -- puts her at the same spot instead of the top. Consumed once by renderRecipeGeneratorTabs.
+    returnScroll: null,
   },
   // Materials/Trays catalog -- same list<->form drill-down shape as recipes/extractor above
   // (view/formId), single-photo model like Recipe Book (pendingPhoto/removePhoto). shapeType and
@@ -4540,6 +4543,13 @@ async function renderRecipeGeneratorTabs(main, ns) {
   const content = document.getElementById('rg-tab-content');
   if (s.activeTab === 'drafts') await renderGeneratedDraftsList(content, ns, main);
   else await renderGeneratedConfirmedList(content, ns, main);
+  // Back from a draft's review form (or after a delete): put the page back where it was. The list is fully rendered by now, so the
+  // height is right; `instant` because .main has smooth scrolling, which would visibly glide down from the top instead.
+  if (s.returnScroll != null) {
+    const top = s.returnScroll;
+    s.returnScroll = null;
+    main.scrollTo({ top, behavior: 'instant' });
+  }
 }
 
 // Drafts' day headings ("Monday 27-09-2026", or just "Monday", or nothing) must read in calendar order. The groups used to come out
@@ -4756,13 +4766,17 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
     </table></div>
   `;
     tableEl.querySelectorAll('[data-rg-review]').forEach(btn => {
-      btn.addEventListener('click', () => ns.openEdit(parseInt(btn.dataset.rgReview, 10)));
+      btn.addEventListener('click', () => {
+        s.returnScroll = document.getElementById('main').scrollTop;
+        ns.openEdit(parseInt(btn.dataset.rgReview, 10));
+      });
     });
     tableEl.querySelectorAll('[data-rg-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const d = rows.find(x => x.id === parseInt(btn.dataset.rgDelete, 10));
         if (!confirm(`Delete the draft "${d.name}"? This cannot be undone.`)) return;
         await window.api.deleteGeneratedRecipe(d.id);
+        s.returnScroll = main.scrollTop; // keep her place in the list
         renderRecipeGeneratorTabs(main, ns);
       });
     });
@@ -5423,11 +5437,10 @@ async function saveGeneratedRecipeForm(ns, { confirm }) {
   }
 
   try {
-    const result = await ns.api.save(payload);
-    // A successful confirm moves this recipe off the Drafts tab (it's no longer status='draft')
-    // -- switch to Recipe Generated so she lands right on the tab that now shows it, instead of
-    // back on a Drafts list it just disappeared from.
-    if (confirm && result.status === 'confirmed') s.activeTab = 'generated';
+    await ns.api.save(payload);
+    // Stay on the tab she came from. A confirmed draft simply drops out of the Drafts list (it is no longer status='draft'), so
+    // reviewing a batch is one uninterrupted pass: the next draft is where the confirmed one was. (This used to jump to Recipe
+    // Generated, forcing her to navigate back to Drafts and find her place again after every draft.)
     goBackToRecipeList(ns);
   } catch (err) {
     statusEl.textContent = '';
