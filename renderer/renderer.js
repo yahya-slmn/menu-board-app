@@ -158,7 +158,7 @@ const RECIPE_NS = {
       addIngredient: (payload) => window.api.addExtractedIngredient(payload),
     },
   },
-  // Recipe Generator's third namespace -- AI-generated ~100g reference recipes, always free-text
+  // Recipe Generator's third namespace -- AI-generated ~150g reference recipes, always free-text
   // ingredients (no searchIngredients/addIngredient at all: its own bespoke form,
   // renderGeneratedRecipeFormView, never wires an ingredient-name autocomplete, unlike Book/
   // Extractor's shared renderRecipeFormView). No allowManualNew/extract entry point either --
@@ -171,7 +171,7 @@ const RECIPE_NS = {
   generated: {
     stateKey: 'generatedRecipes',
     title: 'Recipe Generator',
-    subtitle: 'AI-generated ~100g reference recipes from an uploaded menu',
+    subtitle: 'AI-generated ~150g reference recipes from an uploaded menu',
     codeLabel: 'RG',
     searchLabel: 'Search by name or RG code',
     backLabel: '← Back to Recipe Generator',
@@ -4430,7 +4430,7 @@ async function saveProcessRecipeForm(ns) {
 }
 
 // ============================================================
-// RECIPE GENERATOR -- AI-generates a full ~100g reference recipe per dish pulled from an
+// RECIPE GENERATOR -- AI-generates a full ~150g reference recipe per dish pulled from an
 // uploaded menu file (main.js's parse-and-generate-recipes), for every dish EXCEPT Bread/Milk/
 // Juice (and the already-established Fruit Basket/Fruit Bar/Salad Bar/Water/Soft Drinks
 // exclusions) -- see lib/recipeGenerator.js's isExcludedCategory/isReadyMadeItem. Two tabs: Drafts (generated_recipes rows
@@ -4948,7 +4948,7 @@ function wireGeneratedNetWeightRescale(s, renderProcessCards) {
 // never linked to any ingredient catalog, ever, even after confirmation (see the migration's
 // own comment) -- same "throwaway free text" row shape as Recipe Calculator's own inline rows,
 // just without that function's dual quantity-column scaling machinery (nothing here is ever
-// scaled in place -- scaling to ~100g happens once, server-side, right after generation; see
+// scaled in place -- scaling to ~150g happens once, server-side, right after generation; see
 // lib/recipeGenerator.js's normalizeProcessesToGrams). Reuses wireProcessIngredientRowDrag
 // UNCHANGED for drag-and-drop reordering, same as renderProcessIngredientRows does.
 function renderGeneratedIngredientRows(process, tbodyEl, onChange) {
@@ -4995,7 +4995,7 @@ async function renderGeneratedRecipeFormView(main, ns) {
   // Fetched once per form open, same convention renderRecipeFormView uses -- backs every
   // process card's "+ Add Waste" control (Material/Tray's own catalog fetch, `listMaterials`,
   // is deliberately NOT here -- see the parity migration's own comment on why Material/Tray
-  // stays excluded for a 100g reference recipe).
+  // stays excluded for a 150g reference recipe).
   const wasteTypes = await window.api.listWasteTypes();
 
   const recipe = await ns.api.get(s.formId);

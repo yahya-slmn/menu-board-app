@@ -39,7 +39,7 @@ const {
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const {
-  normalizeProcessesToGrams, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
+  normalizeProcessesToGrams, REFERENCE_RECIPE_GRAMS, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
 
 let mainWindow;
@@ -1652,7 +1652,7 @@ ipcMain.handle('clean-menus-for-sharing', async (e, { files }) => {
 });
 
 // ---------------------------------------------------------------
-// IPC: Recipe Generator -- AI-generates a full ~100g reference recipe per dish pulled from an
+// IPC: Recipe Generator -- AI-generates a full ~150g reference recipe per dish pulled from an
 // uploaded menu file, for every dish EXCEPT Bread/Milk/Juice (and the already-established
 // ready-made exclusions -- Fruit Basket/Fruit Bar/Salad Bar/Water/Soft Drinks) -- see
 // lib/recipeGenerator.js's isExcludedCategory/isReadyMadeItem, matched by category TEXT,
@@ -1788,7 +1788,7 @@ async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
 
 // Strips any nut-policy-violating ingredient row (same mandatory safety net every other
 // AI-suggested ingredient list in this app goes through -- see lib/nutFilter.js), normalizes
-// every ingredient's quantity to sum to ~100g (the "reference recipe" requirement -- see
+// every ingredient's quantity to sum to REFERENCE_RECIPE_GRAMS (150 g; the "reference recipe" requirement -- see
 // normalizeProcessesToGrams's own comment on why this happens here, mathematically, rather than
 // being asked of the model directly), then writes the recipe/processes/ingredients/wastes as one
 // new draft row. `sourceMenuLabel`/`dish.name` back this recipe's traceability fields
@@ -1823,7 +1823,7 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
     // herself.
     .filter((proc) => proc.ingredients.length > 0 || proc.method);
 
-  const normalized = normalizeProcessesToGrams(processesRaw, 100);
+  const normalized = normalizeProcessesToGrams(processesRaw, REFERENCE_RECIPE_GRAMS);
 
   const { data: inserted, error: insErr } = await supabase
     .from('generated_recipes')
@@ -2235,7 +2235,7 @@ async function fetchGeneratedRecipeWithProcesses(id) {
     ingredients: ingredientsByProcess.get(p.id) || [],
     wastes: wastesByProcess.get(p.id) || [],
     // No Material/Tray on generated recipes -- real-batch production equipment, meaningless for
-    // a 100g reference recipe (confirmed with the chef; deliberately excluded, see the parity
+    // a 150g reference recipe (confirmed with the chef; deliberately excluded, see the parity
     // migration's own comment). Always present as null, never `undefined`, since
     // buildProcessFromSaved/buildRecipeContentModel read these fields regardless of source table.
     material_id: null,
