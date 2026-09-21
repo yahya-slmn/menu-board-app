@@ -168,6 +168,7 @@ export function createRofGame(container, opts = {}) {
     bench = { ...board.rect, top: board.top, group: board.group, dispose: board.dispose };
     stage.scene.add(bench.group);
     placing = true;
+    updateInset();
 
     for (let i = 0; i < count; i++) {
       const piece = createDoughPiece(spec, { seed: 1000 + i * 13, spread });
@@ -194,6 +195,7 @@ export function createRofGame(container, opts = {}) {
     if (bench) { stage.scene.remove(bench.group); bench.dispose(); bench = null; }
     hud?.remove(); hud = null;
     placing = false;
+    updateInset();
     if (tray) fitToStage();
   }
   // Lays the pieces still on the bench onto the tray, top-left first.
@@ -287,7 +289,8 @@ export function createRofGame(container, opts = {}) {
     chipEl.hidden = !show; if (tipEl && !show) tipEl.hidden = true;
     if (!show) { stage.requestRender(); return; }
     const total = scrapSummary();
-    chipEl.textContent = `Scrap ${fmtG(total.totalGrams)} g · ${fmtPct(total.totalPct / 100)}% of the dough`;
+    chipEl.textContent = `Scrap ${fmtG(total.totalGrams)} g · ${fmtPct(total.totalPct / 100)}%`;
+    chipEl.title = `${fmtG(total.totalGrams)} g of scrap, ${fmtPct(total.totalPct / 100)}% of the dough on this tray`;
     // A flag on each region big enough to read (2% of the dough or more), at most five.
     scrap.regions.filter(r => r.fraction >= 0.02).slice(0, 5).forEach((r) => {
       const el = document.createElement('div'); el.className = 'rof-flag';
@@ -330,6 +333,7 @@ export function createRofGame(container, opts = {}) {
     sheet = createSheet({ region: tray.region, plan: tray.plan, thicknessCm });
     sheet.group.position.y = tray.floorTopY;
     stage.scene.add(sheet.group);
+    updateInset();
     fitToStage();
     return true;
   }
@@ -339,6 +343,7 @@ export function createRofGame(container, opts = {}) {
     if (sheet) { stage.scene.remove(sheet.group); sheet.dispose(); sheet = null; }
     scrap = null; clearTimeout(scrapTimer);
     if (flagLayer) renderFlags();
+    updateInset();
   }
 
   // Arms a cutter: a see-through copy follows the pointer over the tray (red where it can't go) and a
@@ -470,6 +475,8 @@ export function createRofGame(container, opts = {}) {
     const m = { hMul: 1, wMul: 1, proofShare: 0.4, brownSpeed: 1, ...(model || {}) };
     setInteractive(false);
     interaction.select(null);
+    insetForced = true; updateInset();                 // the oven scene has its own framing
+    stage.setViewAngles(stage.VIEWS.angled);
     const target = DONENESS[doneness] ?? DONENESS.golden;
     // What bakes: the sheet (Sheet & Trim) or the pieces on the tray (Shape & Place).
     const pieces = sheet ? [{ dough: sheet, data: { spec: { archetype: 'sheet' } } }] : doughItems().filter(i => i.home === 'tray');
@@ -524,6 +531,7 @@ export function createRofGame(container, opts = {}) {
         oven.setLevel(0); oven.setSteam(0); stage.setOvenLook(0);
         stage.setView({ x: stageCenter.x, y: stageCenter.y, zoom: 1, pitch: 0, lift: 0 });
         sfx.ding?.();
+        insetForced = false; updateInset();
         resolveFn();
         return false;
       }
@@ -537,6 +545,7 @@ export function createRofGame(container, opts = {}) {
     stage.setOvenLook(0);
     stage.setView({ x: stageCenter.x, y: stageCenter.y, zoom: 1, pitch: 0, lift: 0 });
     setInteractive(true);
+    insetForced = false; updateInset();
   }
 
   function clearItems() {
@@ -670,6 +679,95 @@ export function createRofGame(container, opts = {}) {
     }
   } catch { /* no storage -- no badge */ }
 
+  // ---- View: presets, turning the view, and the side-view inset ----------------------------------------------
+  // Turning the view never moves a piece: while one is held, the piece keeps its place in the world and the grab
+  // offset is re-anchored (interaction.reanchor), so the next mouse move continues from where it is. Q / E turn the
+  // view (also mid-drag, since the keys are independent of the mouse); right-drag or Alt+drag orbits when nothing
+  // is held; the buttons jump to Top / Angled / Low front / Low side.
+  const INSET_KEY = 'rofSideView';
+  let insetPref = true, insetForced = false;      // the chef's choice, and "off just now" (during the bake)
+  try { insetPref = localStorage.getItem(INSET_KEY) !== '0'; } catch { /* default on */ }
+  let viewBox = null, viewBtns = {}, insetBtn = null, insetFrame = null;
+  const VIEW_ORDER = ['top', 'angled', 'lowFront', 'lowSide'];
+  function buildViewTools() {
+    viewBox = document.createElement('div'); viewBox.className = 'rof-view-tools';
+    const grp = document.createElement('div'); grp.className = 'rof-view-group'; grp.setAttribute('role', 'group'); grp.setAttribute('aria-label', 'View');
+    grp.title = 'Right-drag (or Alt+drag) to turn the view; Q / E turn it too, and 1-4 pick a view, when the stage is focused.';
+    for (const k of VIEW_ORDER) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'rof-tool-btn rof-view-btn'; b.textContent = stage.VIEWS[k].label; b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', () => { stage.setViewAngles(stage.VIEWS[k]); announce(`${stage.VIEWS[k].label} view.`); });
+      grp.appendChild(b); viewBtns[k] = b;
+    }
+    insetBtn = document.createElement('button'); insetBtn.type = 'button'; insetBtn.className = 'rof-tool-btn'; insetBtn.textContent = 'Side view';
+    insetBtn.setAttribute('aria-pressed', String(insetPref)); insetBtn.title = 'A small side elevation in the corner, for judging heights and gaps';
+    insetBtn.addEventListener('click', () => { insetPref = !insetPref; try { localStorage.setItem(INSET_KEY, insetPref ? '1' : '0'); } catch { /* not persisted */ } insetBtn.setAttribute('aria-pressed', String(insetPref)); updateInset(); announce(insetPref ? 'Side view shown.' : 'Side view hidden.'); });
+    viewBox.append(grp, insetBtn);
+    insetFrame = document.createElement('div'); insetFrame.className = 'rof-inset-frame'; insetFrame.setAttribute('aria-hidden', 'true'); insetFrame.hidden = true;
+    insetFrame.innerHTML = '<span>Side view</span>';
+    container.append(viewBox, insetFrame);
+    refreshViewButtons();
+  }
+  function refreshViewButtons() {
+    const name = stage.viewName();
+    for (const k of VIEW_ORDER) viewBtns[k].setAttribute('aria-pressed', String(k === name));
+  }
+  // The strip shows while pieces or a sheet are on the stage (not in Setup, not during the bake).
+  function updateInset() {
+    const on = insetPref && !insetForced && (placing || !!sheet);
+    stage.setInset(on);
+    if (insetFrame) {
+      insetFrame.hidden = !on;
+      if (on) { const r = stage.getInsetRect(); Object.assign(insetFrame.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' }); }
+    }
+  }
+  const insetHit = (e) => {
+    if (!stage.insetOn) return false;
+    const r = stage.getInsetRect(), b = stage.canvas.getBoundingClientRect();
+    const x = e.clientX - b.left, y = e.clientY - b.top;
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  };
+  // Orbit gestures: right-drag, or Alt+left-drag. Only when nothing is held.
+  let orbit = null;
+  const isOrbitGesture = (e) => e.button === 2 || (e.button === 0 && e.altKey);
+  interaction.hooks.blocked = (e) => isOrbitGesture(e) || insetHit(e) || !!orbit;
+  stage.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  stage.canvas.addEventListener('pointerdown', (e) => {
+    if (!isOrbitGesture(e) || interaction.isDragging()) return;
+    e.preventDefault();
+    orbit = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    stage.canvas.setPointerCapture(e.pointerId); stage.canvas.style.cursor = 'move'; stage.canvas.focus({ preventScroll: true });
+  });
+  stage.canvas.addEventListener('pointermove', (e) => {
+    if (!orbit || e.pointerId !== orbit.id) return;
+    stage.orbitBy(-(e.clientX - orbit.x) * 0.008, (e.clientY - orbit.y) * 0.005);
+    orbit.x = e.clientX; orbit.y = e.clientY;
+  });
+  const endOrbit = (e) => { if (orbit && e.pointerId === orbit.id) { try { stage.canvas.releasePointerCapture(e.pointerId); } catch { /* released */ } orbit = null; stage.canvas.style.cursor = ''; announce(viewSpeech()); } };
+  stage.canvas.addEventListener('pointerup', endOrbit);
+  stage.canvas.addEventListener('pointercancel', endOrbit);
+  const viewSpeech = () => { const v = stage.getView(); return v.name ? `${stage.VIEWS[v.name].label} view.` : `View turned to ${Math.round(v.yaw * 180 / Math.PI)} degrees, ${Math.round(v.pitch * 180 / Math.PI)} degrees up.`; };
+  stage.canvas.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'q' || k === 'e') { e.preventDefault(); stage.orbitBy((k === 'e' ? 1 : -1) * (e.shiftKey ? 5 : 15) * Math.PI / 180); announce(viewSpeech()); }
+    else if (k >= '1' && k <= '4') { e.preventDefault(); const name = VIEW_ORDER[+k - 1]; stage.setViewAngles(stage.VIEWS[name]); announce(`${stage.VIEWS[name].label} view.`); }
+  });
+  // Any change of the view while a piece is held: re-anchor (see above), and keep the buttons and the inset frame current.
+  stage.onCameraChange(() => { interaction.reanchor(); refreshViewButtons(); });
+  // The strip's window: the whole tray by default, and -- so heights and gaps can be judged where it matters -- a
+  // tighter window that follows the piece being held.
+  function focusInset() {
+    if (!stage.insetOn || !tray) return;
+    const v = stage.getView(), pl = tray.plan, hx = (pl.maxX - pl.minX) / 2, hz = (pl.maxY - pl.minY) / 2;
+    // The tray's extent along the strip's horizontal axis (perpendicular to the main view direction).
+    const along = hx * Math.abs(Math.sin(v.yaw)) + hz * Math.abs(Math.cos(v.yaw));
+    const held = items.find(i => i.dragging);
+    if (held) stage.setInsetFocus(held.x, held.y, Math.min(along * 1.15 + 2, 20));
+    else stage.setInsetFocus(tray.center.x, tray.center.y, along * 1.15 + 2);
+  }
+  stage.addFrameHook(() => { if (stage.insetOn) { updateInset(); focusInset(); } });
+  buildViewTools();
+
   // ---- Graphics setting ------------------------------------------------------------------------------
   // Auto (default): start from what the GPU suggests and let the frame-rate governor step down if it can't hold
   // ~38 fps. Or fix High / Medium / Low. The choice is a personal, per-device preference (localStorage).
@@ -716,6 +814,8 @@ export function createRofGame(container, opts = {}) {
     getCutters: () => cutterItems().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },
     setSfx: (fns) => Object.assign(sfx, fns),
+    getView: () => stage.getView(),
+    setViewPreset: (name) => stage.setViewAngles(stage.VIEWS[name]),
     announce,
     focusStage: () => stage.canvas.focus({ preventScroll: true }),
     getBench: () => bench && { cx: bench.cx, cy: bench.cy, hw: bench.hw, hh: bench.hh },
@@ -735,6 +835,6 @@ export function createRofGame(container, opts = {}) {
     },
     _stage: stage, // exposed for the test harness
   };
-  stage.onDispose(() => { clearTimeout(scrapTimer); flagLayer?.remove(); scrapRow?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
+  stage.onDispose(() => { viewBox?.remove(); insetFrame?.remove(); clearTimeout(scrapTimer); flagLayer?.remove(); scrapRow?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
   return api;
 }

@@ -146,8 +146,8 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   shape type + dims, and the interior footprint `trayInteriorFootprint()` already computed — so
   tray math stays in one place. Plan coordinates: cm, tray-centre origin, +y up the page (plan y →
   world −z).
-- `stage.js` (renderer, fixed tilted camera with wheel zoom only — no orbit, lights, on-demand render
-  loop), `quality.js` (GPU-probed quality tier + FPS governor that steps the tier down at runtime),
+- `stage.js` (renderer, camera with yaw / pitch / presets and wheel zoom, lights, on-demand render
+  loop, side-view inset), `quality.js` (GPU-probed quality tier + FPS governor that steps the tier down at runtime),
   `trayModels.js` (parametric trays/cutters using Materials' wall/floor formulas), `constraints.js`
   (containment + SAT overlap), `items.js`/`interaction.js` (drag with spring follow, lift, settle;
   `collision: 'solid' | 'lifted'`).
@@ -193,8 +193,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   pointer (red where it can't go), a click on empty sheet stamps one, clicking an existing cutter picks it
   up instead, and unplaceable cutters are dropped rather than overlapped. Per-piece weight / count /
   utilization / waste come from `updateTrimSummary` (share of tray area x grams in the tray);
-  `computeCutterLayout` (pure geometry, still in renderer.js) drives Auto-arrange. Not offered on muffin
-  trays (a portion per cup already).
+  Auto-arrange is `packing.js` (below). Not offered on muffin trays (a portion per cup already).
 - The old 2D tray canvas and photo-sprite dough flow are gone; the game view is the only tray view. The
   Bake panel (both methods) has a rise override slider (30-160%) scaling the model's height/width
   multipliers -- it applies at bake time only, so raising it above what placement reserved can make
@@ -224,8 +223,31 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   real progressbar and labelled slider; the Shapes modal is a dialog (labels tied to inputs, Escape, focus
   moved in and returned, Tab kept inside). `prefers-reduced-motion` skips the camera intro, drop-ins and landing
   squash and shortens the bake (~3.4 s).
-- Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake, the shape presets, performance tiers and
-  accessibility are done (shape-presets migration applied to Supabase 2026-09-20). Left:
+- Portions by weight (`portions.js`): grams is the primary input in Shape & Place, defaulting from
+  `recipes.portion_weight_grams`, then the shape's weight; the piece count is a linked stepper. `planPortions`
+  returns whole portions and the leftover dough (shown in red, `.rof-leftover`); counts cap at 60 and a
+  portion larger than the dough reports `tooBig` instead of a count. Portion weight is session-only state.
+- Cutter packing (`packing.js`, pure geometry, unit-tested in the scratchpad harness): `packCutters` does the
+  exact layout for round (hex), rect (grid) and triangle (alternating up/down lattice with a frame-angle and
+  phase search, tray-edge angles included) cutters inside a circle / rect / poly region, honouring a margin and
+  a gap. Triangle placements carry a rotation (`rot`); dropping it was the bug behind the old 38% utilization.
+  `scrap.js` (`analyzeScrap`) rasterises the sheet, finds each connected piece of scrap, its exact area and the
+  widest point (where its flag goes). The flag stays ONE per connected region (no chunking); regions of 2% or
+  more get a flag, at most five. A cutter's exact `area` is passed in so the panel and the chip agree to the gram.
+  The scrap is tinted red with hatching in the dough shader; "Highlight scrap" is a toggle on the stage.
+- Camera and the side view: yaw / pitch presets (Top, Angled, Low front, Low side; keys 1-4), Q / E turn the
+  view 15 degrees (Shift = 5), right-drag or Alt+left-drag orbits when nothing is held. Turning the view while
+  a piece is held calls `interaction.reanchor()` so the grab offset is recomputed from the cursor's new ray:
+  a piece never moves because the camera did. The side-view inset is an orthographic second render into a
+  scissored corner of the same canvas (fog off, `shadowMap.autoUpdate` false, CSS-px viewport), eased to the
+  tray or the held piece; a DOM frame is drawn over it, clicks inside it are blocked, and it hides during the
+  bake. The chip / toggle / view buttons sit over the stage, so on a narrow stage a container query drops
+  the scrap row under the view buttons rather than letting them overlap.
+- No scrolling to reach anything on this screen: every step's controls and the sticky `.rof-actions` bar fit at
+  the default window (1280x800). Check `main.scrollHeight <= main.clientHeight` on every step after adding a
+  control; that was a recurring regression.
+- Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake, the shape presets, performance tiers,
+  accessibility, portions by grams, exact cutter packing with scrap flags and the camera views / side view are done (shape-presets migration applied to Supabase 2026-09-20). Left:
   removing the old Dough Shapes screen,
   `dough_shape_photos`, the `dough-shape-photos` bucket, the `generate-dough-shape-image` edge function and
   `lib/doughShapes.js` / `lib/generateDoughShapeImage.js` (gated on the photo backup -- see

@@ -54,8 +54,21 @@ export function createStage(container, { tier: forcedTier } = {}) {
   rim.position.set(-30, 26, -40);
   scene.add(rim);
 
-  // ---- camera rig: fixed pitch, distance fitted to the tray, wheel zoom only (no orbit) --------
-  const rig = { target: new THREE.Vector3(), radius: 30, zoom: 1, zoomTarget: 1, intro: 1, introStart: 0, introDur: 0.7, pitchOff: 0, lift: 0 };
+  // ---- camera rig: distance fitted to the tray, wheel zoom, and a turnable view ---------------------------
+  // yaw (0 = looking from the front, + swings the camera to the right) and pitch (elevation) are changed only on
+  // purpose -- a preset, Q / E, or right-drag -- never as a side effect of dragging a piece. See game.js: a piece
+  // stays where it is in the world when the view turns, and the grab offset is re-anchored so nothing jumps.
+  const DEG = Math.PI / 180;
+  const PITCH_MIN = 14 * DEG, PITCH_MAX = 89 * DEG;
+  const VIEWS = {
+    top:      { label: 'Top',       yaw: 0,        pitch: 89 * DEG },
+    angled:   { label: 'Angled',    yaw: 0,        pitch: PITCH },
+    lowFront: { label: 'Low front', yaw: 0,        pitch: 26 * DEG },
+    lowSide:  { label: 'Low side',  yaw: 90 * DEG, pitch: 26 * DEG },
+  };
+  const rig = { target: new THREE.Vector3(), radius: 30, zoom: 1, zoomTarget: 1, intro: 1, introStart: 0, introDur: 0.7, pitchOff: 0, lift: 0, yaw: 0, pitch: PITCH };
+  const camListeners = new Set();
+  let lastPose = '';
   function cameraDistance() {
     const vHalf = THREE.MathUtils.degToRad(FOV) / 2;
     const hHalf = Math.atan(Math.tan(vHalf) * camera.aspect);
@@ -64,14 +77,40 @@ export function createStage(container, { tier: forcedTier } = {}) {
   }
   function placeCamera() {
     const dist = cameraDistance() * rig.zoom * (1 + 0.22 * (1 - easeOutCubic(rig.intro)));
-    const pitch = PITCH + rig.pitchOff + 0.16 * (1 - easeOutCubic(rig.intro));
+    const pitch = rig.pitch + rig.pitchOff + 0.16 * (1 - easeOutCubic(rig.intro));
     camera.position.set(
-      rig.target.x,
+      rig.target.x + Math.sin(rig.yaw) * Math.cos(pitch) * dist,
       rig.target.y + rig.lift + Math.sin(pitch) * dist,
-      rig.target.z + Math.cos(pitch) * dist,
+      rig.target.z + Math.cos(rig.yaw) * Math.cos(pitch) * dist,
     );
     camera.lookAt(rig.target);
     camera.updateMatrixWorld();
+    const pose = `${rig.yaw.toFixed(4)}|${rig.pitch.toFixed(4)}|${rig.zoom.toFixed(4)}`;
+    if (pose !== lastPose) { lastPose = pose; camListeners.forEach(fn => fn()); }
+  }
+  const wrapAngle = (a) => { a = (a + Math.PI) % (2 * Math.PI); if (a < 0) a += 2 * Math.PI; return a - Math.PI; };
+  function viewName() {
+    for (const [k, v] of Object.entries(VIEWS)) if (Math.abs(wrapAngle(rig.yaw - v.yaw)) < 0.02 && Math.abs(rig.pitch - v.pitch) < 0.02) return k;
+    return null;
+  }
+  // Turn the view. `animate` glides there (a preset); an instant change is a drag or a key press.
+  let viewTween = null;
+  function setViewAngles({ yaw, pitch }, { animate = true } = {}) {
+    if (viewTween) { viewTween(); viewTween = null; }
+    const y1 = yaw ?? rig.yaw, p1 = THREE.MathUtils.clamp(pitch ?? rig.pitch, PITCH_MIN, PITCH_MAX);
+    if (!animate || prefersReducedMotion()) { rig.yaw = wrapAngle(y1); rig.pitch = p1; placeCamera(); requestRender(); return; }
+    const y0 = rig.yaw, dy = wrapAngle(y1 - y0), p0 = rig.pitch, t0 = performance.now(), dur = 480;
+    viewTween = animate_((dt, now) => {
+      const t = Math.min(1, (performance.now() - t0) / dur), e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      rig.yaw = wrapAngle(y0 + dy * e); rig.pitch = p0 + (p1 - p0) * e;
+      return t < 1;
+    });
+  }
+  function orbitBy(dYaw, dPitch = 0) {
+    if (viewTween) { viewTween(); viewTween = null; }
+    rig.yaw = wrapAngle(rig.yaw + dYaw);
+    rig.pitch = THREE.MathUtils.clamp(rig.pitch + dPitch, PITCH_MIN, PITCH_MAX);
+    placeCamera(); requestRender();
   }
   function fit({ cx, cy, radius }) {
     rig.target.set(cx, 0, -cy);
@@ -142,6 +181,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
 
   // ---- render loop (on demand) -----------------------------------------------------------------
   const tickers = new Set();
+  let animate_ = null; // set once animate() exists (setViewAngles is defined above it)
   const frameHooks = new Set(); // called after every rendered frame
   let raf = 0, dirty = true, last = 0, disposed = false, hooks = [];
   let locked = false; // a fixed quality was chosen: the governor must not change it
@@ -153,6 +193,46 @@ export function createStage(container, { tier: forcedTier } = {}) {
     applyTier();
     api.onTierChange?.(next);
   });
+
+  // ---- side-view inset ----------------------------------------------------------------------------------------
+  // A second, ORTHOGRAPHIC render of the same scene into a corner of the same canvas, looking horizontally from the
+  // side (perpendicular to the main view). Orthographic so heights and gaps read true -- you can see whether a lifted
+  // piece clears its neighbours and how tall the dough stands -- without touching the main camera. Drawn straight to
+  // the canvas after the main image (no AO / bloom), with the shadow map left alone and the fog off.
+  let insetOn = false;
+  // Where the strip looks and how wide it is (cm): the game points it at the tray, or at the piece being held.
+  // Eased, so it glides rather than jumps.
+  const iF = { x: 0, z: 0, half: 30, set: false }, iT = { x: 0, z: 0, half: 30 };
+  function setInsetFocus(x, y, half) {                 // plan cm
+    iT.x = x; iT.z = -y; iT.half = half;
+    if (!iF.set) { Object.assign(iF, iT, { set: true }); }
+    requestRender();
+  }
+  const insetCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 600);
+  function insetRect() {
+    const W = container.clientWidth, H = container.clientHeight;
+    const w = THREE.MathUtils.clamp(W * 0.42, 200, 380), h = Math.round(w * 0.3);
+    return { x: 10, y: H - h - 10, w: Math.round(w), h };      // css px, top-left origin (matches the DOM overlay)
+  }
+  function renderInset() {
+    const r = insetRect(), W = container.clientWidth, H = container.clientHeight;
+    const halfW = iF.half, halfH = halfW * (r.h / r.w);
+    insetCam.left = -halfW; insetCam.right = halfW; insetCam.top = halfH; insetCam.bottom = -halfH;
+    insetCam.updateProjectionMatrix();
+    const yaw = rig.yaw + Math.PI / 2, cy = halfH * 0.72;           // the bench top sits near the bottom of the strip
+    insetCam.position.set(iF.x + Math.sin(yaw) * 220, cy, iF.z + Math.cos(yaw) * 220);
+    insetCam.lookAt(iF.x, cy, iF.z);
+    insetCam.updateMatrixWorld();
+    const fog = scene.fog, shadowAuto = renderer.shadowMap.autoUpdate, autoClear = renderer.autoClear;
+    scene.fog = null; renderer.shadowMap.autoUpdate = false; renderer.autoClear = true;
+    renderer.setScissorTest(true);
+    renderer.setViewport(r.x, H - r.y - r.h, r.w, r.h);
+    renderer.setScissor(r.x, H - r.y - r.h, r.w, r.h);
+    renderer.render(scene, insetCam);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, W, H);
+    scene.fog = fog; renderer.shadowMap.autoUpdate = shadowAuto; renderer.autoClear = autoClear;
+  }
 
   function frame(now) {
     raf = 0;
@@ -170,12 +250,18 @@ export function createStage(container, { tier: forcedTier } = {}) {
       rig.intro = Math.min(1, (now - rig.introStart) / 1000 / rig.introDur);
       active = true;
     }
+    if (insetOn) {                                       // ease the side strip toward where it should look
+      const k = 1 - Math.exp(-12 * dt);
+      iF.x += (iT.x - iF.x) * k; iF.z += (iT.z - iF.z) * k; iF.half += (iT.half - iF.half) * k;
+      if (Math.abs(iT.x - iF.x) + Math.abs(iT.z - iF.z) + Math.abs(iT.half - iF.half) > 0.05) active = true;
+    }
     if (Math.abs(rig.zoom - rig.zoomTarget) > 0.0005) {
       rig.zoom += (rig.zoomTarget - rig.zoom) * (1 - Math.exp(-14 * dt));
       active = true;
     }
     if (active || dirty) placeCamera();
     if (post) post.render(dt); else renderer.render(scene, camera);
+    if (insetOn) renderInset();
     dirty = false;
 
     // A ticker may itself have called requestRender() this frame (which already scheduled the next
@@ -190,6 +276,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
   }
   // A ticker runs every frame until it returns false; keeps the loop alive while it does.
   function animate(fn) { tickers.add(fn); requestRender(); return () => tickers.delete(fn); }
+  animate_ = animate;
 
   function resize(force) {
     const w = container.clientWidth, h = container.clientHeight;
@@ -219,6 +306,9 @@ export function createStage(container, { tier: forcedTier } = {}) {
     get tier() { return tier; },
     get fps() { return governor.fps; },
     fit, animate, requestRender, resize, setView, setOvenLook,
+    VIEWS, viewName, setViewAngles, orbitBy, getView: () => ({ yaw: rig.yaw, pitch: rig.pitch, name: viewName() }),
+    onCameraChange(fn) { camListeners.add(fn); return () => camListeners.delete(fn); },
+    setInset(on) { insetOn = !!on; requestRender(); }, setInsetFocus, get insetOn() { return insetOn; }, getInsetRect: insetRect,
     addFrameHook(fn) { frameHooks.add(fn); return () => frameHooks.delete(fn); },
     get post() { return post; }, // exposed for tuning/tests
     setTier(name) { if (TIERS[name]) { tier = TIERS[name]; applyTier(); } },

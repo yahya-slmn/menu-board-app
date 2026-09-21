@@ -773,7 +773,22 @@ table.items-table.shapes-table td:not(:first-child) { white-space: nowrap; }
 #rof-rise-slider { width: 100%; }
 /* The step's main action row stays reachable at the bottom of the panel however long the controls above it get. */
 .rof-actions { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 0 12px; margin-top: 8px; background: var(--paper); border-top: 1px solid var(--line); }
+.rof-view-tools { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; gap: 8px; z-index: 4; }
+.rof-view-group { display: flex; gap: 3px; padding: 3px; border-radius: 999px; background: rgba(15, 28, 22, .55); }
+.rof-view-btn { padding: 4px 10px; border-color: transparent; }
+.rof-view-btn[aria-pressed="true"] { background: #e6eee6; color: #0f1c16; }
+/* The frame drawn around the side-view strip (the strip itself is rendered into the canvas). */
+.rof-inset-frame { position: absolute; z-index: 3; box-sizing: border-box; border: 1px solid rgba(255,255,255,.55); border-radius: 8px; pointer-events: none; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
+.rof-inset-frame span { position: absolute; left: 8px; top: 5px; font: 600 10.5px system-ui, sans-serif; color: rgba(255,255,255,.85); letter-spacing: .04em; text-transform: uppercase; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
 .rof-scrap-row { position: absolute; top: 10px; left: 10px; display: flex; align-items: center; gap: 8px; z-index: 4; }
+/* On a narrow stage the scrap row drops under the view buttons rather than running into them. */
+.rof-stage-col .material-preview-wrap { container-type: inline-size; }
+@container (max-width: 800px) { .rof-scrap-row { top: 50px; } }
+@container (max-width: 560px) {
+  .rof-view-tools { flex-direction: column; align-items: flex-end; gap: 6px; }
+  .rof-view-btn { padding: 4px 8px; font-size: 11px; }
+  .rof-scrap-row { top: 88px; }
+}
 /* Small controls drawn over the stage. */
 .rof-tool-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid rgba(255,255,255,.18); border-radius: 999px; background: rgba(15, 28, 22, .78); color: #e6eee6; font: 600 12px system-ui, sans-serif; cursor: pointer; }
 .rof-tool-btn:hover { background: rgba(28, 48, 38, .88); }

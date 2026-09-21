@@ -21,7 +21,8 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
   const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const hitPt = new THREE.Vector3();
   let dragging = null, grab = { x: 0, y: 0 }, hovered = null, selected = null, activePointer = null, enabled = true;
-  const hooks = {}; // emptyDown(e): a press on nothing (Sheet & Trim stamps an armed cutter there)
+  const hooks = {}; // emptyDown(e): a press on nothing (Sheet & Trim stamps an armed cutter there); blocked(e): true = not ours (orbit gesture, side-view inset)
+  let lastPointer = null;
 
   function aim(e) {
     const r = canvas.getBoundingClientRect();
@@ -164,7 +165,7 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
   }
 
   const onDown = (e) => {
-    if (e.button !== 0 || !enabled) return;
+    if (e.button !== 0 || !enabled || hooks.blocked?.(e)) return;
     canvas.focus({ preventScroll: true });
     const item = pick(e);
     select(item);
@@ -182,6 +183,8 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
     emit('dragstart', item);
   };
   const onMove = (e) => {
+    lastPointer = { clientX: e.clientX, clientY: e.clientY };
+    if (hooks.blocked?.(e) && !dragging) { setHover(null); return; }
     if (dragging && e.pointerId === activePointer) {
       const p = planePoint(e, dragging.baseY);
       if (!p) return;
@@ -275,6 +278,13 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
   return {
     place, wake, select, rotate, hooks,
     isDragging: () => !!dragging,
+    // The view turned while a piece is held: keep the piece where it is in the world and re-anchor the grab offset to
+    // the cursor's new position on the tray plane, so the next mouse move continues from here instead of jumping.
+    reanchor() {
+      if (!dragging || !lastPointer) return;
+      const p = planePoint(lastPointer, dragging.baseY);
+      if (p) grab = { x: dragging.tx - p.x, y: dragging.ty - p.y };
+    },
     planePoint, pickAt: pick,
     // Where a piece WOULD go at (x, y) -- inside the tray, off its neighbours -- and whether that spot is valid.
     probe(item, x, y) {
