@@ -4696,11 +4696,13 @@ async function renderGeneratedConfirmedList(container, ns, main) {
     <div class="search-bar">
       <label for="rg-search">${ns.searchLabel}</label>
       <input id="rg-search" type="search" />
+      <select id="rg-category-filter" aria-label="Filter by category" hidden></select>
     </div>
     <div class="action-toolbar">
       <button class="secondary" id="rg-export-selected-btn" disabled>Export Selected</button>
       ${exportLanguagePickerHtml('rglist')}
       <button class="secondary" id="rg-delete-selected-btn" disabled>Delete Selected</button>
+      <span id="rg-hidden-note" class="rg-hidden-note" role="status"></span>
     </div>
     <div id="rg-export-selected-progress-wrap"></div>
     <div id="rg-list-content"><div class="loading-state" role="status">Loading…</div></div>
@@ -4719,21 +4721,56 @@ async function renderGeneratedConfirmedList(container, ns, main) {
     return;
   }
 
+  // Category filter. `category` is a plain text column on generated_recipes (set from the menu's own category
+  // heading, and editable on the recipe), so the options are the distinct values actually in use. Values are compared
+  // ignoring case and extra spaces ("Main Dish" / "main dish " are one option, shown as first seen); recipes with no
+  // category are reachable through "Uncategorized", the same convention as the Ingredients view.
+  const categoryKey = (c) => String(c || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const categoryFilter = document.getElementById('rg-category-filter');
+  const categoryOptions = new Map(); // key -> { label, count }
+  let uncategorizedCount = 0;
+  for (const r of recipes) {
+    const key = categoryKey(r.category);
+    if (!key) { uncategorizedCount++; continue; }
+    if (!categoryOptions.has(key)) categoryOptions.set(key, { label: String(r.category).trim().replace(/\s+/g, ' '), count: 0 });
+    categoryOptions.get(key).count++;
+  }
+  if (categoryOptions.size > 0) {
+    const addOption = (value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; categoryFilter.appendChild(o); };
+    addOption('', 'All Categories');
+    if (uncategorizedCount > 0) addOption(UNCATEGORIZED_FILTER_VALUE, `Uncategorized (${uncategorizedCount})`);
+    [...categoryOptions.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label))
+      .forEach(([key, o]) => addOption(key, `${o.label} (${o.count})`));
+    categoryFilter.hidden = false;
+  }
+
+  // What Export Selected / Delete Selected act on: the ticked recipes that are on screen right now. A recipe ticked
+  // before a search or category filter hid it stays ticked (it reappears ticked when the filter is cleared) but is
+  // never exported or deleted unseen.
+  let shownIds = new Set(recipes.map(r => r.id));
+  const actionIds = () => [...selected].filter(id => shownIds.has(id));
   function updateExportBtn() {
-    exportBtn.disabled = selected.size === 0;
-    exportBtn.textContent = selected.size > 0 ? `Export Selected (${selected.size})` : 'Export Selected';
-    deleteSelectedBtn.disabled = selected.size === 0;
-    deleteSelectedBtn.textContent = selected.size > 0 ? `Delete Selected (${selected.size})` : 'Delete Selected';
+    const n = actionIds().length, hidden = selected.size - n;
+    exportBtn.disabled = n === 0;
+    exportBtn.textContent = n > 0 ? `Export Selected (${n})` : 'Export Selected';
+    deleteSelectedBtn.disabled = n === 0;
+    deleteSelectedBtn.textContent = n > 0 ? `Delete Selected (${n})` : 'Delete Selected';
+    const note = document.getElementById('rg-hidden-note');
+    if (note) note.textContent = hidden > 0 ? `${hidden} ticked recipe${hidden > 1 ? 's are' : ' is'} hidden by the current filter and won't be exported or deleted.` : '';
   }
 
   function renderFiltered() {
     const query = searchInput.value.trim().toLowerCase();
-    const filtered = query
-      ? recipes.filter(r => r.name.toLowerCase().includes(query) || r.code.toLowerCase().includes(query))
-      : recipes;
+    const cat = categoryFilter.value;
+    const filtered = recipes.filter(r =>
+      (!query || r.name.toLowerCase().includes(query) || r.code.toLowerCase().includes(query)) &&
+      (!cat || (cat === UNCATEGORIZED_FILTER_VALUE ? !categoryKey(r.category) : categoryKey(r.category) === cat))
+    );
+    shownIds = new Set(filtered.map(r => r.id));
+    updateExportBtn();
 
     if (filtered.length === 0) {
-      content.innerHTML = `<div class="empty-state">No recipes match "${searchInput.value}".</div>`;
+      content.innerHTML = `<div class="empty-state">No recipes match the current filters.</div>`;
       return;
     }
 
@@ -4826,7 +4863,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
     const panel = createProgressPanel(progressWrap, { label: 'Exporting…' });
     const unsubscribe = window.api.onExportProgress((payload) => panel.update(payload));
     try {
-      const result = await ns.api.exportSelected([...selected], getSelectedExportLanguage('rglist'));
+      const result = await ns.api.exportSelected(actionIds(), getSelectedExportLanguage('rglist'));
       panel.destroy();
       if (result.success) alert(`Exported to ${result.path}`);
       else if (!result.cancelled) alert('Export failed.');
@@ -4840,12 +4877,12 @@ async function renderGeneratedConfirmedList(container, ns, main) {
   });
 
   deleteSelectedBtn.addEventListener('click', async () => {
-    const count = selected.size;
-    if (!confirm(`Delete ${count} selected recipe${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    const ids = actionIds(), count = ids.length;
+    if (count === 0 || !confirm(`Delete ${count} selected recipe${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
     deleteSelectedBtn.disabled = true;
     deleteSelectedBtn.textContent = 'Deleting…';
     try {
-      for (const id of selected) await ns.api.del(id);
+      for (const id of ids) await ns.api.del(id);
     } catch (err) {
       alert(`Delete failed: ${err.message}`);
     }
@@ -4853,6 +4890,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
   });
 
   searchInput.addEventListener('input', renderFiltered);
+  categoryFilter.addEventListener('change', renderFiltered);
   updateExportBtn();
   renderFiltered();
 }

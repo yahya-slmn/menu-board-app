@@ -238,6 +238,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-family: inherit; font-size: 13.5px; background: white; color: var(--ink);
 }
 .search-bar select:focus { border-color: var(--sage); }
+.rg-hidden-note { font-size: 12px; color: var(--neutral); }
 
 /* ---------------- Items table ---------------- */
 /* Single table across all categories with fixed column widths -- keeps Tags/RC aligned in
