@@ -598,8 +598,12 @@ table.materials-table td.cat-cell {
    padding on top of the table's own cell padding so a wrapped, multi-line dish name never reads
    as touching it. Row height grows naturally to fit wrapped text (default table row behavior,
    same as Book/Extractor's own Name column above -- nothing extra needed for that part). */
-.rg-drafts-table { table-layout: fixed; min-width: 720px; }
-.rg-drafts-table th:nth-child(1), .rg-drafts-table td:nth-child(1) { word-break: break-word; }
+/* Column 1 of the Drafts tables is the dish (or menu) NAME, not a checkbox: it must undo .recipes-table's 40px checkbox-column
+   width and padding above (same specificity, so this rule has to come after it), or the name collapses to a sliver and wraps
+   letter by letter while the other columns spread across the row. 34% keeps the name wide enough to wrap at most onto two
+   lines; the table's min-width makes the row scroll sideways in a narrow window instead of squeezing the name. */
+.rg-drafts-table { table-layout: fixed; min-width: 800px; }
+.rg-drafts-table th:nth-child(1), .rg-drafts-table td:nth-child(1) { width: 34%; padding-left: 14px; padding-right: 14px; overflow-wrap: break-word; }
 .rg-drafts-table th:nth-child(2), .rg-drafts-table td:nth-child(2) { width: 140px; padding-left: 24px; white-space: nowrap; }
 .rg-drafts-table th:nth-child(3), .rg-drafts-table td:nth-child(3) { width: 190px; word-break: break-word; }
 .rg-drafts-table th:nth-child(4), .rg-drafts-table td:nth-child(4) { width: 110px; white-space: nowrap; }
