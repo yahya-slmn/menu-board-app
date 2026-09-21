@@ -20,6 +20,7 @@ const {
   sanitizeSheetName, DEFAULT_LABELS, buildRecipeContentModel,
 } = require('./lib/export');
 const { extractRecipeFromFile } = require('./lib/recipeExtraction');
+const recipePdf = require('./lib/recipePdf');
 const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
@@ -1941,6 +1942,21 @@ ipcMain.handle('save-photo-to-computer', async (e, { base64, ext, suggestedName 
   if (result.canceled || !result.filePath) return { success: false, cancelled: true };
   await fs.writeFile(result.filePath, Buffer.from(base64, 'base64'));
   return { success: true, path: result.filePath };
+});
+
+// Recipe on Fire -> one-page A4 PDF (see lib/recipePdf.js). The renderer sends plain data; nothing is read from or
+// written to the database. The save dialog comes first, so cancelling never renders anything.
+ipcMain.handle('export-recipe-pdf', async (e, { data, suggestedName } = {}) => {
+  if (!data || typeof data !== 'object') throw new Error('export-recipe-pdf: no data');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Recipe on Fire PDF',
+    defaultPath: `${recipePdf.safeFileName(suggestedName || data.title)}.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+  const { pdf, pages } = await recipePdf.renderFitPdf(data, BrowserWindow);
+  await fs.writeFile(result.filePath, pdf);
+  return { success: true, path: result.filePath, pages };
 });
 
 ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fileName }) => {

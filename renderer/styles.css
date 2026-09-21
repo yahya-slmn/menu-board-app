@@ -781,6 +781,22 @@ table.items-table.shapes-table td:not(:first-child) { white-space: nowrap; }
 .rof-inset-frame { position: absolute; z-index: 3; box-sizing: border-box; border: 1px solid rgba(255,255,255,.55); border-radius: 8px; pointer-events: none; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
 .rof-inset-frame span { position: absolute; left: 8px; top: 5px; font: 600 10.5px system-ui, sans-serif; color: rgba(255,255,255,.85); letter-spacing: .04em; text-transform: uppercase; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
 .rof-scrap-row { position: absolute; top: 10px; left: 10px; display: flex; align-items: center; gap: 8px; z-index: 4; }
+.rof-row-field { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 8px; margin-bottom: 8px; }
+.rof-row-field > label { margin: 0; font-size: 13px; }
+.rof-row-ctl { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rof-row-ctl input[type="range"] { flex: 1 1 auto; min-width: 0; }
+.rof-rise-hint { margin: -4px 0 8px 84px; font-size: 11.5px; color: var(--neutral); }
+.rof-bake-params { margin-bottom: 2px; }
+.rof-bake-row { display: flex; align-items: center; gap: 6px; }
+.rof-bake-row input[type="text"] { width: 62px; padding: 6px 8px; }
+.rof-bake-row select { padding: 6px 4px; }
+.rof-bake-sep { font-size: 12.5px; color: var(--neutral); }
+.rof-bake-hint { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px 84px; font-size: 11.5px; color: var(--neutral); }
+.rof-bake-hint:empty { display: none; }
+.rof-bake-hint .rof-link-btn { flex: none; white-space: nowrap; padding-left: 0; }
+.rof-snippet { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rof-export-status { min-height: 0; font-size: 12px; color: var(--neutral); margin: 6px 0 0; overflow-wrap: anywhere; }
+.rof-export-status:empty { display: none; }
 /* The one-portion view: dimension lines drawn over the piece, and a card of its numbers. */
 .rof-portion-dims { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
 .rof-portion-card { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 5; box-sizing: border-box; padding: 9px 13px 10px; border-radius: 12px; background: rgba(15, 28, 22, .9); color: #e6eee6; font: 12.5px/1.35 system-ui, sans-serif; box-shadow: 0 4px 18px rgba(0,0,0,.35); }

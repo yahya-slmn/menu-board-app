@@ -258,12 +258,30 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the sheet give a chooser on the card. Every game call that changes the tray closes the view first, and Escape
   closes it. `game.capturePortion(desc)` returns a JPEG (data URL) of the portion with the dimension lines baked in,
   for the PDF; it works whether or not the view is open and leaves everything as it found it.
+- Oven temperature and bake time (Bake panel, both methods; session-only, never saved): pre-filled from the recipe's
+  method text by `rof/bakeParams.js` `parseBakeParams` (English and Arabic words and digits; a time counts only in a
+  sentence that mentions the oven, so a rest or proof time is never read as a bake time; hours become minutes; a
+  temperature with no unit is guessed C below 260 and flagged), then the chef confirms ("Looks right") or types over it.
+  Values that were read from the method and never confirmed are printed on the PDF with a note saying so.
+- Export PDF (Bake step in Shape & Place, Trim step in Sheet & Trim): `buildPdfData` in renderer.js gathers what is on
+  screen (dough and every waste with its own base, tray, shape or cutters, one portion + the `capturePortion` picture,
+  waste, oven) and `window.api.exportRecipePdf` -> `export-recipe-pdf` in main.js -> `lib/recipePdf.js`. It builds an HTML page
+  and prints it with Electron's `printToPDF` (no PDF library; Arabic / RTL names shape correctly because Chromium lays
+  them out). The save dialog comes first; the hidden print window has scripting off and a CSP; `renderFitPdf` shrinks
+  the page a step at a time until it is ONE A4 page. A print window needs the app to have another window open
+  (Electron quits when the last window closes) -- true in the app, but test scripts need a keep-alive window.
+  The PDF keeps the planned Trimming Waste % (recipe, base = the running total before it) and the measured scrap
+  (cutter layout, base = dough on this tray) as two separately labelled figures; never merge them. "Est. baked weight"
+  is the portion's dough weight x (1 - the recipe's Baking Waste %), or "not available" if the recipe has none.
+  NOTE: the recipe's Net Weight already has its wastes (Baking Waste included) taken off, so the dough laid out on
+  the tray is the net figure and this can count baking loss twice for a recipe that lists Baking Waste -- see the
+  open question in the milestone report before relying on it.
 - No scrolling to reach anything on this screen: every step's controls and the sticky `.rof-actions` bar fit at
   the default window (1280x800). Check `main.scrollHeight <= main.clientHeight` on every step after adding a
   control; that was a recurring regression.
 - Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake, the shape presets, performance tiers,
-  accessibility, portions by grams, exact cutter packing with scrap flags, the camera views / side view and the
-  one-portion view are done (shape-presets migration applied to Supabase 2026-09-20). Left:
+  accessibility, portions by grams, exact cutter packing with scrap flags, the camera views / side view, the
+  one-portion view and the PDF export are done (shape-presets migration applied to Supabase 2026-09-20). Left:
   removing the old Dough Shapes screen,
   `dough_shape_photos`, the `dough-shape-photos` bucket, the `generate-dough-shape-image` edge function and
   `lib/doughShapes.js` / `lib/generateDoughShapeImage.js` (gated on the photo backup -- see

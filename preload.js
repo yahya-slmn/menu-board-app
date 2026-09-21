@@ -141,6 +141,7 @@ contextBridge.exposeInMainWorld('api', {
   previewGeneratedRecipe: (id) => ipcRenderer.invoke('preview-generated-recipe', id),
   exportGeneratedRecipes: (payload) => ipcRenderer.invoke('export-generated-recipes', payload),
   exportScaledGeneratedRecipe: (payload) => ipcRenderer.invoke('export-scaled-generated-recipe', payload),
+  exportRecipePdf: (payload) => ipcRenderer.invoke('export-recipe-pdf', payload),
 
   generateMenu: (payload) => ipcRenderer.invoke('generate-menu', payload),
   listGeneratedMenus: () => ipcRenderer.invoke('list-generated-menus'),

@@ -803,6 +803,7 @@ export function createRofGame(container, opts = {}) {
   // exactly as it was) and shows ONE baked portion on a board with its measurements: dimension lines drawn over the
   // piece and a card of numbers. Both methods use it; `desc` is described in portion.js. Anything that changes the tray
   // (arming a cutter, arranging, baking again...) closes it first, so it never shows stale dough.
+  const CAPTURE_ASPECT = 2.3;
   const PORTION_VIEW = { yaw: 28 * Math.PI / 180, pitch: 30 * Math.PI / 180 };
   function setStageToolsHidden(hide) {
     const d = hide ? 'none' : '';
@@ -897,7 +898,9 @@ export function createRofGame(container, opts = {}) {
   function frameModel(capture) {
     const p = portion, W = container.clientWidth, H = container.clientHeight;
     if (!p || !W || !H) return;
-    const side = 14, top = capture ? 16 : 54, bottom = capture ? H - 16 : H - p.card.offsetHeight - 20;
+    // A capture is framed into a wide band (CAPTURE_ASPECT) in the middle of the canvas and cropped to it afterwards.
+    const band = Math.min(H - 32, W / CAPTURE_ASPECT), bandTop = (H - band) / 2;
+    const side = 14, top = capture ? bandTop + 10 : 54, bottom = capture ? bandTop + band - 10 : H - p.card.offsetHeight - 20;
     const pad = (pt) => { const q = project(pt, stage.camera, W, H); return [[q.x, q.y], [q.x - 92, q.y - 15], [q.x + 92, q.y + 15]]; };
     const bbox = () => {
       let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
@@ -936,13 +939,17 @@ export function createRofGame(container, opts = {}) {
     try {
       stage.renderNow();
       const w = stage.canvas.width, h = stage.canvas.height, k = Math.min(1, maxWidth / w);
-      const out = document.createElement('canvas'); out.width = Math.round(w * k); out.height = Math.round(h * k);
-      const ctx = out.getContext('2d');
-      ctx.fillStyle = '#1d2a24'; ctx.fillRect(0, 0, out.width, out.height);
-      ctx.drawImage(stage.canvas, 0, 0, out.width, out.height);
-      const dims = document.createElement('canvas'); dims.width = out.width; dims.height = out.height;
-      drawDims(dims.getContext('2d'), out.width, out.height, portion.model.dims, stage.camera, out.width / Math.max(1, container.clientWidth));
-      ctx.drawImage(dims, 0, 0);
+      const full = document.createElement('canvas'); full.width = Math.round(w * k); full.height = Math.round(h * k);
+      const fctx = full.getContext('2d');
+      fctx.fillStyle = '#1d2a24'; fctx.fillRect(0, 0, full.width, full.height);
+      fctx.drawImage(stage.canvas, 0, 0, full.width, full.height);
+      const dims = document.createElement('canvas'); dims.width = full.width; dims.height = full.height;
+      drawDims(dims.getContext('2d'), full.width, full.height, portion.model.dims, stage.camera, full.width / Math.max(1, container.clientWidth));
+      fctx.drawImage(dims, 0, 0);
+      // Crop to the band the model was framed into.
+      const bandH = Math.round(Math.min(full.height - 32 * (full.height / h), full.width / CAPTURE_ASPECT)), y0 = Math.round((full.height - bandH) / 2);
+      const out = document.createElement('canvas'); out.width = full.width; out.height = bandH;
+      out.getContext('2d').drawImage(full, 0, y0, full.width, bandH, 0, 0, full.width, bandH);
       return { dataUrl: out.toDataURL('image/jpeg', 0.9), width: out.width, height: out.height };
     } finally {
       if (!same) { closePortion({ quiet: true }); if (prevDesc) openPortion(prevDesc); }

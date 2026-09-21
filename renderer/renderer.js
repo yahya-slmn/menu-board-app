@@ -8448,6 +8448,9 @@ function renderRecipeOnFireView(main) {
   let placeGramsUser = false;    // true once the chef set it -- kept when the shape changes
   let recipePortionGrams = null; // the recipe's own portion_weight_grams, when it has one
   let bakeDoneness = 'golden';   // 'light' | 'golden' | 'dark' (session-only)
+  // Oven temperature and bake time, for the PDF. Session-only: never saved anywhere. Pre-filled from the recipe's method
+  // text when it says something readable ('method'), and the chef confirms or corrects it ('chef').
+  let bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
   let bakeState = 'ready';       // 'ready' | 'baking' | 'done'
   let bakeCtl = null;            // { promise, skip() } while a bake is running
   let riseModel = null;          // deterministic rise estimate for the current dough
@@ -8540,6 +8543,7 @@ function renderRecipeOnFireView(main) {
     placeGrams = null; placeGramsUser = false;
     cutterList = []; armedCutterId = null; trimNote = ''; sheetInfo = null;
     riseScale = 1;
+    bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
   }
 
   function clearSelection() {
@@ -9143,6 +9147,60 @@ function renderRecipeOnFireView(main) {
   }
 
   // ---- Bake (both methods) -------------------------------------------------------------------------
+
+  // ---- Oven temperature and bake time (session-only; printed on the PDF) ------------------------------
+  const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const methodTextOfSelected = () => selectedProcesses().map(p => collectTextListFieldValue(p, makeProcessMethodCfg(p))).filter(Boolean).join('\n');
+  function prefillBakeParams() {
+    if (bakeParams.touched) return; // the chef's own entry is never overwritten
+    const r = window.RofGame.parseBakeParams(methodTextOfSelected());
+    bakeParams = {
+      temp: r.temp ? r.temp.value : '', unit: r.temp ? r.temp.unit : 'C', time: r.time ? r.time.value : '',
+      source: r.temp || r.time ? 'method' : '', confirmed: !(r.temp || r.time), snippet: r.snippet || '', touched: false,
+    };
+  }
+  const bakeTempText = () => (bakeParams.temp ? `${bakeParams.temp} °${bakeParams.unit}` : '');
+  const bakeTimeText = () => (bakeParams.time ? `${bakeParams.time} min` : '');
+  function bakeHintHtml() {
+    const bp = bakeParams;
+    if (bp.source === 'method' && !bp.confirmed) {
+      return `<span class="rof-snippet" dir="auto" title="${escHtml(bp.snippet)}">Read from the method: ${escHtml(bp.snippet)}</span><button type="button" class="rof-link-btn" id="rof-bake-confirm">Looks right</button>`;
+    }
+    if (bp.source === 'method') return 'Read from the method, confirmed.';
+    if (bp.temp || bp.time) return '';
+    return 'Not in the method -- fill in to print them on the PDF.';
+  }
+  function bakeParamsHtml() {
+    return `
+      <div class="rof-row-field rof-bake-params">
+        <label for="rof-bake-temp">Oven</label>
+        <div class="rof-row-ctl rof-bake-row">
+          <input id="rof-bake-temp" type="text" inputmode="decimal" autocomplete="off" placeholder="180" maxlength="4" value="${escHtml(bakeParams.temp)}" aria-label="Oven temperature" />
+          <select id="rof-bake-unit" aria-label="Temperature unit"><option value="C" ${bakeParams.unit === 'C' ? 'selected' : ''}>°C</option><option value="F" ${bakeParams.unit === 'F' ? 'selected' : ''}>°F</option></select>
+          <span class="rof-bake-sep">for</span>
+          <input id="rof-bake-time" type="text" inputmode="decimal" autocomplete="off" placeholder="20–25" maxlength="8" value="${escHtml(bakeParams.time)}" aria-label="Bake time in minutes" />
+          <span class="rof-bake-sep">min</span>
+        </div>
+      </div>
+      <div class="rof-bake-hint" id="rof-bake-hint" role="status">${bakeHintHtml()}</div>`;
+  }
+  function wireBakeParams(panel) {
+    const temp = panel.querySelector('#rof-bake-temp'), unit = panel.querySelector('#rof-bake-unit'), time = panel.querySelector('#rof-bake-time');
+    if (!temp) return;
+    const hint = () => {
+      const el = document.getElementById('rof-bake-hint');
+      if (!el) return;
+      el.innerHTML = bakeHintHtml();
+      document.getElementById('rof-bake-confirm')?.addEventListener('click', confirmBake);
+    };
+    const confirmBake = () => { bakeParams.confirmed = true; hint(); };
+    const edited = () => { bakeParams.touched = true; bakeParams.source = 'chef'; bakeParams.confirmed = true; hint(); };
+    temp.addEventListener('input', () => { temp.value = temp.value.replace(/[^\d.]/g, ''); bakeParams.temp = temp.value; edited(); });
+    unit.addEventListener('change', () => { bakeParams.unit = unit.value; edited(); });
+    time.addEventListener('input', () => { time.value = time.value.replace(/[^\d.\-–—]/g, '').replace(/[-—]/g, '–'); bakeParams.time = time.value; edited(); });
+    document.getElementById('rof-bake-confirm')?.addEventListener('click', confirmBake);
+  }
+
   // The deterministic rise model reads the checked processes' ingredient rows (no AI call).
   function computeRiseModel() {
     const rows = selectedProcesses().flatMap(p => p.ingredientRows).map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit }));
@@ -9153,6 +9211,7 @@ function renderRecipeOnFireView(main) {
 
   function enterBakeStep() {
     riseModel = computeRiseModel();
+    prefillBakeParams();
     bakeState = 'ready';
     rofStep = 'bake';
     renderTrayStepPanel();
@@ -9263,6 +9322,122 @@ function renderRecipeOnFireView(main) {
     if (b) b.addEventListener('click', togglePortionView);
   }
 
+
+  // ---- Export PDF -----------------------------------------------------------------------------------
+  // One A4 page: the recipe and dough, the tray, the shape or cutters, one portion (with its picture), the waste
+  // figures and the bake settings. Built from what is on screen right now; nothing is read from or written to the
+  // database. main.js prints it (see lib/recipePdf.js).
+  const wasteIdx = (re) => combinedWastes.findIndex(w => re.test(w.name || ''));
+  function buildPdfData() {
+    const P = window.RofGame.portions, sheetMode = rofMode === 'sheet';
+    const g = (n) => `${P.fmtGrams(n)} g`;
+    const procs = selectedProcesses();
+    const total = combinedTotalQuantity(procs), wf = computeWasteWaterfall(total, combinedWastes), net = bakeSnapshot.netWeight;
+    const pctOf = (w) => { const v = parseFloat(w.percent); return isNaN(v) ? 0 : v; };
+    const fmtPct = (v) => `${Math.round(v * 10) / 10}%`;
+    const desc = portionDesc();
+    if (!desc) throw new Error(sheetMode ? 'Place a cutter first.' : 'Nothing to print yet.');
+
+    // Dough and wastage: every waste on the recipe, each against the running total just before it.
+    const dough = [{ label: 'Process', value: procs.map(p => p.name || '(untitled process)').join(' + ') }, { label: 'Total quantity', value: g(total) }];
+    combinedWastes.forEach((w, i) => dough.push({ label: `${w.name || 'Waste'} (${fmtPct(pctOf(w))} of ${g(wf[i].before)})`, value: `−${g(wf[i].reduced)}` }));
+    if (combinedWastes.length === 0) dough.push({ label: 'Wastage', value: 'none applied' });
+    dough.push({ label: 'Net weight', value: g(net) });
+
+    const m = bakeSnapshot.material, fp = bakeSnapshot.footprint;
+    const tray = [{ label: 'Tray', value: m.name }, { label: 'Size', value: formatMaterialDimensions(m) }];
+    if (fp && fp.areaCm2) tray.push({ label: 'Interior area', value: `${Math.round(fp.areaCm2)} cm²` });
+    if (fp && fp.usableHeightCm) tray.push({ label: 'Usable height', value: `${roundNice(fp.usableHeightCm)} cm` });
+
+    // What is being made.
+    let make;
+    if (sheetMode) {
+      const groups = cutGroups();
+      const thick = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+      make = { title: 'Sheet & cutters', rows: [
+        { label: 'Dough on this tray', value: g(sheetInfo.sessionGrams), note: sheetInfo.sessions > 1 ? `This batch needs ${sheetInfo.sessions} trays; the figures below are for one.` : '' },
+        { label: 'Sheet thickness', value: `${Math.round(thick * 100) / 10} mm`, note: `about ${window.RofGame.fmtCm(desc.measures.heightCm, true)} once baked (est.)` },
+        ...groups.map(x => {
+          const mat = cutterMaterials.find(c => String(c.id) === x.key);
+          const area = cutterUnitAreaCm2(x.data.shapeType, x.data.dims);
+          return { label: `${x.n} × ${mat ? mat.name : 'Cutter'}`, value: `${g((area / fp.areaCm2) * sheetInfo.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
+        }),
+        { label: 'Pieces cut', value: String(cutterList.length) },
+        { label: 'Tray used by pieces', value: `${Math.round((trimScrap().covered / fp.areaCm2) * 100)}%` },
+      ] };
+    } else {
+      const s = placeSession, raw = desc.spec, pl = rofGame.getPlacement();
+      make = { title: 'Shape & pieces', rows: [
+        { label: 'Shape', value: s.shape.label || s.shape.name || 'Piece' },
+        { label: 'Size before rising', value: `${roundNice(raw.lengthCm)} × ${roundNice(raw.widthCm)} × ${roundNice(raw.heightCm)} cm` },
+        { label: 'Portion weight', value: g(desc.weightGrams) },
+        { label: 'Pieces on the tray', value: `${pl.placed} of ${pl.total}` },
+        ...(s.leftover > 0 && !isMuffinTray() ? [{ label: 'Dough not used', value: g(s.leftover), emphasis: true, note: 'left over after whole portions' }] : []),
+      ] };
+    }
+
+    // One portion, with the estimated baked weight from the recipe's own Baking Waste.
+    const bi = wasteIdx(/baking/i), portionRows = desc.rows.filter(r => r.label !== 'Before rising' || !sheetMode).map(r => ({ ...r }));
+    const bakedRow = bi >= 0
+      ? { label: 'Est. baked weight', value: g(desc.weightGrams * (1 - pctOf(combinedWastes[bi]) / 100)), est: true, note: `dough weight less the recipe's ${fmtPct(pctOf(combinedWastes[bi]))} Baking Waste` }
+      : { label: 'Est. baked weight', value: 'not available', note: "this recipe has no Baking Waste in its wastage" };
+    portionRows.splice(1, 0, bakedRow);
+
+    // Waste: the recipe's own figures, and (Sheet & Trim) the scrap measured from the cutter layout -- each with its own base.
+    const waste = [];
+    waste.push(bi >= 0
+      ? { label: 'Baking Waste (recipe)', value: `${fmtPct(pctOf(combinedWastes[bi]))} · ${g(wf[bi].reduced)}`, note: `of the ${g(wf[bi].before)} running total in the recipe` }
+      : { label: 'Baking Waste (recipe)', value: 'not in this recipe' });
+    let wasteNote = '';
+    if (sheetMode) {
+      const ti = wasteIdx(/trim/i), sc = trimScrap();
+      waste.push(ti >= 0
+        ? { label: 'Trimming Waste, planned (recipe)', value: `${fmtPct(pctOf(combinedWastes[ti]))} · ${g(wf[ti].reduced)}`, note: `of the ${g(wf[ti].before)} running total in the recipe` }
+        : { label: 'Trimming Waste, planned (recipe)', value: 'not in this recipe' });
+      waste.push({ label: 'Scrap, measured (cutter layout)', value: `${g(sc.grams)} · ${fmtPct(sc.pct)}`, emphasis: true, note: `of the ${g(sheetInfo.sessionGrams)} of dough on this tray` });
+      wasteNote = 'Planned and measured are different figures with different bases; they are shown side by side, never combined.';
+    }
+
+    const baking = [
+      { label: 'Oven', value: bakeTempText() || 'not set' }, { label: 'Time', value: bakeTimeText() || 'not set' },
+      { label: 'Doneness', value: doneLabelOf(bakeDoneness) },
+    ];
+    const bakeNote = bakeParams.source === 'method' && !bakeParams.confirmed ? 'Oven and time were read from the recipe method and have not been confirmed.' : '';
+
+    const cap = rofGame.capturePortion(desc);
+    return {
+      title: selectedRecipe.name, subtitle: `${procs.map(p => p.name || '(untitled process)').join(' + ')} · ${sheetMode ? 'Sheet & Trim' : 'Shape & Place'}`,
+      dateText: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      image: cap ? { dataUrl: cap.dataUrl } : null,
+      sections: [
+        { title: 'Dough', rows: dough }, { title: 'Tray', rows: tray },
+        make, { title: 'One portion', rows: portionRows },
+        { title: 'Waste', rows: waste, note: wasteNote }, { title: 'Baking', rows: baking, note: bakeNote },
+      ],
+      footnotes: [
+        'est. = estimated from the rise model, not measured.',
+        'Est. baked weight applies the recipe’s Baking Waste % to the dough weight of one portion.',
+        'Generated by Menu Board · Recipe on Fire.',
+      ],
+    };
+  }
+  async function exportRofPdf() {
+    const btn = document.getElementById('rof-export-pdf-btn'), status = document.getElementById('rof-export-status');
+    if (!btn || btn.disabled) return;
+    const say = (t, title = '') => { if (status) { status.textContent = t; status.title = title; } };
+    btn.disabled = true; say('Preparing the PDF…');
+    try {
+      const data = buildPdfData();
+      const r = await window.api.exportRecipePdf({ data, suggestedName: `${selectedRecipe.name} - Recipe on Fire` });
+      if (r && r.cancelled) say('');
+      else { say(`Saved ${String(r.path).split(/[\\/]/).pop()}`, r.path); rofGame.announce('PDF saved.'); }
+    } catch (err) {
+      say(`Could not export the PDF: ${err.message}`);
+    } finally {
+      btn.disabled = rofMode === 'sheet' && cutterList.length === 0;
+    }
+  }
+
   // ---- Sheet & Trim: the dough as one sheet ------------------------------------------------------
   const RAW_DOUGH_DENSITY = 1.05; // g/cm3, raw dough
   function computeSheetInfo() {
@@ -9280,6 +9455,7 @@ function renderRecipeOnFireView(main) {
   }
   function startSheetFlow() {
     riseModel = computeRiseModel();
+    prefillBakeParams();
     sheetInfo = computeSheetInfo();
     cutterList = []; armedCutterId = null; lastCutterId = null; trimNote = '';
     bakeState = 'ready';
@@ -9317,24 +9493,26 @@ function renderRecipeOnFireView(main) {
     panel.innerHTML = `
       ${ready ? '' : `<h3 style="margin-bottom:8px;">Baked · ${doneLabel}</h3>`}
       ${ready ? `<ul class="rof-rise-notes">${(riseModel?.notes || []).map(n => `<li>${n}</li>`).join('')}</ul>
-      <div class="field" style="margin-bottom:10px;">
-        <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label> <button type="button" class="rof-link-btn" id="rof-rise-reset" ${riseScale === 1 ? 'hidden' : ''}>Reset</button>
-        <input type="range" id="rof-rise-slider" min="30" max="160" step="5" value="${Math.round(riseScale * 100)}" aria-describedby="rof-rise-hint" />
-        <div id="rof-rise-hint" style="font-size:11.5px; color:var(--neutral); margin-top:3px;"></div>
+      <div class="rof-row-field">
+        <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label>
+        <div class="rof-row-ctl"><input type="range" id="rof-rise-slider" min="30" max="160" step="5" value="${Math.round(riseScale * 100)}" aria-describedby="rof-rise-hint" /><button type="button" class="rof-link-btn" id="rof-rise-reset" ${riseScale === 1 ? 'hidden' : ''}>Reset</button></div>
       </div>
-      <div class="field" style="margin-bottom:12px;">
-        <label>Doneness</label>
-        <div class="mode-toggle" id="rof-doneness-toggle" role="group" aria-label="Doneness">
+      <div id="rof-rise-hint" class="rof-rise-hint"></div>
+      <div class="rof-row-field">
+        <label id="rof-doneness-label">Doneness</label>
+        <div class="mode-toggle" id="rof-doneness-toggle" role="group" aria-labelledby="rof-doneness-label">
           ${['light', 'golden', 'dark'].map(d => `<button type="button" class="mode-toggle-btn ${d === bakeDoneness ? 'active' : ''}" data-doneness="${d}" aria-pressed="${d === bakeDoneness}">${d[0].toUpperCase() + d.slice(1)}</button>`).join('')}
         </div>
       </div>` : ''}
+      ${bakeParamsHtml()}
       <div id="rof-place-summary">${sheetMode ? sheetSummaryHtml() : ''}</div>
+      ${ready || sheetMode ? '' : '<div class="rof-export-status" id="rof-export-status" role="status"></div>'}
       <div class="rof-actions">
         <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
         ${ready ? '<button type="button" class="primary" id="rof-start-bake-btn">Start baking</button>'
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
                    ${sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
-                               : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button>'}`}
+                               : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
     panel.querySelectorAll('[data-doneness]').forEach(btn => btn.addEventListener('click', () => {
       bakeDoneness = btn.dataset.doneness;
@@ -9348,8 +9526,9 @@ function renderRecipeOnFireView(main) {
         document.getElementById('rof-rise-val').textContent = `${Math.round(riseScale * 100)}%`;
         slider.setAttribute('aria-valuetext', `${Math.round(riseScale * 100)} percent of the estimated rise`);
         document.getElementById('rof-rise-reset').hidden = riseScale === 1;
-        hint.textContent = riseScale === 1 ? 'As estimated from the ingredients.'
+        hint.textContent = riseScale === 1 ? ''
           : rofMode === 'shape' && riseScale > 1.02 ? 'More than the room reserved on the tray -- pieces may touch.' : 'Adjusted by hand.';
+        hint.hidden = riseScale === 1;
       };
       refresh();
       slider.addEventListener('input', () => { riseScale = slider.value / 100; refresh(); });
@@ -9364,6 +9543,8 @@ function renderRecipeOnFireView(main) {
       renderTrayStepPanel();
     });
     wirePortionBtn();
+    wireBakeParams(panel);
+    document.getElementById('rof-export-pdf-btn')?.addEventListener('click', exportRofPdf);
     document.getElementById('rof-start-bake-btn')?.addEventListener('click', startBake);
     document.getElementById('rof-bake-again-btn')?.addEventListener('click', () => {
       rofGame.resetBake();
@@ -9409,6 +9590,8 @@ function renderRecipeOnFireView(main) {
     if (!el || !bakeSnapshot || !sheetInfo) return;
     const pbtn = document.getElementById('rof-portion-btn');
     if (pbtn) { pbtn.disabled = cutterList.length === 0; pbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
+    const xbtn = document.getElementById('rof-export-pdf-btn');
+    if (xbtn) { xbtn.disabled = cutterList.length === 0; xbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
     const { footprint } = bakeSnapshot, grams = sheetInfo.sessionGrams;
     if (cutterList.length === 0) {
       el.innerHTML = `<div class="computed-value-box" style="margin:12px 0;"><div style="color:var(--neutral); font-size:12.5px;">${trimNote || 'No cutters placed yet.'}</div></div>`;
@@ -9456,8 +9639,10 @@ function renderRecipeOnFireView(main) {
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
       </div>
       <div id="rof-trim-summary"></div>
-      <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button></div>`;
+      <div class="rof-export-status" id="rof-export-status" role="status"></div>
+      <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn" disabled>Export PDF</button></div>`;
     wirePortionBtn();
+    document.getElementById('rof-export-pdf-btn').addEventListener('click', exportRofPdf);
     rofGame.setScrapHighlight(true);
     document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
     document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
