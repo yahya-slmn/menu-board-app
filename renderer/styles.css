@@ -609,13 +609,16 @@ table.materials-table td.cat-cell {
 .rg-drafts-table th:nth-child(4), .rg-drafts-table td:nth-child(4) { width: 110px; white-space: nowrap; }
 .rg-drafts-table th:nth-child(5), .rg-drafts-table td:nth-child(5) { width: 130px; }
 
-.rg-generated-table { table-layout: fixed; min-width: 760px; }
+/* The last column of both Generator tables holds buttons (preview / Edit / Delete, Review / Delete). The shared one-line-with-ellipsis rule
+   for short values (.recipes-table :is(...) above) also matched it and clipped "Delete" to an ellipsis, so it is switched off here. */
+.rg-generated-table :is(th, td):nth-child(6), .rg-drafts-table :is(th, td):nth-child(5) { overflow: visible; text-overflow: clip; white-space: nowrap; }
+.rg-generated-table { table-layout: fixed; min-width: 800px; }
 .rg-generated-table th:nth-child(1), .rg-generated-table td:nth-child(1) { width: 40px; padding-left: 12px; padding-right: 6px; }
 .rg-generated-table th:nth-child(2), .rg-generated-table td:nth-child(2) { width: 108px; white-space: nowrap; }
 .rg-generated-table th:nth-child(3), .rg-generated-table td:nth-child(3) { word-break: break-word; }
 .rg-generated-table th:nth-child(4), .rg-generated-table td:nth-child(4) { width: 150px; padding-left: 24px; white-space: nowrap; }
 .rg-generated-table th:nth-child(5), .rg-generated-table td:nth-child(5) { width: 104px; white-space: nowrap; }
-.rg-generated-table th:nth-child(6), .rg-generated-table td:nth-child(6) { width: 150px; }
+.rg-generated-table th:nth-child(6), .rg-generated-table td:nth-child(6) { width: 190px; }
 
 .recipe-ingredients-table input {
   width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 12.5px;
