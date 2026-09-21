@@ -134,15 +134,17 @@ adding a new section usually means adding a new builder function here, not
 extending an existing one.
 
 **Recipe quantities (scaling, rounding, display):** ingredient quantities are stored at 0.01 g. Whenever a scale has a target
-(Total Quantity or Net Weight typed into a recipe form, the Calculator's target quantity, and the generation-time scaling to
-`REFERENCE_RECIPE_GRAMS` = 150 g in `lib/recipeGenerator.js`), the scaled quantities go through largest-remainder rounding
-(`allocateHundredths`, mirrored in `renderer.js` because it is a classic script) so they add up to the target EXACTLY;
-rounding each ingredient on its own let the total drift by a hundredth or two (149.99 for 150). Net Weight edits use
-`scaleSetsToNetWeight`, which picks the total whose displayed Net Weight equals the typed one. Processes that share a
-multiplier are rounded together (`scaleIngredientSets`). Quantities are DISPLAYED with `formatIngredientQty` (one decimal, two
-under 0.1 g, no trailing ".0") in the forms, previews and Calculator, and exports keep the exact number with an Excel number
-format (`ingredientQtyNumFmt`); on-screen rows can therefore look a hair off their total. Recipes generated before the 150 g
-change stay at ~100 g -- nothing rescales them.
+(Total Quantity or Net Weight typed into a recipe form, the Calculator's target quantity, and the generation-time scaling), the
+scaled quantities go through largest-remainder rounding (`allocateHundredths`, mirrored in `renderer.js` because it is a classic
+script) so they add up to the target EXACTLY; rounding each ingredient on its own let the total drift by a hundredth or two
+(149.99 for 150). Net Weight edits use `scaleSetsToNetWeight`, which picks the total whose displayed Net Weight equals the typed
+one. Processes that share a multiplier are rounded together (`scaleIngredientSets`). Newly generated recipes are scaled so the
+recipe-level NET WEIGHT (each process's own waste-adjusted total, summed) is `REFERENCE_NET_WEIGHT_GRAMS` = 150 g
+(`normalizeProcessesToNetWeight` in `lib/recipeGenerator.js`) -- the raw Total Quantity is whatever that takes (about 164 g with an
+8.5% waste) -- and Quantity Produced is set to that Net Weight; editing a waste % afterwards moves the Net Weight, and retyping 150
+restores it. Quantities are DISPLAYED with `formatIngredientQty` (one decimal, two under 0.1 g, no trailing ".0") in the forms,
+previews and Calculator, and exports keep the exact number with an Excel number format (`ingredientQtyNumFmt`); on-screen rows can
+therefore look a hair off their total. Recipes generated before the 150 g change stay at ~100 g -- nothing rescales them.
 
 ## Recipe on Fire game view (`renderer/rof/`)
 

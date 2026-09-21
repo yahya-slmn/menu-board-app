@@ -174,7 +174,7 @@ const RECIPE_NS = {
   generated: {
     stateKey: 'generatedRecipes',
     title: 'Recipe Generator',
-    subtitle: 'AI-generated ~150g reference recipes from an uploaded menu',
+    subtitle: 'AI-generated reference recipes, 150g net weight, from an uploaded menu',
     codeLabel: 'RG',
     searchLabel: 'Search by name or RG code',
     backLabel: '← Back to Recipe Generator',

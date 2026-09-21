@@ -39,7 +39,7 @@ const {
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const {
-  normalizeProcessesToGrams, REFERENCE_RECIPE_GRAMS, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
+  normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
 
 let mainWindow;
@@ -1652,7 +1652,7 @@ ipcMain.handle('clean-menus-for-sharing', async (e, { files }) => {
 });
 
 // ---------------------------------------------------------------
-// IPC: Recipe Generator -- AI-generates a full ~150g reference recipe per dish pulled from an
+// IPC: Recipe Generator -- AI-generates a full 150g-net-weight reference recipe per dish pulled from an
 // uploaded menu file, for every dish EXCEPT Bread/Milk/Juice (and the already-established
 // ready-made exclusions -- Fruit Basket/Fruit Bar/Salad Bar/Water/Soft Drinks) -- see
 // lib/recipeGenerator.js's isExcludedCategory/isReadyMadeItem, matched by category TEXT,
@@ -1788,7 +1788,7 @@ async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
 
 // Strips any nut-policy-violating ingredient row (same mandatory safety net every other
 // AI-suggested ingredient list in this app goes through -- see lib/nutFilter.js), normalizes
-// every ingredient's quantity to sum to REFERENCE_RECIPE_GRAMS (150 g; the "reference recipe" requirement -- see
+// every ingredient's quantity so the recipe's NET WEIGHT is REFERENCE_NET_WEIGHT_GRAMS (150 g; the "reference recipe" requirement -- see
 // normalizeProcessesToGrams's own comment on why this happens here, mathematically, rather than
 // being asked of the model directly), then writes the recipe/processes/ingredients/wastes as one
 // new draft row. `sourceMenuLabel`/`dish.name` back this recipe's traceability fields
@@ -1823,7 +1823,10 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
     // herself.
     .filter((proc) => proc.ingredients.length > 0 || proc.method);
 
-  const normalized = normalizeProcessesToGrams(processesRaw, REFERENCE_RECIPE_GRAMS);
+  // Scaled so the recipe-level NET WEIGHT (after each process's own wastes) is REFERENCE_NET_WEIGHT_GRAMS -- the raw total is whatever
+  // that takes. Quantity Produced is that Net Weight (blank when nothing had a numeric quantity to scale).
+  const normalized = normalizeProcessesToNetWeight(processesRaw, REFERENCE_NET_WEIGHT_GRAMS);
+  const producedNet = netWeightOfProcesses(normalized);
 
   const { data: inserted, error: insErr } = await supabase
     .from('generated_recipes')
@@ -1831,7 +1834,7 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
       status: 'draft',
       name: gen.name || dish.name,
       category: dish.category || null,
-      quantity_produced: '100 G',
+      quantity_produced: producedNet > 0 ? `${producedNet} G` : null,
       date_created: new Date().toISOString().slice(0, 10),
       source_menu_label: sourceMenuLabel,
       source_dish_name: dish.name,
