@@ -3842,6 +3842,7 @@ function wireGeneratePhotoButton({ buttonId, progressWrapId, getRecipeInfo, onGe
 }
 
 async function renderRecipeFormView(main, ns) {
+  fillRecipePeopleList(); // Prepared By / Checked By suggestions -- not awaited, the boxes work without them
   const s = state[ns.stateKey];
   const editing = !!s.formId;
   let recipe = null;
@@ -3902,7 +3903,7 @@ async function renderRecipeFormView(main, ns) {
       <div class="field recipe-name-field"><label>Recipe Name</label><input id="rf-name" value="${recipe?.name || ''}" dir="auto" /></div>
       <div class="field"><label>Quantity Produced</label><input id="rf-qty" value="${recipe?.quantity_produced || ''}" dir="auto" /></div>
       <div class="field"><label>Portion Weight (g)</label><input id="rf-portion-weight" type="number" min="0" step="0.1" value="${recipe?.portion_weight_grams ?? ''}" /></div>
-      <div class="field"><label>Prepared By</label><input id="rf-prepared-by" value="${recipe?.prepared_by || ''}" dir="auto" /></div>
+      <div class="field"><label>Prepared By</label><input id="rf-prepared-by" list="recipe-people-list" value="${recipe?.prepared_by || ''}" dir="auto" /></div>
       <div class="field"><label>Category</label><input id="rf-category" value="${recipe?.category || ''}" dir="auto" /></div>
       <div class="field"><label>Country/Origin</label><input id="rf-country" value="${recipe?.country_origin || ''}" dir="auto" /></div>
       <div class="field"><label>Total Quantity (g)</label><input id="rf-total-qty" value="${recipe?.yield_notes || ''}" /></div>
@@ -3950,7 +3951,7 @@ async function renderRecipeFormView(main, ns) {
     `}
     <div class="field" style="margin-bottom:20px; max-width:320px;">
       <label>Checked By</label>
-      <input id="rf-checked-by" value="${recipe?.checked_by || ''}" dir="auto" />
+      <input id="rf-checked-by" list="recipe-people-list" value="${recipe?.checked_by || ''}" dir="auto" />
     </div>
 
     <button class="primary" id="rf-save-btn">${editing ? 'Save Changes' : 'Save Recipe'}</button>
@@ -4563,6 +4564,19 @@ function sortDayGroups(entries) { // entries: [[dayLabel|null, rows], ...] in fi
     .map(x => x.entry);
 }
 
+// "Prepared By" / "Checked By" suggestions. The boxes are free text; each carries list="recipe-people-list", and this fills that one
+// <datalist> (kept in <body>, so it survives screen changes) with every name already used on a recipe plus Tetiana -- see the
+// list-recipe-people handler in main.js. Called whenever one of those forms opens, so a name typed and saved on one recipe is
+// offered on the next. Falls back to Tetiana alone if the lookup fails: the suggestion list must never block a form.
+async function fillRecipePeopleList() {
+  let list = document.getElementById('recipe-people-list');
+  if (!list) { list = document.createElement('datalist'); list.id = 'recipe-people-list'; document.body.appendChild(list); }
+  let names;
+  try { names = await window.api.listRecipePeople(); } catch { names = ['Tetiana']; }
+  list.textContent = '';
+  for (const name of names) { const o = document.createElement('option'); o.value = name; list.appendChild(o); }
+}
+
 // Category filter shared by the Recipe Generator's Drafts table and its Recipe Generated list. `category` is a plain text column
 // (set from the menu's own category heading, editable on the recipe), so the options are the distinct values in use, compared
 // ignoring case and extra spaces ("Main Dish" and "main dish " are one option, shown as first seen). Recipes with no category
@@ -5079,6 +5093,7 @@ function renderGeneratedIngredientRows(process, tbodyEl, onChange) {
 // different save-button combo at the bottom (Save Draft + Confirm & Save vs plain Save Changes),
 // since a confirmed recipe's code/status never move once assigned.
 async function renderGeneratedRecipeFormView(main, ns) {
+  fillRecipePeopleList();
   const s = state[ns.stateKey];
   // Fetched once per form open, same convention renderRecipeFormView uses -- backs every
   // process card's "+ Add Waste" control (Material/Tray's own catalog fetch, `listMaterials`,
@@ -5118,7 +5133,7 @@ async function renderGeneratedRecipeFormView(main, ns) {
       <div class="field recipe-name-field"><label>Recipe Name</label><input id="rg-name" value="${recipe.name || ''}" dir="auto" /></div>
       <div class="field"><label>Quantity Produced</label><input id="rg-qty" value="${recipe.quantity_produced || ''}" dir="auto" /></div>
       <div class="field"><label>Portion Weight (g)</label><input id="rg-portion-weight" type="number" min="0" step="0.1" value="${recipe.portion_weight_grams ?? ''}" /></div>
-      <div class="field"><label>Prepared By</label><input id="rg-prepared-by" value="${recipe.prepared_by || ''}" dir="auto" /></div>
+      <div class="field"><label>Prepared By</label><input id="rg-prepared-by" list="recipe-people-list" value="${recipe.prepared_by || ''}" dir="auto" /></div>
       <div class="field"><label>Category</label><input id="rg-category" value="${recipe.category || ''}" dir="auto" /></div>
       <div class="field"><label>Country/Origin</label><input id="rg-country" value="${recipe.country_origin || ''}" dir="auto" /></div>
       <div class="field"><label>Total Quantity (g)</label><input id="rg-total-qty" value="${recipe.yield_notes || ''}" /></div>
@@ -5153,7 +5168,7 @@ async function renderGeneratedRecipeFormView(main, ns) {
     </div>
     <div class="field" style="margin-bottom:20px; max-width:320px;">
       <label>Checked By</label>
-      <input id="rg-checked-by" value="${recipe.checked_by || ''}" dir="auto" />
+      <input id="rg-checked-by" list="recipe-people-list" value="${recipe.checked_by || ''}" dir="auto" />
     </div>
 
     <button class="primary" id="rg-save-draft-btn">${isDraft ? 'Save Draft' : 'Save Changes'}</button>
@@ -6699,6 +6714,7 @@ function renderCalcProcessCards(ns, workingProcesses, processesShown, wasteTypes
 // Export (the button wired at the bottom of this function) reads straight off these same mutated
 // objects at click time, so whatever she's edited is exactly what gets sent.
 function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProcesses, processesShown, wasteTypes, materials, perProcessScaling, onStructureChanged) {
+  fillRecipePeopleList();
   // Each shown process's own scaled view, derived fresh from its persistent 1x-basis
   // ingredientRows and its own `multiplier` (set directly on the object by Calculate, or forced
   // to 1 by renderResultView(true) -- see renderCalculatorView). Recomputed here up front so the
@@ -6746,7 +6762,7 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
           <div class="field"><label>Quantity Produced (original)</label><input id="calc-qty-produced" value="${recipe.quantity_produced || ''}" dir="auto" /></div>
           <div class="field"><label>Quantity Produced (scaled)</label><div class="computed-value-box">${quantityProducedScaled || (isMultiProcessScaling ? 'Scaled independently per process' : '—')}</div></div>
           <div class="field"><label>Portion Weight (g)</label><input id="calc-portion-weight" type="number" min="0" step="0.1" value="${recipe.portion_weight_grams ?? ''}" /></div>
-          <div class="field"><label>Prepared By</label><input id="calc-prepared-by" value="${recipe.prepared_by || ''}" dir="auto" /></div>
+          <div class="field"><label>Prepared By</label><input id="calc-prepared-by" list="recipe-people-list" value="${recipe.prepared_by || ''}" dir="auto" /></div>
           <div class="field"><label>Category</label><input id="calc-category" value="${recipe.category || ''}" dir="auto" /></div>
           <div class="field"><label>Country/Origin</label><input id="calc-country" value="${recipe.country_origin || ''}" dir="auto" /></div>
           <div class="field"><label>Net Weight (scaled, combined)</label><div id="calc-combined-netweight" class="computed-value-box">${combinedNetWeight} G</div></div>

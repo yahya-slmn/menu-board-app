@@ -58,6 +58,7 @@ contextBridge.exposeInMainWorld('api', {
   deleteIngredient: (id) => ipcRenderer.invoke('delete-ingredient', id),
 
   listWasteTypes: () => ipcRenderer.invoke('list-waste-types'),
+  listRecipePeople: () => ipcRenderer.invoke('list-recipe-people'),
   addWasteType: (payload) => ipcRenderer.invoke('add-waste-type', payload),
   updateWasteType: (payload) => ipcRenderer.invoke('update-waste-type', payload),
   deleteWasteType: (id) => ipcRenderer.invoke('delete-waste-type', id),

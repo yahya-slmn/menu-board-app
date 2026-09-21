@@ -2629,6 +2629,30 @@ ipcMain.handle('delete-ingredient', async (e, id) => {
 // and Recipe Extractor process cards alike -- unlike ingredients, a waste type carries no
 // extraction provenance, so there's no separate extracted_* table for it (see conversation
 // notes on the composable process-waste feature).
+// Suggestions for the "Prepared By" / "Checked By" boxes (Recipe Book, Recipe Extractor, Recipe Generator, Calculator): every
+// distinct name already used on any recipe (all three recipe tables, both columns), plus the names that should always be offered
+// even before they have a recipe of their own (STANDING_RECIPE_PEOPLE). Names differing only in case or spacing are one entry, shown
+// as first seen. The boxes stay free text -- this only feeds their suggestion list. Read in pages because PostgREST caps a single
+// response at 1000 rows.
+const STANDING_RECIPE_PEOPLE = ['Tetiana'];
+ipcMain.handle('list-recipe-people', async () => {
+  const seen = new Map(); // lowercased, single-spaced name -> display name
+  const add = (raw) => {
+    const name = String(raw || '').trim().replace(/\s+/g, ' ');
+    if (name && !seen.has(name.toLowerCase())) seen.set(name.toLowerCase(), name);
+  };
+  STANDING_RECIPE_PEOPLE.forEach(add);
+  for (const table of ['recipes', 'extracted_recipes', 'generated_recipes']) {
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase.from(table).select('prepared_by, checked_by').range(from, from + 999);
+      if (error) throw supaFail(`list-recipe-people: ${table}`, error);
+      (data || []).forEach((r) => { add(r.prepared_by); add(r.checked_by); });
+      if (!data || data.length < 1000) break;
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+});
+
 ipcMain.handle('list-waste-types', async () => {
   const { data, error } = await supabase.from('waste_types').select('*').order('sort_order');
   if (error) throw supaFail('list-waste-types', error);
