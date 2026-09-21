@@ -4541,6 +4541,28 @@ async function renderRecipeGeneratorTabs(main, ns) {
   else await renderGeneratedConfirmedList(content, ns, main);
 }
 
+// Drafts' day headings ("Monday 27-09-2026", or just "Monday", or nothing) must read in calendar order. The groups used to come out
+// in first-seen order, which follows when each dish happened to finish generating (dishes are generated in parallel batches), so
+// 30-09 could land above 29-09. Sorted here instead: dated labels by date (year, month, day -- so a menu that runs over a month
+// end stays in order), then weekday-only labels Sunday..Saturday, then the "No day recorded" group; ties keep first-seen order.
+const WEEKDAY_ORDER = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+function dayGroupSortKey(label) {
+  const text = String(label || '');
+  const d = text.match(/(\d{1,2})[-/.](\d{1,2})(?:[-/.](\d{2,4}))?/);
+  if (d) {
+    const year = d[3] ? (d[3].length === 2 ? 2000 + Number(d[3]) : Number(d[3])) : 0;
+    return [0, year, Number(d[2]), Number(d[1])];
+  }
+  const wd = WEEKDAY_ORDER.findIndex(w => text.toLowerCase().includes(w));
+  return wd >= 0 ? [1, wd, 0, 0] : [2, 0, 0, 0];
+}
+function sortDayGroups(entries) { // entries: [[dayLabel|null, rows], ...] in first-seen order
+  return entries
+    .map((entry, i) => ({ entry, i, key: dayGroupSortKey(entry[0]) }))
+    .sort((a, b) => { for (let k = 0; k < 4; k++) if (a.key[k] !== b.key[k]) return a.key[k] - b.key[k]; return a.i - b.i; })
+    .map(x => x.entry);
+}
+
 // Category filter shared by the Recipe Generator's Drafts table and its Recipe Generated list. `category` is a plain text column
 // (set from the menu's own category heading, editable on the recipe), so the options are the distinct values in use, compared
 // ignoring case and extra spaces ("Main Dish" and "main dish " are one option, shown as first seen). Recipes with no category
@@ -4703,7 +4725,7 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
         if (!dayGroups.has(key)) dayGroups.set(key, []);
         dayGroups.get(key).push(d);
       }
-      tableRowsHtml = [...dayGroups.entries()].map(([day, groupRows]) => `
+      tableRowsHtml = sortDayGroups([...dayGroups.entries()]).map(([day, groupRows]) => `
       <tr><td colspan="5" style="background:var(--paper-dim); font-weight:600; padding-top:10px;">${day || 'No day recorded'}</td></tr>
       ${groupRows.map(rowMarkup).join('')}
     `).join('');
