@@ -233,12 +233,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 1px solid var(--line); border-radius: 8px; font-family: inherit; font-size: 13.5px;
 }
 .search-bar input:focus { border-color: var(--sage); }
-.search-bar select {
+.search-bar select, .rg-draft-bar select {
   padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
   font-family: inherit; font-size: 13.5px; background: white; color: var(--ink);
 }
-.search-bar select:focus { border-color: var(--sage); }
+.search-bar select:focus, .rg-draft-bar select:focus { border-color: var(--sage); }
 .rg-hidden-note { font-size: 12px; color: var(--neutral); }
+/* Drafts folder: the category dropdown sits on the same line as "Back to Drafts" (no card of its own) so the table stays as clean as before. */
+.rg-draft-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 
 /* ---------------- Items table ---------------- */
 /* Single table across all categories with fixed column widths -- keeps Tags/RC aligned in

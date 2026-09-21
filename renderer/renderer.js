@@ -4682,15 +4682,13 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   const hasAnyDayLabel = rows.some(d => d.source_day_label);
 
   container.innerHTML = `
-    ${backBtn}
-    <div class="search-bar"><select id="rg-draft-category-filter" aria-label="Filter by category" hidden></select></div>
+    <div class="rg-draft-bar">${backBtn.replace('margin-bottom:14px;', 'margin-bottom:0;')}<select id="rg-draft-category-filter" aria-label="Filter by category" hidden></select></div>
     <div id="rg-draft-table"></div>
   `;
   wireBack();
   const s = state[ns.stateKey];
   const filterEl = document.getElementById('rg-draft-category-filter');
   s.draftCategory = fillCategoryFilter(filterEl, rows, s.draftCategory);
-  filterEl.parentElement.hidden = filterEl.hidden; // no empty gap above the table when there is nothing to filter
 
   // The table itself is unchanged; the category filter only decides which rows go into it.
   function renderTable() {
