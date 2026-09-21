@@ -11,6 +11,7 @@ import { prefersReducedMotion } from './quality.js';
 import { createSheet } from './sheet.js';
 import { packCutters } from './packing.js';
 import { analyzeScrap } from './scrap.js';
+import { createPortionModel, drawDims, project } from './portion.js';
 
 // Public entry point for the Recipe on Fire game view. renderer.js (a classic script) reaches this
 // through window.RofGame (see boot.js) and only ever passes plain data in: the tray/cutter shape
@@ -131,20 +132,21 @@ export function createRofGame(container, opts = {}) {
     if (hud) hud.textContent = `${placed} / ${all.length} placed`;
     emit('placement', { placed, total: all.length });
   }
-  function fitToStage() {
+  function fitToStage(opts = {}) {
     const t = tray.plan;
     const box = bench
       ? { minX: Math.min(t.minX, bench.cx - bench.hw - 1), maxX: Math.max(t.maxX, bench.cx + bench.hw + 1), minY: Math.min(t.minY, bench.cy - bench.hh - 1), maxY: t.maxY }
       : t;
     const hw = (box.maxX - box.minX) / 2, hh = (box.maxY - box.minY) / 2;
     stageCenter = { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
-    stage.fit({ cx: stageCenter.x, cy: stageCenter.y, radius: Math.hypot(hw, hh) * 0.85 + 1 });
+    stage.fit({ cx: stageCenter.x, cy: stageCenter.y, radius: Math.hypot(hw, hh) * 0.85 + 1, ...opts });
   }
 
   // Starts Shape & Place: lays out `count` pieces of `spec` on a bench in front of the tray. On a
   // muffin tray the count is the number of cups and each piece is sized to fit one. Returns the
   // spec/count actually used, since the tray can change them.
   function beginPlacement({ spec, count, spread = 1 }) {
+    closePortion({ quiet: true });
     if (!tray) return null;
     endPlacement();
     clearItems();
@@ -192,6 +194,7 @@ export function createRofGame(container, opts = {}) {
     return { spec, count };
   }
   function endPlacement() {
+    closePortion({ quiet: true });
     if (bench) { stage.scene.remove(bench.group); bench.dispose(); bench = null; }
     hud?.remove(); hud = null;
     placing = false;
@@ -200,6 +203,7 @@ export function createRofGame(container, opts = {}) {
   }
   // Lays the pieces still on the bench onto the tray, top-left first.
   function autoArrange() {
+    closePortion({ quiet: true });
     const pieces = doughItems().filter(i => i.home === 'bench');
     const n = placement.autoArrange(pieces);
     pieces.forEach(it => { it.lift = fall(2.2); interaction.wake(it); });
@@ -217,6 +221,7 @@ export function createRofGame(container, opts = {}) {
     reportPlacement();
   }
   function returnAllToBench() {
+    closePortion({ quiet: true });
     const onTray = doughItems().filter(i => i.home === 'tray');
     placement.packOnBench(onTray);
     onTray.forEach(it => { it.lift = fall(1.5); interaction.wake(it); });
@@ -328,6 +333,7 @@ export function createRofGame(container, opts = {}) {
 
   // Puts the dough in the tray as one sheet `thicknessCm` thick (raw). Returns false on a muffin tray.
   function beginSheet({ thicknessCm }) {
+    closePortion({ quiet: true });
     if (!tray || tray.region.kind === 'cups') return false;
     endSheet(); endPlacement(); clearItems();
     sheet = createSheet({ region: tray.region, plan: tray.plan, thicknessCm });
@@ -338,6 +344,7 @@ export function createRofGame(container, opts = {}) {
     return true;
   }
   function endSheet() {
+    closePortion({ quiet: true });
     disarmCutter();
     clearItems();
     if (sheet) { stage.scene.remove(sheet.group); sheet.dispose(); sheet = null; }
@@ -349,6 +356,7 @@ export function createRofGame(container, opts = {}) {
   // Arms a cutter: a see-through copy follows the pointer over the tray (red where it can't go) and a
   // click stamps a real one there. Clicking an existing cutter still picks it up instead.
   function armCutter(spec) {
+    closePortion({ quiet: true });
     disarmCutter();
     if (!tray || !spec) return false;
     const built = buildCutter(spec, surfaces);
@@ -441,6 +449,7 @@ export function createRofGame(container, opts = {}) {
 
   // Replaces every cutter with `list` ([{ shapeType, dims, x, y, materialId }]) -- used by auto-arrange.
   function setCutters(list) {
+    closePortion({ quiet: true });
     cutterItems().forEach(c => removeItem(c.id, { quiet: true }));
     list.forEach((c, i) => { const d = addCutter({ ...c, data: { materialId: c.materialId } }); const it = d && items.find(x => x.id === d.id); if (it) it.lift = fall(4 + (i % 6) * 0.5); });
     cuttersChanged();
@@ -450,12 +459,13 @@ export function createRofGame(container, opts = {}) {
   // packing.js) and lay them out with the rotation the packer chose -- the orientation is what makes the
   // triangles tessellate, so it must reach the cutter, not just the position.
   function autoArrangeCutters({ shapeType, dims, materialId, marginCm = 0.3, gapCm = 0.2 }) {
+    closePortion({ quiet: true });
     if (!tray || tray.region.kind === 'cups') return { count: 0, frameDeg: 0 };
     const res = packCutters({ region: tray.region, shapeType, dims, marginCm, gapCm });
     const n = setCutters(res.placements.map(p => ({ shapeType, dims, x: p.x, y: p.y, rot: p.rot, materialId })));
     return { count: n, frameDeg: res.frameDeg, planned: res.placements.length };
   }
-  function clearCutters() { cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
+  function clearCutters() { closePortion({ quiet: true }); cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
   function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); stage.requestRender(); }
   function setSheetGrams(g) { sheetGrams = g; renderFlags(); }
 
@@ -472,6 +482,7 @@ export function createRofGame(container, opts = {}) {
   // pieces on the tray are baked. Returns { promise, skip() }; `onProgress({phase, progress})` fires
   // every frame for the UI.
   function playBake({ doneness = 'golden', model = null, onProgress } = {}) {
+    closePortion({ quiet: true });
     const m = { hMul: 1, wMul: 1, proofShare: 0.4, brownSpeed: 1, ...(model || {}) };
     setInteractive(false);
     interaction.select(null);
@@ -540,6 +551,7 @@ export function createRofGame(container, opts = {}) {
     return { promise, skip() { state.skip = true; stage.requestRender(); } };
   }
   function resetBake() {
+    closePortion({ quiet: true });
     setDoughState({ rise: 0, bake: 0 });
     if (oven) { oven.setLevel(0); oven.setSteam(0); }
     stage.setOvenLook(0);
@@ -553,6 +565,7 @@ export function createRofGame(container, opts = {}) {
     stage.requestRender();
   }
   function clearTray() {
+    closePortion({ quiet: true });
     endPlacement();
     endSheet();
     clearItems();
@@ -684,9 +697,18 @@ export function createRofGame(container, opts = {}) {
   // offset is re-anchored (interaction.reanchor), so the next mouse move continues from where it is. Q / E turn the
   // view (also mid-drag, since the keys are independent of the mouse); right-drag or Alt+drag orbits when nothing
   // is held; the buttons jump to Top / Angled / Low front / Low side.
-  const INSET_KEY = 'rofSideView';
-  let insetPref = true, insetForced = false;      // the chef's choice, and "off just now" (during the bake)
-  try { insetPref = localStorage.getItem(INSET_KEY) !== '0'; } catch { /* default on */ }
+  // One choice per method: the strip is on by default in Shape & Place (heights and gaps between pieces) and OFF by
+  // default in Sheet & Trim (a baked sheet is about a centimetre thick, so the strip is a thin line), where the button
+  // still turns it on.
+  const INSET_KEYS = { place: 'rofSideView', sheet: 'rofSideViewSheet' };
+  const insetPrefs = { place: true, sheet: false };
+  let insetForced = false;                        // "off just now" (during the bake)
+  let portion = null;                             // the one-portion view while it is open (below)
+  try {
+    insetPrefs.place = localStorage.getItem(INSET_KEYS.place) !== '0';
+    insetPrefs.sheet = localStorage.getItem(INSET_KEYS.sheet) === '1';
+  } catch { /* defaults */ }
+  const insetMode = () => (sheet ? 'sheet' : 'place');
   let viewBox = null, viewBtns = {}, insetBtn = null, insetFrame = null;
   const VIEW_ORDER = ['top', 'angled', 'lowFront', 'lowSide'];
   function buildViewTools() {
@@ -699,8 +721,12 @@ export function createRofGame(container, opts = {}) {
       grp.appendChild(b); viewBtns[k] = b;
     }
     insetBtn = document.createElement('button'); insetBtn.type = 'button'; insetBtn.className = 'rof-tool-btn'; insetBtn.textContent = 'Side view';
-    insetBtn.setAttribute('aria-pressed', String(insetPref)); insetBtn.title = 'A small side elevation in the corner, for judging heights and gaps';
-    insetBtn.addEventListener('click', () => { insetPref = !insetPref; try { localStorage.setItem(INSET_KEY, insetPref ? '1' : '0'); } catch { /* not persisted */ } insetBtn.setAttribute('aria-pressed', String(insetPref)); updateInset(); announce(insetPref ? 'Side view shown.' : 'Side view hidden.'); });
+    insetBtn.setAttribute('aria-pressed', String(insetPrefs[insetMode()])); insetBtn.title = 'A small side elevation in the corner, for judging heights and gaps';
+    insetBtn.addEventListener('click', () => {
+      const mode = insetMode(); insetPrefs[mode] = !insetPrefs[mode];
+      try { localStorage.setItem(INSET_KEYS[mode], insetPrefs[mode] ? '1' : '0'); } catch { /* not persisted */ }
+      updateInset(); announce(insetPrefs[mode] ? 'Side view shown.' : 'Side view hidden.');
+    });
     viewBox.append(grp, insetBtn);
     insetFrame = document.createElement('div'); insetFrame.className = 'rof-inset-frame'; insetFrame.setAttribute('aria-hidden', 'true'); insetFrame.hidden = true;
     insetFrame.innerHTML = '<span>Side view</span>';
@@ -713,7 +739,9 @@ export function createRofGame(container, opts = {}) {
   }
   // The strip shows while pieces or a sheet are on the stage (not in Setup, not during the bake).
   function updateInset() {
-    const on = insetPref && !insetForced && (placing || !!sheet);
+    const pref = insetPrefs[insetMode()];
+    if (insetBtn) insetBtn.setAttribute('aria-pressed', String(pref));
+    const on = pref && !insetForced && !portion && (placing || !!sheet);
     stage.setInset(on);
     if (insetFrame) {
       insetFrame.hidden = !on;
@@ -748,6 +776,7 @@ export function createRofGame(container, opts = {}) {
   const viewSpeech = () => { const v = stage.getView(); return v.name ? `${stage.VIEWS[v.name].label} view.` : `View turned to ${Math.round(v.yaw * 180 / Math.PI)} degrees, ${Math.round(v.pitch * 180 / Math.PI)} degrees up.`; };
   stage.canvas.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape' && portion) { e.preventDefault(); closePortion(); return; }
     const k = e.key.toLowerCase();
     if (k === 'q' || k === 'e') { e.preventDefault(); stage.orbitBy((k === 'e' ? 1 : -1) * (e.shiftKey ? 5 : 15) * Math.PI / 180); announce(viewSpeech()); }
     else if (k >= '1' && k <= '4') { e.preventDefault(); const name = VIEW_ORDER[+k - 1]; stage.setViewAngles(stage.VIEWS[name]); announce(`${stage.VIEWS[name].label} view.`); }
@@ -767,6 +796,158 @@ export function createRofGame(container, opts = {}) {
   }
   stage.addFrameHook(() => { if (stage.insetOn) { updateInset(); focusInset(); } });
   buildViewTools();
+
+
+  // ---- one-portion detail view ---------------------------------------------------------------------------------
+  // Takes the tray, bench, sheet and cutters off the stage (they are only hidden, so closing puts everything back
+  // exactly as it was) and shows ONE baked portion on a board with its measurements: dimension lines drawn over the
+  // piece and a card of numbers. Both methods use it; `desc` is described in portion.js. Anything that changes the tray
+  // (arming a cutter, arranging, baking again...) closes it first, so it never shows stale dough.
+  const PORTION_VIEW = { yaw: 28 * Math.PI / 180, pitch: 30 * Math.PI / 180 };
+  function setStageToolsHidden(hide) {
+    const d = hide ? 'none' : '';
+    for (const el of [hud, scrapRow, flagLayer, tipEl, insetBtn, qualityBox]) if (el) el.style.display = d;
+  }
+  function buildPortionCard(desc) {
+    const card = document.createElement('div');
+    card.className = 'rof-portion-card'; card.setAttribute('role', 'region'); card.setAttribute('aria-label', desc.title || 'One portion');
+    card.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closePortion(); stage.canvas.focus({ preventScroll: true }); } });
+    const head = document.createElement('div'); head.className = 'rof-portion-head';
+    const h = document.createElement('div'); h.className = 'rof-portion-title'; h.textContent = desc.title || 'One portion';
+    const back = document.createElement('button'); back.type = 'button'; back.className = 'rof-tool-btn'; back.textContent = '← Back to tray';
+    back.addEventListener('click', () => closePortion());
+    head.append(h, back);
+    card.appendChild(head);
+    if (desc.subtitle) { const sub = document.createElement('div'); sub.className = 'rof-portion-sub'; sub.textContent = desc.subtitle; card.appendChild(sub); }
+    if (desc.choices && desc.choices.length > 1) {
+      const grp = document.createElement('div'); grp.className = 'rof-portion-choices'; grp.setAttribute('role', 'group'); grp.setAttribute('aria-label', 'Which portion');
+      for (const c of desc.choices) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'rof-tool-btn'; b.textContent = c.label;
+        b.setAttribute('aria-pressed', String(c.key === desc.chosen));
+        b.addEventListener('click', () => desc.onChoose?.(c.key));
+        grp.appendChild(b);
+      }
+      card.appendChild(grp);
+    }
+    const list = document.createElement('div'); list.className = 'rof-portion-rows';
+    for (const r of desc.rows || []) {
+      const row = document.createElement('div'); row.className = 'rof-portion-row';
+      const dt = document.createElement('span'); dt.className = 'rof-portion-k'; dt.textContent = r.label;
+      const dd = document.createElement('span'); dd.className = 'rof-portion-v'; dd.textContent = r.value;
+      if (r.est) { const e = document.createElement('span'); e.className = 'rof-est'; e.textContent = ' est.'; e.title = 'Estimated from the ingredients (the rise model), not measured'; dd.appendChild(e); }
+      row.append(dt, dd); list.appendChild(row);
+    }
+    card.appendChild(list);
+    if (desc.tray) {
+      const t = document.createElement('div'); t.className = 'rof-portion-tray';
+      t.textContent = `Tray: ${desc.tray.name} · ${desc.tray.dims}${desc.tray.note ? ` · ${desc.tray.note}` : ''}`;
+      card.appendChild(t);
+    }
+    if (desc.footnote) { const f = document.createElement('div'); f.className = 'rof-portion-foot'; f.textContent = desc.footnote; card.appendChild(f); }
+    return card;
+  }
+  const bakeFor = (d) => clamp((DONENESS[d.doneness] ?? DONENESS.golden) * (SHAPE_K[d.kind === 'cut' ? 'sheet' : d.spec?.archetype] ?? 1) * (d.brownSpeed ?? 1), 0, 1);
+  function openPortion(desc, { capture = false } = {}) {
+    if (!tray) return false;
+    if (portion) closePortion({ quiet: true });
+    disarmCutter();
+    interaction.select(null);
+    const model = createPortionModel({ surfaces, desc: { ...desc, bake: bakeFor(desc) } });
+    // Hide what is on the stage (lights and the floor stay), then add the showcase.
+    const saved = [], keep = new Set([floor, stage.key.target]);
+    stage.scene.children.forEach(c => { if (c.isLight || keep.has(c)) return; saved.push([c, c.visible]); c.visible = false; });
+    stage.scene.add(model.group);
+    portion = { desc, model, saved, prev: { view: stage.getView(), interactive: interaction.isEnabled() }, card: null, cv: null };
+    interaction.setEnabled(false);
+    setStageToolsHidden(true);
+    updateInset();
+    if (!capture) {
+      portion.card = buildPortionCard(desc);
+      portion.cv = document.createElement('canvas'); portion.cv.className = 'rof-portion-dims'; portion.cv.setAttribute('aria-hidden', 'true');
+      container.append(portion.cv, portion.card);
+    }
+    stage.fit({ cx: 0, cy: 0, radius: model.radius, instant: true }); // no dolly-in: the framing below is measured at the final pose
+    stage.setViewAngles({ yaw: (model.long ? 10 : 28) * Math.PI / 180, pitch: PORTION_VIEW.pitch }, { animate: false }); // a long piece is shown nearly face-on so it can be larger
+    frameModel(capture);
+    stage.requestRender();
+    if (!capture) { announce(desc.speech || `${desc.title || 'One portion'}.`); emit('portion', { open: true }); }
+    return true;
+  }
+  function closePortion({ quiet = false } = {}) {
+    if (!portion) return false;
+    const p = portion; portion = null;
+    stage.scene.remove(p.model.group); p.model.dispose();
+    p.saved.forEach(([c, v]) => { c.visible = v; });
+    p.card?.remove(); p.cv?.remove();
+    stage.setContentShift(0);
+    setStageToolsHidden(false);
+    interaction.setEnabled(p.prev.interactive);
+    if (tray) fitToStage({ instant: true });
+    stage.setViewAngles(p.prev.view, { animate: false });
+    updateInset();
+    stage.requestRender();
+    if (!quiet) { announce('Back to the tray.'); }
+    emit('portion', { open: false });
+    return true;
+  }
+
+  // Zoom and slide the camera so everything the model lists (board, piece, dimension lines and their labels) fits in
+  // the free part of the stage: between the view buttons and the card, or the whole canvas for a capture. Measured
+  // by projecting those points, so any size of portion -- a 3 cm biscuit or a 50 cm baguette -- fits.
+  function frameModel(capture) {
+    const p = portion, W = container.clientWidth, H = container.clientHeight;
+    if (!p || !W || !H) return;
+    const side = 14, top = capture ? 16 : 54, bottom = capture ? H - 16 : H - p.card.offsetHeight - 20;
+    const pad = (pt) => { const q = project(pt, stage.camera, W, H); return [[q.x, q.y], [q.x - 92, q.y - 15], [q.x + 92, q.y + 15]]; };
+    const bbox = () => {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      const add = ([x, y]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); };
+      p.model.framePoints.forEach(pt => { const q = project(pt, stage.camera, W, H); add([q.x, q.y]); });
+      p.model.dims.forEach(d => { const mid = d.a.clone().add(d.b).multiplyScalar(0.5); pad(mid).forEach(add); });
+      return { x0, x1, y0, y1 };
+    };
+    let zoom = 1;
+    for (let i = 0; i < 6; i++) {
+      stage.setContentShift(0, 0); stage.setView({ zoom });
+      const b = bbox(), s = Math.max((b.x1 - b.x0) / (W - 2 * side), (b.y1 - b.y0) / Math.max(40, bottom - top));
+      if (i > 0 && Math.abs(s - 1) < 0.015) break;
+      zoom = clamp(zoom * s, 0.05, 3);
+    }
+    const b = bbox();
+    stage.setContentShift((b.y0 + b.y1) / 2 - (top + bottom) / 2, (b.x0 + b.x1) / 2 - W / 2);
+    p.framed = { W, H };
+  }
+  const drawPortionDims = () => {
+    if (!portion) return;
+    if (portion.cv && (portion.framed?.W !== container.clientWidth || portion.framed?.H !== container.clientHeight)) frameModel(false); // the stage was resized
+    const W = container.clientWidth, H = container.clientHeight, dpr = Math.min(window.devicePixelRatio || 1, 2), cv = portion.cv;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawDims(ctx, W, H, portion.model.dims, stage.camera, 1);
+  };
+  stage.addFrameHook(drawPortionDims);
+  // A PNG of the portion with its dimension lines drawn on, for the PDF. Works whether or not the view is open.
+  function capturePortion(desc, { maxWidth = 1400 } = {}) {
+    if (!desc) return null;
+    const wasOpen = !!portion, prevDesc = wasOpen ? portion.desc : null;
+    const same = wasOpen && portion.desc === desc;
+    if (!same && !openPortion(desc, { capture: true })) return null;
+    try {
+      stage.renderNow();
+      const w = stage.canvas.width, h = stage.canvas.height, k = Math.min(1, maxWidth / w);
+      const out = document.createElement('canvas'); out.width = Math.round(w * k); out.height = Math.round(h * k);
+      const ctx = out.getContext('2d');
+      ctx.fillStyle = '#1d2a24'; ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(stage.canvas, 0, 0, out.width, out.height);
+      const dims = document.createElement('canvas'); dims.width = out.width; dims.height = out.height;
+      drawDims(dims.getContext('2d'), out.width, out.height, portion.model.dims, stage.camera, out.width / Math.max(1, container.clientWidth));
+      ctx.drawImage(dims, 0, 0);
+      return { dataUrl: out.toDataURL('image/jpeg', 0.9), width: out.width, height: out.height };
+    } finally {
+      if (!same) { closePortion({ quiet: true }); if (prevDesc) openPortion(prevDesc); }
+    }
+  }
 
   // ---- Graphics setting ------------------------------------------------------------------------------
   // Auto (default): start from what the GPU suggests and let the frame-rate governor step down if it can't hold
@@ -814,6 +995,7 @@ export function createRofGame(container, opts = {}) {
     getCutters: () => cutterItems().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },
     setSfx: (fns) => Object.assign(sfx, fns),
+    showPortion: openPortion, hidePortion: closePortion, capturePortion, isPortionOpen: () => !!portion, getPortion: () => portion?.desc || null,
     getView: () => stage.getView(),
     setViewPreset: (name) => stage.setViewAngles(stage.VIEWS[name]),
     announce,
@@ -835,6 +1017,6 @@ export function createRofGame(container, opts = {}) {
     },
     _stage: stage, // exposed for the test harness
   };
-  stage.onDispose(() => { viewBox?.remove(); insetFrame?.remove(); clearTimeout(scrapTimer); flagLayer?.remove(); scrapRow?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
+  stage.onDispose(() => { portion?.card?.remove(); portion?.cv?.remove(); viewBox?.remove(); insetFrame?.remove(); clearTimeout(scrapTimer); flagLayer?.remove(); scrapRow?.remove(); tipEl?.remove(); clearTimeout(liveTimer); liveEl.remove(); hintEl.remove(); clearTimeout(noticeTimer); qualityBox?.remove(); noticeEl?.remove(); stage.canvas.removeEventListener('pointermove', moveGhost); stage.canvas.removeEventListener('pointerleave', onGhostLeave); stage.canvas.removeEventListener('keydown', onGhostKey); clearInterval(statsTimer); interaction.dispose(); surfaces.dispose(); hud?.remove(); lookdevPanel?.remove(); });
   return api;
 }

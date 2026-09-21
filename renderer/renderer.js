@@ -8498,6 +8498,7 @@ function renderRecipeOnFireView(main) {
             rofGame.on('placement', (state) => { placeNote = ''; updatePlaceSummary(state); });
             rofGame.on('cutters', (list) => { cutterList = list; trimNote = ''; updateTrimSummary(); });
             rofGame.on('armed', (spec) => { armedCutterId = spec ? spec.materialId : null; syncCutterCards(); });
+            rofGame.on('portion', ({ open }) => syncPortionBtn(open));
             resolve(rofGame);
           } catch (err) { reject(err); }
         };
@@ -8801,6 +8802,7 @@ function renderRecipeOnFireView(main) {
   }
 
   function renderTrayStepPanel() {
+    if (rofGame) rofGame.hidePortion({ quiet: true });
     renderStepHeader();
     const panel = document.getElementById('rof-step-panel');
     if (!panel) return;
@@ -8957,7 +8959,7 @@ function renderRecipeOnFireView(main) {
     const k = Math.min(1.9, Math.max(0.55, Math.cbrt(plan.grams / shape.weight)));
     const spec = { ...shape, lengthCm: shape.lengthCm * k, widthCm: shape.widthCm * k, heightCm: shape.heightCm * k };
     const used = game.beginPlacement({ spec, count: plan.count, spread: riseModel.wMul });
-    placeSession = { count: used.count, shape, grams: plan.grams, leftover: plan.leftover, plan };
+    placeSession = { count: used.count, shape, spec: used.spec, grams: plan.grams, leftover: plan.leftover, plan };
     placeCount = used.count;
     placeNote = '';
     return used;
@@ -9176,6 +9178,91 @@ function renderRecipeOnFireView(main) {
     if (phase !== lastAnnouncedPhase) { lastAnnouncedPhase = phase; if (rofGame) rofGame.announce(BAKE_PHASE_LABEL[phase] || ''); }
   }
 
+
+  // ---- One portion (the detail view, and the picture for the PDF) ----------------------------------
+  // What one baked portion looks like and measures. Sizes that come from the rise model are marked `est`.
+  const cmText = (v, est = false) => window.RofGame.fmtCm(v, est);
+  const cmSpeech = (v) => `${Math.round(v * 10) / 10} centimetres`;
+  function trayCard(note) {
+    const m = bakeSnapshot.material;
+    return { name: m.name, dims: formatMaterialDimensions(m), note };
+  }
+  function portionDescShape() {
+    if (!placeSession || !placeSession.spec || !bakeSnapshot || !rofGame) return null;
+    const model = effectiveRiseModel(), P = window.RofGame.portions;
+    const grams = isMuffinTray() ? bakeSnapshot.netWeight / placeSession.count : placeSession.grams;
+    const desc = { kind: 'piece', spec: placeSession.spec, hMul: model.hMul, wMul: model.wMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
+    const m = window.RofGame.measurePortion(desc), raw = m.raw;
+    const rows = [{ label: 'Dough weight', value: `${P.fmtGrams(grams)} g` }];
+    if (m.round) rows.push({ label: 'Diameter', value: cmText(m.lengthCm, true), est: true });
+    else rows.push({ label: 'Length', value: cmText(m.lengthCm, true), est: true }, { label: 'Width', value: cmText(m.widthCm, true), est: true });
+    rows.push({ label: 'Height', value: cmText(m.heightCm, true), est: true });
+    rows.push({ label: 'Before rising', value: m.round ? `⌀ ${roundNice(raw.lengthCm)} × ${roundNice(raw.heightCm)} cm` : `${roundNice(raw.lengthCm)} × ${roundNice(raw.widthCm)} × ${roundNice(raw.heightCm)} cm` });
+    const pl = rofGame.getPlacement();
+    const name = placeSession.shape.label || placeSession.shape.name || 'Piece';
+    return {
+      ...desc, measures: m, weightGrams: grams, title: 'One portion', subtitle: `${name} · ${doneLabelOf(bakeDoneness)}`, rows,
+      tray: trayCard(`${pl.placed} of ${pl.total} pieces on the tray`),
+      footnote: 'est. = from the rise estimate, not measured.',
+      speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams of dough. About ${cmSpeech(m.lengthCm)} ${m.round ? 'across' : 'long'}${m.round ? '' : `, ${cmSpeech(m.widthCm)} wide`}, ${cmSpeech(m.heightCm)} tall, estimated.`,
+    };
+  }
+  function cutGroups() {
+    const groups = new Map();
+    for (const c of cutterList) {
+      const g = groups.get(c.data.materialId) || { key: String(c.data.materialId), data: c.data, n: 0 };
+      g.n++; groups.set(c.data.materialId, g);
+    }
+    return [...groups.values()];
+  }
+  function portionDescSheet(key) {
+    if (!bakeSnapshot || !sheetInfo || !rofGame || cutterList.length === 0) return null;
+    const groups = cutGroups();
+    const g = groups.find(x => x.key === String(key)) || groups.find(x => x.key === String(lastCutterId)) || groups.sort((a, b) => b.n - a.n)[0];
+    const model = effectiveRiseModel(), P = window.RofGame.portions, fp = bakeSnapshot.footprint;
+    const thicknessCm = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+    const desc = { kind: 'cut', shapeType: g.data.shapeType, dims: g.data.dims, thicknessCm, hMul: model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
+    const m = window.RofGame.measurePortion(desc);
+    const grams = (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams;
+    const mat = cutterMaterials.find(x => String(x.id) === g.key);
+    const rows = [{ label: 'Dough weight', value: `${P.fmtGrams(grams)} g` }];
+    if (g.data.shapeType === 'round') rows.push({ label: 'Diameter', value: cmText(m.diameterCm) });
+    else if (g.data.shapeType === 'rectangular') rows.push({ label: 'Length', value: cmText(m.lengthCm) }, { label: 'Width', value: cmText(m.widthCm) });
+    else rows.push({ label: 'Base', value: cmText(m.baseCm) }, { label: 'Height', value: cmText(m.triHeightCm) });
+    rows.push({ label: 'Thickness', value: cmText(m.heightCm, true), est: true });
+    rows.push({ label: 'Before rising', value: `${Math.round(m.rawHeightCm * 100) / 10} mm` });
+    rows.push({ label: 'Area', value: `${roundNice(m.areaCm2)} cm²` });
+    const choices = groups.length > 1 ? groups.map(x => ({ key: x.key, label: (cutterMaterials.find(c => String(c.id) === x.key) || {}).name || 'Cutter' })) : null;
+    const name = mat ? mat.name : 'Cut piece';
+    return {
+      ...desc, measures: m, weightGrams: grams, title: 'One portion', subtitle: `${name} · ${doneLabelOf(bakeDoneness)}`, rows,
+      tray: trayCard(`${g.n} of ${cutterList.length} pieces cut`),
+      choices, chosen: g.key, onChoose: (k) => openPortionView(k),
+      footnote: 'est. = from the rise estimate, not measured.',
+      speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams of dough, ${cutterPieceSizeLabel(g.data.shapeType, g.data.dims)}, about ${cmSpeech(m.heightCm)} thick, estimated.`,
+    };
+  }
+  const doneLabelOf = (d) => ({ light: 'Light', golden: 'Golden', dark: 'Dark' }[d] || 'Golden');
+  const portionDesc = (key) => (rofMode === 'sheet' ? portionDescSheet(key) : portionDescShape());
+  function openPortionView(key) {
+    const desc = portionDesc(key);
+    if (desc) rofGame.showPortion(desc);
+  }
+  function togglePortionView() {
+    if (!rofGame) return;
+    if (rofGame.isPortionOpen()) rofGame.hidePortion(); else openPortionView();
+  }
+  function syncPortionBtn(open) {
+    const b = document.getElementById('rof-portion-btn');
+    if (!b) return;
+    b.textContent = open ? 'Back to tray' : 'One portion';
+    b.setAttribute('aria-pressed', String(!!open));
+  }
+  function wirePortionBtn() {
+    const b = document.getElementById('rof-portion-btn');
+    if (b) b.addEventListener('click', togglePortionView);
+  }
+
   // ---- Sheet & Trim: the dough as one sheet ------------------------------------------------------
   const RAW_DOUGH_DENSITY = 1.05; // g/cm3, raw dough
   function computeSheetInfo() {
@@ -9246,7 +9333,8 @@ function renderRecipeOnFireView(main) {
         <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
         ${ready ? '<button type="button" class="primary" id="rof-start-bake-btn">Start baking</button>'
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
-                   ${sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>' : ''}`}
+                   ${sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
+                               : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button>'}`}
       </div>`;
     panel.querySelectorAll('[data-doneness]').forEach(btn => btn.addEventListener('click', () => {
       bakeDoneness = btn.dataset.doneness;
@@ -9275,6 +9363,7 @@ function renderRecipeOnFireView(main) {
       placeFresh = false;
       renderTrayStepPanel();
     });
+    wirePortionBtn();
     document.getElementById('rof-start-bake-btn')?.addEventListener('click', startBake);
     document.getElementById('rof-bake-again-btn')?.addEventListener('click', () => {
       rofGame.resetBake();
@@ -9318,6 +9407,8 @@ function renderRecipeOnFireView(main) {
   function updateTrimSummary() {
     const el = document.getElementById('rof-trim-summary');
     if (!el || !bakeSnapshot || !sheetInfo) return;
+    const pbtn = document.getElementById('rof-portion-btn');
+    if (pbtn) { pbtn.disabled = cutterList.length === 0; pbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
     const { footprint } = bakeSnapshot, grams = sheetInfo.sessionGrams;
     if (cutterList.length === 0) {
       el.innerHTML = `<div class="computed-value-box" style="margin:12px 0;"><div style="color:var(--neutral); font-size:12.5px;">${trimNote || 'No cutters placed yet.'}</div></div>`;
@@ -9365,7 +9456,8 @@ function renderRecipeOnFireView(main) {
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
       </div>
       <div id="rof-trim-summary"></div>
-      <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button></div>`;
+      <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button></div>`;
+    wirePortionBtn();
     rofGame.setScrapHighlight(true);
     document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
     document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });

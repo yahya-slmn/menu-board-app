@@ -90,6 +90,10 @@ class CutterMask {
   dispose() { this.texture.dispose(); }
 }
 
+// How much taller the sheet's middle gets at full rise (fraction of its raw thickness); the portion view's
+// estimated baked thickness uses the same number.
+export const RISE_H = 0.95;
+
 export function createSheet({ region, plan, thicknessCm, seed = 7 }) {
   const H = thicknessCm;
   const sdf = sdfFor(region);
@@ -99,7 +103,6 @@ export function createSheet({ region, plan, thicknessCm, seed = 7 }) {
   const rand = rng(seed * 7919 + 5), ox = rand() * 100, oz = rand() * 100;
   const n = verts.length;
   const pos = new Float32Array(n * 3), taller = new Float32Array(n * 3), rho = new Float32Array(n);
-  const RISE_H = 0.95;
   verts.forEach(([x, y], k) => {
     const d = Math.max(0, sdf(x, y));
     const roll = Math.sqrt(Math.max(0, 1 - Math.pow(1 - Math.min(d / rollW, 1), 2)));

@@ -241,13 +241,29 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   a piece never moves because the camera did. The side-view inset is an orthographic second render into a
   scissored corner of the same canvas (fog off, `shadowMap.autoUpdate` false, CSS-px viewport), eased to the
   tray or the held piece; a DOM frame is drawn over it, clicks inside it are blocked, and it hides during the
-  bake. The chip / toggle / view buttons sit over the stage, so on a narrow stage a container query drops
+  bake. It is on by default in Shape & Place and OFF by default in Sheet & Trim (a baked sheet is ~1 cm thick, so it
+  shows a thin line); the button still turns it on, and each method remembers its own choice
+  (`rofSideView` / `rofSideViewSheet`). The chip / toggle / view buttons sit over the stage, so on a narrow stage a container query drops
   the scrap row under the view buttons rather than letting them overlap.
+- One-portion view (`portion.js`, opened from the panel's "One portion" button: Bake step in Shape & Place, Trim step in
+  Sheet & Trim once a cutter is placed): `game.showPortion(desc)` hides the tray / bench / sheet / cutters (visibility
+  only -- `hidePortion` restores exactly what was there), shows ONE baked portion on a board, dimension lines drawn
+  over it on a 2D canvas, and a card along the bottom. `desc` is plain data built by `portionDescShape` /
+  `portionDescSheet` in renderer.js (raw sizes + the rise model's `hMul` / `wMul`); `RofGame.measurePortion(desc)` is
+  the pure arithmetic (piece: length x (1 + R.l * wMul), width x (1 + R.w * wMul), height x (1 + R.h * hMul), the
+  same morph the dough shader applies; cut piece: raw thickness x (1 + sheet `RISE_H` * hMul)). Anything that comes
+  from the rise model is labelled "est."; cutter sizes and the dough weight are exact. `frameModel` zooms / slides
+  the camera by PROJECTING the board, the piece and every label box into the free area (between the view buttons and
+  the card), so any size -- 3 cm or 50 cm -- fits; it must run at the final pose (no dolly-in). Several cutter types on
+  the sheet give a chooser on the card. Every game call that changes the tray closes the view first, and Escape
+  closes it. `game.capturePortion(desc)` returns a JPEG (data URL) of the portion with the dimension lines baked in,
+  for the PDF; it works whether or not the view is open and leaves everything as it found it.
 - No scrolling to reach anything on this screen: every step's controls and the sticky `.rof-actions` bar fit at
   the default window (1280x800). Check `main.scrollHeight <= main.clientHeight` on every step after adding a
   control; that was a recurring regression.
 - Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake, the shape presets, performance tiers,
-  accessibility, portions by grams, exact cutter packing with scrap flags and the camera views / side view are done (shape-presets migration applied to Supabase 2026-09-20). Left:
+  accessibility, portions by grams, exact cutter packing with scrap flags, the camera views / side view and the
+  one-portion view are done (shape-presets migration applied to Supabase 2026-09-20). Left:
   removing the old Dough Shapes screen,
   `dough_shape_photos`, the `dough-shape-photos` bucket, the `generate-dough-shape-image` edge function and
   `lib/doughShapes.js` / `lib/generateDoughShapeImage.js` (gated on the photo backup -- see

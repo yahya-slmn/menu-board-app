@@ -293,6 +293,7 @@ export function createInteraction({ stage, getItems, getRegion, getFloorY, emit,
       if (region) { const f = fitInside(region, polyAt(item, x, y)); px += f.x; py += f.y; fits = f.ok; }
       return { x: px, y: py, valid: fits && !overlapsOthers(item, px, py) };
     },
+    isEnabled: () => enabled,
     setEnabled(on) { enabled = on; if (!on && dragging) { dragging.dragging = false; dragging = null; } },
     get selected() { return selected; },
     forget(item) { if (hovered === item) hovered = null; if (selected === item) selected = null; if (dragging === item) dragging = null; },

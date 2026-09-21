@@ -112,7 +112,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
     rig.pitch = THREE.MathUtils.clamp(rig.pitch + dPitch, PITCH_MIN, PITCH_MAX);
     placeCamera(); requestRender();
   }
-  function fit({ cx, cy, radius }) {
+  function fit({ cx, cy, radius, instant = false }) {
     rig.target.set(cx, 0, -cy);
     rig.radius = Math.max(radius, 4);
     // Key light follows the tray so its shadow map covers exactly the tray -- sharper shadows.
@@ -122,7 +122,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
     Object.assign(key.shadow.camera, { left: -s, right: s, top: s, bottom: -s, near: 1, far: rig.radius * 12 });
     key.shadow.camera.updateProjectionMatrix();
     rig.zoom = rig.zoomTarget = 1;
-    rig.intro = prefersReducedMotion() ? 1 : 0; rig.introStart = performance.now();
+    rig.intro = instant || prefersReducedMotion() ? 1 : 0; rig.introStart = performance.now();
     placeCamera();
     requestRender();
   }
@@ -270,6 +270,11 @@ export function createStage(container, { tier: forcedTier } = {}) {
     if (active) { governor.sample(rawDt); if (!raf) raf = requestAnimationFrame(frame); }
     else { last = 0; governor.reset(); }
   }
+  // Draw one frame right now (for reading the canvas back: a WebGL canvas is only readable in the task that drew it).
+  function renderNow() {
+    placeCamera();
+    if (post) post.render(0); else renderer.render(scene, camera);
+  }
   function requestRender() {
     dirty = true;
     if (!raf && !disposed) raf = requestAnimationFrame(frame);
@@ -287,10 +292,17 @@ export function createStage(container, { tier: forcedTier } = {}) {
     post?.setSize(w, h);
     canvas.style.width = '100%'; canvas.style.height = '100%';
     camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+    applyShift();
     placeCamera();
     requestRender();
   }
+  // Slide the picture up by `px` (the portion view keeps its subject clear of a card along the bottom). 0 = centred.
+  let shiftPx = 0, shiftPxX = 0;
+  function applyShift() {
+    const w = container.clientWidth, h = container.clientHeight;
+    if ((shiftPx || shiftPxX) && w && h) camera.setViewOffset(w, h, shiftPxX, shiftPx, w, h); else { camera.clearViewOffset(); camera.updateProjectionMatrix(); }
+  }
+  function setContentShift(px, pxX = 0) { shiftPx = px || 0; shiftPxX = pxX || 0; applyShift(); requestRender(); }
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
 
@@ -305,7 +317,7 @@ export function createStage(container, { tier: forcedTier } = {}) {
     THREE, renderer, scene, camera, canvas, key, gpu,
     get tier() { return tier; },
     get fps() { return governor.fps; },
-    fit, animate, requestRender, resize, setView, setOvenLook,
+    fit, animate, requestRender, renderNow, resize, setContentShift, setView, setOvenLook,
     VIEWS, viewName, setViewAngles, orbitBy, getView: () => ({ yaw: rig.yaw, pitch: rig.pitch, name: viewName() }),
     onCameraChange(fn) { camListeners.add(fn); return () => camListeners.delete(fn); },
     setInset(on) { insetOn = !!on; requestRender(); }, setInsetFocus, get insetOn() { return insetOn; }, getInsetRect: insetRect,
