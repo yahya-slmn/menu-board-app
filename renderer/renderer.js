@@ -9459,6 +9459,27 @@ function renderRecipeOnFireView(main) {
   // What one baked portion looks like and measures. Sizes that come from the rise model are marked `est`.
   const cmText = (v, est = false) => window.RofGame.fmtCm(v, est);
   const cmSpeech = (v) => `${Math.round(v * 10) / 10} centimetres`;
+  // What a portion weighs, and what raw dough it took. The recipe's Net Weight is a FINISHED yield: every waste row, Baking Waste
+  // included, is already taken off it, and Portion Weight / Portions Produced everywhere else in the app (Recipe Book, Calculator)
+  // are finished weights too -- so a portion's weight here is a finished weight, and nothing further is deducted from it. The
+  // raw dough it started from is that weight put back through the Baking Waste: portion / (1 - baking %). Every waste row named
+  // like "baking" counts (they combine, each taking its % off what is left); a recipe without one has no baking loss to add back.
+  function bakingLoss() {
+    const rows = combinedWastes.filter(w => /baking/i.test(w.name || ''));
+    if (rows.length === 0) return { found: false };
+    const retention = rows.reduce((acc, w) => acc * (1 - Math.min(Math.max(parseFloat(w.percent) || 0, 0), 100) / 100), 1);
+    return { found: true, retention, usable: retention > 0.001 };
+  }
+  // The two weight rows at the top of the portion card: finished weight, then raw dough before baking (or "no Baking Waste").
+  function portionWeightRows(finishedGrams) {
+    const P = window.RofGame.portions, b = bakingLoss();
+    return [
+      { key: 'weight', label: 'Portion weight (finished)', value: `${P.fmtGrams(finishedGrams)} g` },
+      b.found && b.usable
+        ? { key: 'raw', label: 'Raw dough before baking', value: `${P.fmtGrams(finishedGrams / b.retention)} g`, est: true }
+        : { key: 'raw', label: 'Before baking', value: 'no Baking Waste' },
+    ];
+  }
   function trayCard(note) {
     const m = bakeSnapshot.material;
     return { name: m.name, dims: formatMaterialDimensions(m), note };
@@ -9469,7 +9490,7 @@ function renderRecipeOnFireView(main) {
     const grams = isMuffinTray() ? bakeSnapshot.netWeight / placeSession.count : placeSession.grams;
     const desc = { kind: 'piece', spec: placeSession.spec, hMul: model.hMul, wMul: model.wMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
     const m = window.RofGame.measurePortion(desc), raw = m.raw;
-    const rows = [{ label: 'Dough weight', value: `${P.fmtGrams(grams)} g` }];
+    const rows = portionWeightRows(grams);
     if (m.round) rows.push({ label: 'Diameter', value: cmText(m.lengthCm, true), est: true });
     else rows.push({ label: 'Length', value: cmText(m.lengthCm, true), est: true }, { label: 'Width', value: cmText(m.widthCm, true), est: true });
     rows.push({ label: 'Height', value: cmText(m.heightCm, true), est: true });
@@ -9480,7 +9501,7 @@ function renderRecipeOnFireView(main) {
       ...desc, measures: m, weightGrams: grams, title: 'One portion', subtitle: `${name} · ${doneLabelOf(bakeDoneness)}`, rows,
       tray: trayCard(`${pl.placed} of ${pl.total} pieces on the tray`),
       footnote: 'est. = from the rise estimate, not measured.',
-      speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams of dough. About ${cmSpeech(m.lengthCm)} ${m.round ? 'across' : 'long'}${m.round ? '' : `, ${cmSpeech(m.widthCm)} wide`}, ${cmSpeech(m.heightCm)} tall, estimated.`,
+      speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams finished. About ${cmSpeech(m.lengthCm)} ${m.round ? 'across' : 'long'}${m.round ? '' : `, ${cmSpeech(m.widthCm)} wide`}, ${cmSpeech(m.heightCm)} tall, estimated.`,
     };
   }
   function cutGroups() {
@@ -9501,7 +9522,7 @@ function renderRecipeOnFireView(main) {
     const m = window.RofGame.measurePortion(desc);
     const grams = (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams;
     const mat = cutterMaterials.find(x => String(x.id) === g.key);
-    const rows = [{ label: 'Dough weight', value: `${P.fmtGrams(grams)} g` }];
+    const rows = portionWeightRows(grams);
     if (g.data.shapeType === 'round') rows.push({ label: 'Diameter', value: cmText(m.diameterCm) });
     else if (g.data.shapeType === 'rectangular') rows.push({ label: 'Length', value: cmText(m.lengthCm) }, { label: 'Width', value: cmText(m.widthCm) });
     else rows.push({ label: 'Base', value: cmText(m.baseCm) }, { label: 'Height', value: cmText(m.triHeightCm) });
@@ -9515,7 +9536,7 @@ function renderRecipeOnFireView(main) {
       tray: trayCard(`${g.n} of ${cutterList.length} pieces cut`),
       choices, chosen: g.key, onChoose: (k) => openPortionView(k),
       footnote: 'est. = from the rise estimate, not measured.',
-      speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams of dough, ${cutterPieceSizeLabel(g.data.shapeType, g.data.dims)}, about ${cmSpeech(m.heightCm)} thick, estimated.`,
+      speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams finished, ${cutterPieceSizeLabel(g.data.shapeType, g.data.dims)}, about ${cmSpeech(m.heightCm)} thick, estimated.`,
     };
   }
   const doneLabelOf = (d) => ({ light: 'Light', golden: 'Golden', dark: 'Dark' }[d] || 'Golden');
@@ -9572,7 +9593,7 @@ function renderRecipeOnFireView(main) {
       const groups = cutGroups();
       const thick = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
       make = { title: 'Sheet & cutters', rows: [
-        { label: 'Dough on this tray', value: g(sheetInfo.sessionGrams), note: sheetInfo.sessions > 1 ? `This batch needs ${sheetInfo.sessions} trays; the figures below are for one.` : '' },
+        { label: 'Net Weight on this tray', value: g(sheetInfo.sessionGrams), note: sheetInfo.sessions > 1 ? `This batch needs ${sheetInfo.sessions} trays; the figures below are for one.` : '' },
         { label: 'Sheet thickness', value: `${Math.round(thick * 100) / 10} mm`, note: `about ${window.RofGame.fmtCm(desc.measures.heightCm, true)} once baked (est.)` },
         ...groups.map(x => {
           const mat = cutterMaterials.find(c => String(c.id) === x.key);
@@ -9587,18 +9608,24 @@ function renderRecipeOnFireView(main) {
       make = { title: 'Shape & pieces', rows: [
         { label: 'Shape', value: s.shape.label || s.shape.name || 'Piece' },
         { label: 'Size before rising', value: `${roundNice(raw.lengthCm)} × ${roundNice(raw.widthCm)} × ${roundNice(raw.heightCm)} cm` },
-        { label: 'Portion weight', value: g(desc.weightGrams) },
+        { label: 'Portion weight (finished)', value: g(desc.weightGrams) },
         { label: 'Pieces on the tray', value: `${pl.placed} of ${pl.total}` },
         ...(s.leftover > 0 && !isMuffinTray() ? [{ label: 'Dough not used', value: g(s.leftover), emphasis: true, note: 'left over after whole portions' }] : []),
       ] };
     }
 
-    // One portion, with the estimated baked weight from the recipe's own Baking Waste.
-    const bi = wasteIdx(/baking/i), portionRows = desc.rows.filter(r => r.label !== 'Before rising' || !sheetMode).map(r => ({ ...r }));
-    const bakedRow = bi >= 0
-      ? { label: 'Est. baked weight', value: g(desc.weightGrams * (1 - pctOf(combinedWastes[bi]) / 100)), est: true, note: `dough weight less the recipe's ${fmtPct(pctOf(combinedWastes[bi]))} Baking Waste` }
-      : { label: 'Est. baked weight', value: 'not available', note: "this recipe has no Baking Waste in its wastage" };
-    portionRows.splice(1, 0, bakedRow);
+    // One portion: its finished weight (from the recipe's Net Weight -- nothing further is deducted) and the raw dough it took, which
+    // is that weight put back through the recipe's Baking Waste. See bakingLoss.
+    const bl = bakingLoss(), bi = wasteIdx(/baking/i);
+    const portionRows = desc.rows.filter(r => r.label !== 'Before rising' || !sheetMode).map(r => {
+      if (r.key === 'weight') return { label: 'Portion weight (finished, from Net Weight)', value: r.value };
+      if (r.key === 'raw') {
+        return bl.found && bl.usable
+          ? { label: 'Raw dough before baking', value: r.value, est: true, note: `portion weight ÷ (1 − ${fmtPct((1 - bl.retention) * 100)} Baking Waste)` }
+          : { label: 'Raw dough before baking', value: 'not applicable', note: bl.found ? 'Baking Waste leaves nothing to work from' : 'No Baking Waste in this recipe' };
+      }
+      return { ...r };
+    });
 
     // Waste: the recipe's own figures, and (Sheet & Trim) the scrap measured from the cutter layout -- each with its own base.
     const waste = [];
@@ -9633,7 +9660,7 @@ function renderRecipeOnFireView(main) {
       ],
       footnotes: [
         'est. = estimated from the rise model, not measured.',
-        'Est. baked weight applies the recipe’s Baking Waste % to the dough weight of one portion.',
+        'Portion weights are finished weights: the recipe’s Net Weight already has its wastes, Baking Waste included, taken off. Raw dough before baking is the portion weight put back through the Baking Waste.',
         'Generated by Menu Board · Recipe on Fire.',
       ],
     };

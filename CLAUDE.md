@@ -284,11 +284,14 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the page a step at a time until it is ONE A4 page. A print window needs the app to have another window open
   (Electron quits when the last window closes) -- true in the app, but test scripts need a keep-alive window.
   The PDF keeps the planned Trimming Waste % (recipe, base = the running total before it) and the measured scrap
-  (cutter layout, base = dough on this tray) as two separately labelled figures; never merge them. "Est. baked weight"
-  is the portion's dough weight x (1 - the recipe's Baking Waste %), or "not available" if the recipe has none.
-  NOTE: the recipe's Net Weight already has its wastes (Baking Waste included) taken off, so the dough laid out on
-  the tray is the net figure and this can count baking loss twice for a recipe that lists Baking Waste -- see the
-  open question in the milestone report before relying on it.
+  (cutter layout, base = dough on this tray) as two separately labelled figures; never merge them.
+  Portion weights in Recipe on Fire are FINISHED weights, like Portion Weight / Portions Produced everywhere else in the app: the
+  recipe's Net Weight already has every waste row, Baking Waste included, taken off, and pieces are counted as
+  floor(Net Weight / portion weight). Nothing further is deducted from a portion. "Raw dough before baking (est.)" is the portion
+  weight put back through the Baking Waste, portion / (1 - baking %) (`bakingLoss` / `portionWeightRows` in renderer.js; every
+  waste row named like "baking" counts, combined); a recipe without one shows "No Baking Waste in this recipe". The 3D pieces are
+  still sized from the finished weight (drawing them from the raw weight would make them ~3% wider with an 8.5% baking waste;
+  deliberately not done -- revisit only if it becomes a visible complaint).
 - No scrolling to reach anything on this screen: every step's controls and the sticky `.rof-actions` bar fit at
   the default window (1280x800). Check `main.scrollHeight <= main.clientHeight` on every step after adding a
   control; that was a recurring regression.
