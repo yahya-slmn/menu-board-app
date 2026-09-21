@@ -39,7 +39,7 @@ const {
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const {
-  normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
+  normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
 
 let mainWindow;
@@ -2064,6 +2064,8 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
     async function generateBatch(batchDishes) {
       const payloadItems = batchDishes.map((d, idx) => ({
         index: idx, name: d.name, category: d.category || undefined, seafoodAllowed: d.section === 'STAFF',
+        // Salad-category dishes get their dressing as its own process -- decided here in code, like seafoodAllowed.
+        separateDressing: isSaladCategory(d.category),
       }));
       let recipes;
       try {

@@ -24,11 +24,14 @@
 // ~8 per call) given how much larger a full recipe is than one ingredient string -- see
 // lib/generateDishRecipes.js.
 //
-// 100g standardization happens AFTER this call, not inside the prompt: the model is asked for a
+// Size standardization happens AFTER this call, not inside the prompt: the model is asked for a
 // realistic natural-scale recipe (LLMs are unreliable at hitting an exact numeric total), and
-// main.js mathematically normalizes every ingredient quantity to sum to ~100g afterward, using
-// the same multiplier = target / sum(quantities) math Recipe Calculator's own "scale to target
-// quantity" mode already relies on.
+// main.js mathematically scales every ingredient afterward so the recipe's NET WEIGHT (each
+// process's waste-adjusted total, summed) is exactly 150 g -- see normalizeProcessesToNetWeight in
+// lib/recipeGenerator.js -- so the natural sizes here only need to have sensible RATIOS.
+//
+// Salad dishes: each item carries a "separateDressing" flag (true for any Salad-category dish,
+// decided in main.js like seafoodAllowed) -- see SALAD_DRESSING_RULE below.
 //
 // Same index-tagged batch in/out convention as estimate-calories/suggest-dish-ingredients, for
 // the same reason (Haiku doesn't reliably preserve exact 1:1 correspondence over a batch of many
@@ -56,6 +59,8 @@ interface DishItem {
   // lib/recipeGenerator.js's isStudentSection/resolveSectionFromSheetName. true only for Staff;
   // every student section (and an unresolvable/unknown section) is false.
   seafoodAllowed: boolean;
+  // Computed in main.js from the menu category (any category containing "salad", case-insensitive).
+  separateDressing: boolean;
 }
 
 const RECIPE_SCHEMA = {
@@ -153,6 +158,19 @@ When "seafoodAllowed" is true (a Staff dish): seafood/fish is fully permitted. G
 
 For every item you do NOT skip, set "skipReason" to null.`;
 
+// A Salad dish's dressing is its own process (chef request: "Salad" + "Dressing", the way Ciabatta already splits into a biga and a
+// final dough) rather than being lumped in with the leaves and vegetables. The first process keeps the DISH's name (more useful to a
+// chef scanning recipes than a generic "Salad"); the second is always named "Dressing". The flag is decided in code from the
+// category, so the model never has to guess whether a dish counts as a salad. A salad with no dressing at all stays one process.
+const SALAD_DRESSING_RULE = `Each item also carries a "separateDressing" flag -- follow it per item, since a single batch can mix salads and other dishes:
+
+When "separateDressing" is true (the dish is in a Salad category) and the salad has a dressing:
+- Generate exactly TWO processes. The FIRST is the salad itself -- every ingredient except the dressing -- and is named exactly after the dish (the dish name as given). The SECOND is named exactly "Dressing" and holds ONLY the dressing's own ingredients (oil, vinegar, lemon juice, yoghurt, herbs, seasoning, etc.) and its own method steps (how to mix it).
+- Never put a dressing ingredient in the first process. The first process's method may say to toss or serve with the dressing, but must not describe making it.
+- If the dish genuinely has no dressing (for example a plain fruit salad served as is), generate a single process as usual -- do not invent a dressing.
+
+When "separateDressing" is false or absent, ignore this rule: follow the normal process rule (one process for a simple dish) even if the dish happens to include a dressing.`;
+
 // Shorter version of suggest-dish-ingredients' own DECOMPOSITION_RULE -- a full recipe's
 // ingredient list is inherently more decomposed than a bare ingredient-name suggestion (you
 // can't write a real method step around "dough" without saying what's in it), but the same
@@ -210,10 +228,12 @@ ${PLAIN_STAPLE_RULE}
 
 ${SEAFOOD_RESTRICTION}
 
+${SALAD_DRESSING_RULE}
+
 For each dish, generate:
 - "name": the dish name (use the given name, cleaned up if needed).
 - "skipReason": see the seafood restriction above -- null unless you are genuinely declining this specific item.
-- "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish. Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen. Empty array only when "skipReason" is set.
+- "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish (except a dish flagged "separateDressing", which follows the salad rule above). Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen. Empty array only when "skipReason" is set.
 - Each process's "ingredients": every real base ingredient it needs, each with a realistic quantity for a normal/standard batch of this dish (NOT scaled to any particular total -- just a natural, realistic recipe). See the units rule above for how quantity/unit must be expressed -- it applies to every ingredient, no exceptions. "method" on an ingredient is a short prep note (e.g. "diced", "melted"), or null if none.
 - Each process's "method_steps": one array entry per distinct preparation step, in order.
 - Each process's "wastes": see the rule below.
@@ -254,7 +274,7 @@ Deno.serve(async (req) => {
   // "unknown means restricted, never permitted" principle main.js's own resolveSectionFromSheetName
   // caller already applies before this ever gets sent.
   const items = Array.isArray(body.items)
-    ? body.items.map((it) => ({ ...it, seafoodAllowed: it?.seafoodAllowed === true }))
+    ? body.items.map((it) => ({ ...it, seafoodAllowed: it?.seafoodAllowed === true, separateDressing: it?.separateDressing === true }))
     : body.items;
   const existingWasteTypeNames = Array.isArray(body.existingWasteTypeNames)
     ? body.existingWasteTypeNames.filter((n): n is string => typeof n === "string")
