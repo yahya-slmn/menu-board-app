@@ -87,13 +87,6 @@ const state = {
   // exist at all for view/formId/pendingPhoto/removePhoto, the same three things every other
   // list<->form screen's own state slice needs.
   materials: { view: 'list', formId: null, pendingPhoto: null, removePhoto: false },
-  // Dough Shapes catalog (Recipe on Fire pivot, Phase A) -- same list<->form drill-down shape as
-  // Materials above, but simpler (no photo upload of her own -- every photo here is AI-generated
-  // as a full 9-image set at creation time, never edited afterward; deleting and re-creating is
-  // the whole "edit" story for now, matching how small/rare this catalog is expected to stay).
-  // 'gallery' is a third view mode (list -> add-shape-form, or list -> gallery for an existing
-  // shape's own full 9-photo set) -- galleryShapeId only matters while view === 'gallery'.
-  doughShapes: { view: 'list', galleryShapeId: null },
 };
 
 // Recipe Book and Recipe Extractor are two fully separate tables (see CLAUDE.md-equivalent
@@ -767,8 +760,8 @@ function wireSidebarToggle() {
     const next = !isSidebarCollapsed();
     applySidebarState(next);
     try { localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0'); } catch { /* just doesn't persist */ }
-    // The 3D views (Recipe on Fire, Dough Shapes) size their canvas from window 'resize' --
-    // fire one once the width transition settles so they pick up the new main-area width.
+    // Recipe on Fire's 3D view sizes its canvas from window 'resize' -- fire one once the width
+    // transition settles so it picks up the new main-area width.
     setTimeout(() => window.dispatchEvent(new Event('resize')), 220);
   });
 
@@ -831,7 +824,6 @@ async function renderView() {
   if (state.currentView === 'ingredients') return await renderIngredientsView(main);
   if (state.currentView === 'extractedIngredients') return await renderExtractedIngredientsView(main);
   if (state.currentView === 'materials') return await renderMaterialsView(main);
-  if (state.currentView === 'doughShapes') return await renderDoughShapesView(main);
   } catch (error) { showViewError(error); }
 }
 
@@ -10375,205 +10367,5 @@ async function renderMaterialFormView(main) {
   });
 }
 
-// ============================================================
-// Dough Shapes (Recipe on Fire pivot, Phase A) -- see state.doughShapes' own comment. This view's
-// ONLY job right now is proving the reference-image pipeline actually works and looks real: add
-// a shape, watch its 9-photo set generate, see the result as an actual gallery (on a checkerboard
-// background specifically so a transparent-background photo that DIDN'T cut out cleanly is
-// visually obvious, not something she'd have to guess at). The canvas/drag placement UI that
-// actually CONSUMES this catalog is a later phase -- nothing here talks to Recipe on Fire yet.
-// ============================================================
-
-const DOUGH_SHAPE_GALLERY_STAGES = ['raw', 'baked', 'cut'];
-
-function renderDoughShapesView(main) {
-  const s = state.doughShapes;
-  if (s.view === 'form') return renderDoughShapeFormView(main);
-  if (s.view === 'gallery') return renderDoughShapeGalleryView(main);
-  return renderDoughShapesListView(main);
-}
-
-function openNewDoughShapeForm() {
-  state.doughShapes.view = 'form';
-  renderView();
-}
-
-function goBackToDoughShapesList() {
-  state.doughShapes.view = 'list';
-  state.doughShapes.galleryShapeId = null;
-  renderView();
-}
-
-async function renderDoughShapesListView(main) {
-  const shapes = await window.api.listDoughShapes();
-
-  main.innerHTML = `
-    <div class="topbar">
-      <div><h1>Dough Shapes</h1><span class="page-description">Real AI-generated reference photos for Recipe on Fire's dough placement</span></div>
-      <button class="primary" id="add-dough-shape-btn">+ Add Dough Shape</button>
-    </div>
-    <div id="dough-shapes-content"><div class="loading-state" role="status">Loading…</div></div>
-  `;
-  document.getElementById('add-dough-shape-btn').addEventListener('click', openNewDoughShapeForm);
-
-  const content = document.getElementById('dough-shapes-content');
-  if (shapes.length === 0) {
-    content.innerHTML = `<div class="empty-state"><div class="display">No dough shapes yet</div>Click "+ Add Dough Shape" to generate the first one's reference photos.</div>`;
-    return;
-  }
-
-  // Thumbnail = the first "baked" variation -- the stage a chef would recognize a shape by at a
-  // glance, same reasoning a recipe card's own photo is always the finished dish, not a raw prep
-  // shot.
-  const thumbEntries = await Promise.all(shapes.map(async (shape) => {
-    const bakedFirst = shape.photosByStage.baked?.[0];
-    const dataUrl = bakedFirst ? await window.api.getDoughShapePhoto(bakedFirst.photo_path) : null;
-    return { shape, dataUrl };
-  }));
-
-  content.innerHTML = `
-    <div class="dough-shape-grid">
-      ${thumbEntries.map(({ shape, dataUrl }) => `
-        <div class="dough-shape-card" data-shape-id="${shape.id}" tabindex="0" role="button" aria-label="View ${shape.name}">
-          <div class="dough-shape-image">
-            ${dataUrl ? `<img src="${dataUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />` : '<span style="color:var(--neutral); font-size:12px;">No photo</span>'}
-          </div>
-          <div class="dough-shape-name">${shape.name}</div>
-          <div class="dough-shape-meta">${roundNice(shape.unit_weight_grams)} g &nbsp;·&nbsp; ${roundNice(shape.size_cm)} cm</div>
-          <button class="icon-btn danger" data-delete-shape="${shape.id}" style="margin-top:8px;">Delete</button>
-        </div>
-      `).join('')}
-    </div>
-  `;
-  content.querySelectorAll('[data-shape-id]').forEach(card => {
-    card.addEventListener('keydown', (event) => {
-      if (event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); card.click(); }
-    });
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('[data-delete-shape]')) return;
-      state.doughShapes.view = 'gallery';
-      state.doughShapes.galleryShapeId = parseInt(card.dataset.shapeId, 10);
-      renderView();
-    });
-  });
-  content.querySelectorAll('[data-delete-shape]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const id = parseInt(btn.dataset.deleteShape, 10);
-      const shape = shapes.find(sh => sh.id === id);
-      if (!confirm(`Delete "${shape.name}" and all its reference photos? This cannot be undone.`)) return;
-      await window.api.deleteDoughShape(id);
-      renderView();
-    });
-  });
-}
-
-function renderDoughShapeFormView(main) {
-  main.innerHTML = `
-    <div class="topbar">
-      <div><h1>Add Dough Shape</h1><span class="page-description">Generates 9 real reference photos (raw/baked/cut &times; 3 variations each) via AI</span></div>
-    </div>
-    <button class="secondary" id="dough-shape-form-back-btn" style="margin-bottom:14px;">← Back to Dough Shapes</button>
-    <div style="font-size:12.5px; color:var(--neutral); margin-bottom:14px; max-width:560px;">
-      Each shape includes nine AI-generated reference images. Allow about 2–3 minutes; image-generation charges apply. Choose a shape you will reuse in your kitchen.
-    </div>
-    <div class="generate-controls" style="margin-bottom:14px;">
-      <div class="field" style="max-width:260px;">
-        <label>Name</label>
-        <input id="dough-shape-name" placeholder="e.g. Round Ball" />
-      </div>
-      <div class="field" style="max-width:160px;">
-        <label>Unit Weight (g)</label>
-        <input id="dough-shape-weight" type="number" min="0" step="1" placeholder="e.g. 80" />
-      </div>
-      <div class="field" style="max-width:200px;">
-        <label>Size (cm) <span title="Diameter for a round shape, length for an elongated one (baguette-style) -- used later to scale this shape correctly against a tray's real dimensions." style="cursor:help; color:var(--neutral); font-weight:normal;">ⓘ</span></label>
-        <input id="dough-shape-size" type="number" min="0" step="0.5" placeholder="e.g. 8" />
-      </div>
-    </div>
-    <button class="primary" id="dough-shape-generate-btn">Generate Reference Photos</button>
-    <div id="dough-shape-progress-wrap" style="margin-top:16px; max-width:480px;"></div>
-  `;
-  document.getElementById('dough-shape-form-back-btn').addEventListener('click', goBackToDoughShapesList);
-
-  document.getElementById('dough-shape-generate-btn').addEventListener('click', async () => {
-    const name = document.getElementById('dough-shape-name').value.trim();
-    const unitWeightGrams = document.getElementById('dough-shape-weight').value;
-    const sizeCm = document.getElementById('dough-shape-size').value;
-    if (!name) { alert('Name is required.'); return; }
-    if (!unitWeightGrams || !sizeCm) { alert('Unit weight and size are both required.'); return; }
-
-    const genBtn = document.getElementById('dough-shape-generate-btn');
-    genBtn.disabled = true;
-    const progressWrap = document.getElementById('dough-shape-progress-wrap');
-    const panel = createProgressPanel(progressWrap, { label: 'Starting…' });
-    const unsubscribe = window.api.onDoughShapeGenerateProgress((payload) => panel.update(payload));
-
-    try {
-      const result = await window.api.createDoughShape({ name, unitWeightGrams, sizeCm });
-      if (!result.success) {
-        if (!result.cancelled) alert(`Couldn't generate this shape: ${result.error}`);
-        return;
-      }
-      state.doughShapes.view = 'gallery';
-      state.doughShapes.galleryShapeId = result.id;
-      renderView();
-    } catch (err) {
-      alert(`Couldn't generate this shape: ${err.message}`);
-    } finally {
-      unsubscribe();
-      panel.destroy();
-      if (document.body.contains(genBtn)) genBtn.disabled = false;
-    }
-  });
-}
-
-async function renderDoughShapeGalleryView(main) {
-  const shapes = await window.api.listDoughShapes();
-  const shape = shapes.find(sh => sh.id === state.doughShapes.galleryShapeId);
-  const backBtn = `<button class="secondary" id="dough-shape-back-btn" style="margin-bottom:14px;">← Back to Dough Shapes</button>`;
-
-  if (!shape) {
-    main.innerHTML = `${backBtn}<div class="empty-state">This dough shape no longer exists.</div>`;
-    document.getElementById('dough-shape-back-btn').addEventListener('click', goBackToDoughShapesList);
-    return;
-  }
-
-  main.innerHTML = `
-    <div class="topbar">
-      <div><h1>${shape.name}</h1><span class="page-description">${roundNice(shape.unit_weight_grams)} g per unit &middot; ${roundNice(shape.size_cm)} cm</span></div>
-    </div>
-    ${backBtn}
-    <div id="dough-shape-gallery"><div class="loading-state" role="status">Loading photos…</div></div>
-  `;
-  document.getElementById('dough-shape-back-btn').addEventListener('click', goBackToDoughShapesList);
-
-  const galleryEl = document.getElementById('dough-shape-gallery');
-  const stageLabels = { raw: 'Raw', baked: 'Baked', cut: 'Cut / Portioned' };
-  // Checkerboard background behind every thumbnail -- these photos are meant to have a
-  // TRANSPARENT background (see generate-dough-shape-image's own prompt); a checkerboard showing
-  // through is the standard, unambiguous way to confirm that actually worked, rather than a solid
-  // background color that could just as easily mean "opaque white" as "correctly transparent."
-  const checkerStyle = 'background:repeating-conic-gradient(#e2ddcf 0% 25%, #f6f3e9 0% 50%) 0 0/20px 20px;';
-
-  const sections = await Promise.all(DOUGH_SHAPE_GALLERY_STAGES.map(async (stage) => {
-    const photos = shape.photosByStage[stage] || [];
-    const dataUrls = await Promise.all(photos.map(p => window.api.getDoughShapePhoto(p.photo_path)));
-    return { stage, dataUrls };
-  }));
-
-  galleryEl.innerHTML = sections.map(({ stage, dataUrls }) => `
-    <section class="dough-gallery-stage">
-      <h2>${stageLabels[stage]}</h2>
-      <div class="dough-gallery-grid">
-        ${dataUrls.length === 0 ? '<span style="color:var(--neutral); font-size:12.5px;">No photos for this stage.</span>' : dataUrls.map(url => `
-          <div class="dough-gallery-tile" style="${checkerStyle}">
-            <img src="${url}" style="max-width:100%; max-height:100%; object-fit:contain;" />
-          </div>
-        `).join('')}
-      </div>
-    </section>
-  `).join('');
-}
 
 init().catch(showViewError);

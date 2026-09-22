@@ -214,9 +214,8 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
 - Shape presets are chef-configurable: rows of `dough_shapes` (name, weight, `archetype` ball / disc / log /
   oval, length / width / height, taper, slash count), edited in the "Edit shapes…" modal in Shape & Place
   (`openShapesModal`, with a live 2D outline from `shapePreview`). `lib/doughShapePresets.js` validates and
-  saves; "Delete" ARCHIVES (`archived = true`) because `dough_shape_photos` cascades on delete, and
-  re-adding an archived name revives that row. The columns come from
-  `supabase/migrations/20260920100000_dough_shape_presets.sql` (additive only). Until it is applied,
+  saves; "Delete" ARCHIVES (`archived = true`) -- re-adding an archived name revives that row. The columns
+  come from `supabase/migrations/20260920100000_dough_shape_presets.sql` (additive only). Until it is applied,
   `list-dough-shape-presets` answers `{ available: false }` and the screen falls back to the four built-in
   shapes (`SEED_SHAPES`, read-only; the Edit button explains why) -- nothing breaks.
 - Performance (measured on an M2, full-Retina 2560x1440-class buffer, 46 pieces): the frame was ~53 ms; the dough
@@ -298,10 +297,10 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
 - Milestone status: Setup, Shape & Place, Sheet & Trim, the Bake, the shape presets, performance tiers,
   accessibility, portions by grams, exact cutter packing with scrap flags, the camera views / side view, the
   one-portion view and the PDF export are done (shape-presets migration applied to Supabase 2026-09-20). Left:
-  removing the old Dough Shapes screen,
-  `dough_shape_photos`, the `dough-shape-photos` bucket, the `generate-dough-shape-image` edge function and
-  `lib/doughShapes.js` / `lib/generateDoughShapeImage.js` (gated on the photo backup -- see
-  `scripts/backup-dough-photos.js`).
+  applying the DB/infra cleanup the chef runs by hand (drop `dough_shape_photos`, delete the
+  `dough-shape-photos` bucket, undeploy `generate-dough-shape-image`) -- the app-side removal (old Dough
+  Shapes screen, `lib/doughShapes.js`, `lib/generateDoughShapeImage.js`, the nav entry) is done; `dough_shapes`
+  and its Shapes modal are the live, in-use feature and were untouched by that removal.
 
 ## Adding a new section or category
 

@@ -33,9 +33,6 @@ const {
 } = require('./lib/menuIngredients');
 const { generateDishRecipes } = require('./lib/generateDishRecipes');
 const { generateDishImage } = require('./lib/generateDishImage');
-const {
-  DOUGH_SHAPE_PHOTOS_BUCKET, createDoughShape, listDoughShapes, deleteDoughShape,
-} = require('./lib/doughShapes');
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const {
@@ -2852,50 +2849,12 @@ ipcMain.handle('delete-material', async (e, id) => {
   return { success: true };
 });
 
-// ============================================================
-// Dough Shapes -- a small, chef-managed catalog of REAL, AI-generated reference photos (round
-// ball, baguette, mini baguette, ciabatta, more later), replacing the 3D parametric dough render
-// the chef explicitly rejected as too game-like. All the real logic lives in lib/doughShapes.js
-// (generation/upload/DB, all-or-nothing per shape) -- these handlers are thin IPC wrappers around
-// it, same "pure helper, main.js orchestrates" split as lib/recipeGenerator.js. Recipe on Fire's
-// dough-placement step (Phase C) is what actually consumes this catalog now.
-// ============================================================
-
-// Race-guard against a second "Generate" click before the first shape's 9-image batch finishes --
-// same convention as recipeGenToken/menuIngredientsToken elsewhere in this file (avoid wasting
-// further real-money OpenAI calls on a generation nobody will see, not to prevent data loss).
-let doughShapeGenToken = null;
-
-ipcMain.handle('get-dough-shape-photo', async (e, photoPath) => {
-  if (!photoPath) return null;
-  const { data, error } = await supabase.storage.from(DOUGH_SHAPE_PHOTOS_BUCKET).download(photoPath);
-  if (error) throw supaFail('get-dough-shape-photo', error);
-  const buffer = Buffer.from(await data.arrayBuffer());
-  const ext = photoPath.split('.').pop().toLowerCase();
-  const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
-  return `data:${mime};base64,${buffer.toString('base64')}`;
-});
-
-ipcMain.handle('list-dough-shapes', async () => listDoughShapes());
-
 // Chef-configurable shape presets for Recipe on Fire's Shape & Place (lib/doughShapePresets.js).
 // `list` answers { available: false } instead of throwing while the migration hasn't been applied, so
 // the renderer can fall back to its built-in presets. "Delete" archives (see the lib for why).
 ipcMain.handle('list-dough-shape-presets', async () => doughShapePresets.listPresets());
 ipcMain.handle('save-dough-shape-preset', async (e, input) => doughShapePresets.savePreset(input));
 ipcMain.handle('delete-dough-shape-preset', async (e, id) => doughShapePresets.deletePreset(id));
-
-ipcMain.handle('create-dough-shape', async (e, { name, unitWeightGrams, sizeCm }) => {
-  const genToken = crypto.randomUUID();
-  doughShapeGenToken = genToken;
-  return createDoughShape({
-    name, unitWeightGrams, sizeCm,
-    onProgress: (payload) => e.sender.send('dough-shape-generate-progress', payload),
-    isCancelled: () => doughShapeGenToken !== genToken,
-  });
-});
-
-ipcMain.handle('delete-dough-shape', async (e, id) => deleteDoughShape(id));
 
 ipcMain.handle('list-recipes', async () => {
   const { data, error } = await supabase
