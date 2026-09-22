@@ -511,9 +511,18 @@ table.items-table td.cat-cell {
    Update showing would push the amount columns left of the rows without it. */
 .process-waste-row [data-update-waste][hidden] { display: inline-block !important; visibility: hidden; }
 /* Recipe on Fire's combined wastage panel -- name / % / note / remove, same fixed-column idea. */
-.rof-waste-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-.rof-waste-name { flex: 0 0 160px; min-width: 0; font-size: 13px; }
-.rof-waste-note { flex: 0 0 200px; font-size: 11px; color: var(--neutral); }
+/* Two lines, not one: name / % input / remove on the first, the "(recipe default: X%)" note wrapped onto
+   its own full-width line below. Recipe on Fire's side panel (~380px) is far narrower than the full
+   recipe form's own wastage table this reuses .process-waste-percent from, so the 160px name + 70px %
+   + 200px note that table uses side by side doesn't fit here -- it overflowed the panel and pushed the
+   remove button off the visible edge entirely (found investigating a chef report that the button was
+   missing; it wasn't, it was just rendered ~140px past the right edge). .rof-waste-note's 100% flex-basis
+   is what forces it onto its own line regardless of how long the name/note text is. */
+.rof-waste-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-bottom: 8px; }
+.rof-waste-name { flex: 1 1 auto; min-width: 50px; font-size: 13px; overflow-wrap: anywhere; }
+.rof-waste-row .process-waste-percent { flex: 0 0 56px; width: 56px; }
+.rof-waste-row [data-rof-waste-remove] { flex: 0 0 auto; }
+.rof-waste-note { flex: 1 1 100%; font-size: 11px; color: var(--neutral); }
 .process-waste-empty { padding: 8px 10px; color: var(--neutral); font-size: 12.5px; }
 
 .warning-banner {
@@ -646,12 +655,16 @@ table.materials-table td.cat-cell {
 
 /* Recipe on Fire's Setup -> Bake -> Trim step breadcrumb. */
 .rof-steps { display: flex; gap: 8px; margin-bottom: 16px; }
+/* Each pill is a real <button> (see renderStepHeader/navigateRofStep in renderer.js): clicking one jumps
+   straight to that stage, back always, forward only to a stage already reached. */
 .rof-step-pill {
-  padding: 5px 14px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line);
-  color: var(--neutral); background: white;
+  padding: 5px 14px; border-radius: 999px; font-size: 12.5px; font-family: inherit; border: 1px solid var(--line);
+  color: var(--neutral); background: white; cursor: pointer;
 }
-.rof-step-pill.active { background: var(--sage); color: white; border-color: var(--sage); }
-.rof-step-pill.disabled { opacity: 0.5; }
+.rof-step-pill:not(.active):not(:disabled):hover { border-color: var(--sage); color: var(--sage-dark); }
+.rof-step-pill:focus-visible { outline: 2px solid var(--sage); outline-offset: 1px; }
+.rof-step-pill.active { background: var(--sage); color: white; border-color: var(--sage); cursor: default; }
+.rof-step-pill.disabled, .rof-step-pill:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* The tray/dough canvas is the dominant visual on every step (Setup/Dough/Baked/Cut) -- a compact
    horizontal control strip (Tray select, dough/cutter palette, step buttons) on top, with the 2D

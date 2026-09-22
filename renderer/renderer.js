@@ -8648,6 +8648,11 @@ function renderRecipeOnFireView(main) {
   //   Sheet & Trim  ('sheet'): setup -> bake -> trim       (one sheet in the tray, baked whole, then cut)
   let rofMode = 'shape';
   let rofStep = 'setup'; // 'setup' | 'place' | 'bake' | 'trim'
+  // Stages actually reached this session -- what the step-pill click handler (navigateRofStep, below)
+  // uses to allow jumping back to a stage or forward to one already set up, never to one that hasn't
+  // been. Reset to just {setup} at every full-session reset (recipe/process change, Back to Setup).
+  let reachedRofSteps = new Set(['setup']);
+  function goToRofStep(step) { rofStep = step; reachedRofSteps.add(step); }
   let placeShapeKey = 'burgerBall';
   let placeCount = null;   // pieces the dough is divided into; null = default for the chosen shape
   let placeSession = null; // { count, shape } while a Shape & Place session is running
@@ -8761,6 +8766,7 @@ function renderRecipeOnFireView(main) {
     selectedProcessLocalIds = new Set();
     combinedWastes = [];
     rofStep = 'setup';
+    reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
     lastMaterialId = null;
     recipePortionGrams = null;
@@ -8828,8 +8834,8 @@ function renderRecipeOnFireView(main) {
         <div class="rof-waste-row">
           <span class="rof-waste-name">${w.name || 'Waste'}</span>
           <input type="number" min="0" max="100" step="0.1" value="${w.percent ?? 0}" class="process-waste-percent" data-rof-waste-input="${w.localId}" />
-          <span class="rof-waste-note">${w.originalPercent != null ? `% (recipe default: ${w.originalPercent}%)` : '% (added this session)'}</span>
           <button type="button" class="icon-btn danger" data-rof-waste-remove="${w.localId}" title="Remove for this tray session only">✕</button>
+          <span class="rof-waste-note">${w.originalPercent != null ? `% (recipe default: ${w.originalPercent}%)` : '% (added this session)'}</span>
         </div>
       `).join('')
       : `<div style="font-size:12px; color:var(--neutral);">None applied.</div>`;
@@ -9011,7 +9017,48 @@ function renderRecipeOnFireView(main) {
     const stepsEl = document.getElementById('rof-steps');
     if (!stepsEl) return;
     stepsEl.setAttribute('role', 'list'); stepsEl.setAttribute('aria-label', 'Steps');
-    stepsEl.innerHTML = rofStepLabels().map(s => `<span role="listitem" class="rof-step-pill ${s.key === rofStep ? 'active' : ''}" ${s.key === rofStep ? 'aria-current="step"' : ''}>${s.label}</span>`).join('');
+    // Each pill is a real button: clicking it jumps straight to that stage -- see navigateRofStep. The
+    // current stage's own pill is inert (nothing to navigate to), and a stage not yet reached this
+    // session is disabled (both visually, .disabled, and for real via the native `disabled` attribute)
+    // rather than clickable-but-a-no-op, so "not set up yet" reads as unavailable, not broken.
+    stepsEl.innerHTML = rofStepLabels().map((s) => {
+      const active = s.key === rofStep, reached = reachedRofSteps.has(s.key);
+      return `<span role="listitem"><button type="button" class="rof-step-pill ${active ? 'active' : ''} ${reached ? '' : 'disabled'}"
+        data-rof-step="${s.key}" ${active ? 'aria-current="step"' : ''} ${reached ? '' : 'disabled'}>${s.label}</button></span>`;
+    }).join('');
+    stepsEl.querySelectorAll('[data-rof-step]').forEach((btn) => {
+      btn.addEventListener('click', () => navigateRofStep(btn.dataset.rofStep));
+    });
+  }
+
+  // Jumps directly to `target` from a step-pill click -- back to any stage already reached is always
+  // allowed, forward only to one already reached (reachedRofSteps; renderStepHeader disables anything
+  // else). Each branch replicates the EXACT transition that stage's own button already performs
+  // (Edit Placement, Bake ->, Trim ->, <- Back to Bake) rather than a bare rofStep flip, so nothing
+  // about entering that stage -- resetting the bake, recomputing the rise model, clearing cutters -- is
+  // ever skipped just because it was reached by a pill click instead of the usual button.
+  function navigateRofStep(target) {
+    if (target === rofStep || !reachedRofSteps.has(target)) return;
+    if (target === 'setup') { backToSetup(); return; }
+    if (target === 'place') { // only reachable from 'bake', Shape & Place -- same as "<- Edit Placement"
+      rofGame.resetBake();
+      bakeState = 'ready';
+      goToRofStep('place');
+      placeFresh = false;
+      renderTrayStepPanel();
+      return;
+    }
+    if (target === 'bake') {
+      if (rofStep === 'trim') { // backward, Sheet & Trim -- same as "<- Back to Bake"
+        rofGame.disarmCutter(); rofGame.clearCutters();
+        goToRofStep('bake'); bakeState = 'done';
+        renderTrayStepPanel();
+        return;
+      }
+      enterBakeStep(); // forward from 'place', Shape & Place -- same as "Bake ->"
+      return;
+    }
+    if (target === 'trim') { goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
   }
 
   function renderTrayStepPanel() {
@@ -9075,6 +9122,7 @@ function renderRecipeOnFireView(main) {
   function backToSetup() {
     resetGameSession();
     rofStep = 'setup';
+    reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
     renderTrayStepPanel();
   }
@@ -9134,7 +9182,7 @@ function renderRecipeOnFireView(main) {
 
   async function startPlacementFlow() {
     await ensureShapePresets();
-    rofStep = 'place';
+    goToRofStep('place');
     placeFresh = true;
     placeSession = null;
     placeCount = null;
@@ -9422,7 +9470,7 @@ function renderRecipeOnFireView(main) {
     riseModel = computeRiseModel();
     prefillBakeParams();
     bakeState = 'ready';
-    rofStep = 'bake';
+    goToRofStep('bake');
     renderTrayStepPanel();
   }
   async function startBake() {
@@ -9695,7 +9743,7 @@ function renderRecipeOnFireView(main) {
     sheetInfo = computeSheetInfo();
     cutterList = []; armedCutterId = null; lastCutterId = null; trimNote = '';
     bakeState = 'ready';
-    rofStep = 'bake';
+    goToRofStep('bake');
     renderTrayStepPanel();
     ensureRofGame().then((game) => {
       if (rofStep === 'bake' && rofMode === 'sheet') { game.beginSheet({ thicknessCm: sheetInfo.renderThickness }); game.setSheetGrams(sheetInfo.sessionGrams); }
@@ -9774,7 +9822,7 @@ function renderRecipeOnFireView(main) {
       if (sheetMode) { backToSetup(); return; }
       rofGame.resetBake();
       bakeState = 'ready';
-      rofStep = 'place';
+      goToRofStep('place');
       placeFresh = false;
       renderTrayStepPanel();
     });
@@ -9787,7 +9835,7 @@ function renderRecipeOnFireView(main) {
       bakeState = 'ready';
       renderTrayStepPanel();
     });
-    document.getElementById('rof-trim-btn')?.addEventListener('click', () => { rofStep = 'trim'; renderTrayStepPanel(); });
+    document.getElementById('rof-trim-btn')?.addEventListener('click', () => { goToRofStep('trim'); renderTrayStepPanel(); });
     if (!sheetMode) updatePlaceSummary();
   }
 
@@ -9884,7 +9932,7 @@ function renderRecipeOnFireView(main) {
     document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
     document.getElementById('rof-back-bake-btn').addEventListener('click', () => {
       rofGame.disarmCutter(); rofGame.clearCutters();
-      rofStep = 'bake'; bakeState = 'done';
+      goToRofStep('bake'); bakeState = 'done';
       renderTrayStepPanel();
     });
     await ensureCutterMaterials();
@@ -9910,6 +9958,7 @@ function renderRecipeOnFireView(main) {
     // always drop back to Setup rather than let stale placed dough/cutters survive a process
     // change (a different combined dough entirely).
     rofStep = 'setup';
+    reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
     resetGameSession();
     renderProcessSummary();
@@ -9955,6 +10004,7 @@ function renderRecipeOnFireView(main) {
     traySection.style.display = 'none';
     summaryEl.innerHTML = '';
     rofStep = 'setup';
+    reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
     resetGameSession();
 
