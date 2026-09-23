@@ -87,6 +87,13 @@ const state = {
   // exist at all for view/formId/pendingPhoto/removePhoto, the same three things every other
   // list<->form screen's own state slice needs.
   materials: { view: 'list', formId: null, pendingPhoto: null, removePhoto: false },
+  // AI Menu Generator (renderAiMenuView): the run list + generate form, or one run under review.
+  // `generating`/`progress` survive leaving the screen, since generation keeps running in main.js.
+  aiMenu: {
+    view: 'list', runId: null, tab: 'DAYCARE', data: null, generating: false, progress: '',
+    form: { label: '', createdBy: '', startDate: '', endDate: '' },
+    dishFilter: { q: '', cat: '', servedOnly: true },
+  },
 };
 
 // Recipe Book and Recipe Extractor are two fully separate tables (see CLAUDE.md-equivalent
@@ -663,7 +670,7 @@ function renderSectionNav() {
 }
 
 // The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
-const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll', 'menuIngredients', 'cleanMenu'];
+const MENU_GROUP_VIEWS = ['generate', 'build', 'aiMenu', 'exportAll', 'menuIngredients', 'cleanMenu'];
 
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
@@ -812,6 +819,7 @@ async function renderView() {
   if (state.currentView === 'items') return await renderItemsView(main);
   if (state.currentView === 'generate') return await renderGenerateView(main);
   if (state.currentView === 'build') return await renderBuildMenuView(main);
+  if (state.currentView === 'aiMenu') return await renderAiMenuView(main);
   if (state.currentView === 'history') return await renderHistoryView(main);
   if (state.currentView === 'exportAll') return await renderExportAllView(main);
   if (state.currentView === 'menuIngredients') return await renderMenuIngredientsView(main);
@@ -1842,6 +1850,604 @@ async function exportBuilderBlankTemplate() {
 }
 
 // ============================================================
+// AI MENU GENERATOR VIEW
+// The AI invents dishes for a date range, the normal menu rules schedule them into a DRAFT
+// (main.js ai-menu-generate), and the chef reviews it here before anything reaches the Dish
+// Catalog or History. Every change goes through main.js, which re-runs the nut/sesame, seafood and
+// halal check (a hit blocks the change, no override) and the catalog duplicate check; menu rules
+// are re-checked after each change but only warn. Shared dishes (MS-UP's Lunch Main / Starch,
+// Staff's shared Main and Breakfast) are read-only copies: change the source and they follow.
+// ============================================================
+const AI_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF'];
+const AI_SECTION_LABEL = { DAYCARE: 'Daycare', KG_LP: 'KG-LP', MS_UP: 'MS-UP', STAFF: 'Staff' };
+// Mirrors AI_CATEGORIES in lib/aiMenu.js (the categories whose dishes the AI invents).
+const AI_MENU_CATEGORIES = {
+  DAYCARE: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_SALAD', 'SOUP_APPETIZER', 'PM_SNACK'],
+  KG_LP: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_STARCH', 'SOUP_APPETIZER', 'PM_SNACK'],
+  MS_UP: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_VEGETABLE', 'LUNCH_STARCH', 'SOUP_APPETIZER', 'PM_SNACK'],
+  STAFF: ['STAFF_BREAKFAST', 'STAFF_APPETIZER', 'STAFF_MAIN', 'STAFF_LUNCHBOX'],
+};
+const AI_ATTR_OPTIONS = {
+  sauce_type: [['RED', 'Red (tomato)'], ['WHITE', 'White (cream / cheese / yogurt)'], ['ASIAN', 'Asian (soy / teriyaki)'], ['GLAZED', 'Glazed (honey / BBQ)'], ['GRAVY', 'Gravy / stew'], ['DRY', 'Dry (grilled / roasted)']],
+  carb_type: [['RICE', 'Rice'], ['PASTA', 'Pasta'], ['POTATO', 'Potato'], ['OTHER', 'Other grain / bread']],
+  dish_concept: [['EGG', 'Egg'], ['PASTRY', 'Pastry'], ['SANDWICH', 'Sandwich / wrap'], ['CEREAL_DAIRY', 'Cereal / dairy'], ['CHEESE', 'Cheese'], ['OTHER', 'Other']],
+  am_snack_style: [['PASTRY', 'Pastry'], ['COLD_KITCHEN', 'Cold Kitchen']],
+};
+const AI_ATTR_LABEL = { protein_code: 'Protein', sauce_type: 'Sauce style', carb_type: 'Starch type', dish_concept: 'Dish type', am_snack_style: 'AM Snack style' };
+// Which attributes each category's rules read (required ones are marked *); mirrors REQUIRED_ATTRS
+// in lib/aiMenuGenerate.js.
+const AI_CATEGORY_ATTRS = {
+  AM_SNACK: { required: ['am_snack_style', 'dish_concept'], optional: ['protein_code'] },
+  LUNCH_MAIN: { required: ['protein_code', 'sauce_type'], optional: [] },
+  LUNCH_STARCH: { required: ['carb_type'], optional: [] },
+  STAFF_BREAKFAST: { required: ['dish_concept'], optional: ['protein_code'] },
+  STAFF_MAIN: { required: ['protein_code'], optional: [] },
+  STAFF_LUNCHBOX: { required: ['protein_code'], optional: [] },
+};
+const AI_RUN_STATUS = {
+  generating: ['Generating…', 'daily'], draft: ['Needs review', 'unverified'], approving: ['Approving…', 'daily'],
+  approved: ['Approved', 'chicken'], discarded: ['Discarded', 'daily'],
+};
+
+function aiEsc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function aiCategoryName(code) {
+  return state.categories.find(c => c.code === code)?.name || code.replace(/_/g, ' ');
+}
+
+function aiAttrsFor(category) {
+  return AI_CATEGORY_ATTRS[category] || { required: [], optional: ['protein_code'] };
+}
+
+function renderAiMenuView(main) {
+  return state.aiMenu.view === 'run' ? renderAiMenuRunView(main) : renderAiMenuListView(main);
+}
+
+// ---------- list + generate ----------
+
+async function renderAiMenuListView(main) {
+  main.classList.remove('build-mode');
+  const f = state.aiMenu.form;
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>AI Menu Generator</h1><span class="page-description">The AI invents new dishes for the date range and the usual menu rules schedule them. Nothing reaches the Dish Catalog or History until you review and approve it.</span></div>
+    </div>
+    <div class="generate-controls">
+      <div class="field"><label for="ai-label">Name</label><input id="ai-label" value="${aiEsc(f.label)}" placeholder="e.g. October AI menu" /></div>
+      <div class="field"><label for="ai-created-by">Created by</label><input id="ai-created-by" value="${aiEsc(f.createdBy)}" /></div>
+      <div class="field"><label for="ai-start">Start date</label><input id="ai-start" type="date" value="${aiEsc(f.startDate)}" /></div>
+      <div class="field"><label for="ai-end">End date</label><input id="ai-end" type="date" value="${aiEsc(f.endDate)}" /></div>
+      <button class="primary" id="ai-generate-btn" ${state.aiMenu.generating ? 'disabled' : ''}>${state.aiMenu.generating ? 'Generating…' : 'Generate AI Menu'}</button>
+    </div>
+    <div id="ai-day-count" class="day-count-hint" style="margin:-10px 0 10px;"></div>
+    <div id="ai-progress" class="ai-progress" role="status" aria-live="polite">${aiEsc(state.aiMenu.progress)}</div>
+    <h2 class="ai-subhead">Runs</h2>
+    <div id="ai-runs"><div class="empty-state">Loading…</div></div>
+  `;
+  wireDateRangeFields('ai-start', 'ai-end', 'ai-day-count');
+  for (const [id, key] of [['ai-label', 'label'], ['ai-created-by', 'createdBy'], ['ai-start', 'startDate'], ['ai-end', 'endDate']]) {
+    document.getElementById(id).addEventListener('input', (e) => { state.aiMenu.form[key] = e.target.value; });
+    document.getElementById(id).addEventListener('change', (e) => { state.aiMenu.form[key] = e.target.value; });
+  }
+  document.getElementById('ai-generate-btn').addEventListener('click', startAiMenuGeneration);
+
+  const runs = await window.api.aiMenuListRuns();
+  const el = document.getElementById('ai-runs');
+  if (!el) return;
+  if (!runs.length) {
+    el.innerHTML = `<div class="empty-state"><div class="display">No AI menus yet</div>Choose a date range above and click "Generate AI Menu".</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="table-scroll"><table class="history-table ai-runs-table">
+      <thead><tr><th>Name</th><th>Dates</th><th>School days</th><th>Status</th><th>Created by</th><th>Created</th><th></th></tr></thead>
+      <tbody>${runs.map(r => {
+        const [label, tone] = r.failed ? ['Failed', 'beef'] : (AI_RUN_STATUS[r.status] || [r.status, 'daily']);
+        const openable = ['draft', 'approved', 'approving', 'discarded'].includes(r.status);
+        return `<tr data-run="${r.id}" class="${openable ? '' : 'ai-run-disabled'}">
+          <td><strong>${aiEsc(r.label)}</strong></td>
+          <td>${r.start_date} → ${r.end_date}</td>
+          <td>${r.num_weekdays}</td>
+          <td><span class="chip ${tone}">${label}</span></td>
+          <td>${aiEsc(r.created_by || '—')}</td>
+          <td>${r.created_at && !isNaN(new Date(r.created_at)) ? new Date(r.created_at).toLocaleString() : '—'}</td>
+          <td>${r.failed || r.status === 'draft' ? `<button class="icon-btn danger" data-discard="${r.id}">Discard</button>` : ''}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  el.querySelectorAll('tr[data-run]').forEach(tr => {
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('[data-discard]') || tr.classList.contains('ai-run-disabled')) return;
+      openAiMenuRun(Number(tr.dataset.run));
+    });
+  });
+  el.querySelectorAll('[data-discard]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Discard this AI menu? Its draft dishes and picks stay in the database but it can no longer be edited or approved.')) return;
+      try { await window.api.aiMenuDiscardRun(Number(btn.dataset.discard)); } catch (err) { alert(err.message); }
+      renderView();
+    });
+  });
+}
+
+async function startAiMenuGeneration() {
+  const f = state.aiMenu.form;
+  if (!f.startDate || !f.endDate) return alert('Please choose a start and end date.');
+  if (f.endDate < f.startDate) return alert('End date must be on or after the start date.');
+  const numWeekdays = await window.api.getSchoolDayCount({ startDate: f.startDate, endDate: f.endDate });
+  if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+
+  state.aiMenu.generating = true;
+  state.aiMenu.progress = 'Starting…';
+  const setProgress = (message) => {
+    state.aiMenu.progress = message;
+    const el = document.getElementById('ai-progress');
+    if (el) el.textContent = message;
+  };
+  const btn = document.getElementById('ai-generate-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+  const unsubscribe = window.api.onAiMenuProgress(({ message }) => setProgress(message));
+  try {
+    const result = await window.api.aiMenuGenerate({
+      label: f.label.trim(), startDate: f.startDate, endDate: f.endDate, createdBy: f.createdBy.trim() || null,
+    });
+    state.aiMenu.generating = false;
+    state.aiMenu.progress = '';
+    showToast(`AI menu ready: ${result.stats.dishes} dishes, ${result.warningCount} note(s) to review.`);
+    if (state.currentView === 'aiMenu') openAiMenuRun(result.runId);
+  } catch (err) {
+    state.aiMenu.generating = false;
+    setProgress(`Generation failed: ${err.message}`);
+    if (state.currentView === 'aiMenu' && state.aiMenu.view === 'list') renderView();
+  } finally {
+    unsubscribe();
+  }
+}
+
+function openAiMenuRun(runId) {
+  state.aiMenu.view = 'run';
+  state.aiMenu.runId = runId;
+  state.aiMenu.data = null;
+  if (!AI_SECTIONS.includes(state.aiMenu.tab) && !['dishes', 'warnings'].includes(state.aiMenu.tab)) state.aiMenu.tab = 'DAYCARE';
+  renderView();
+}
+
+// ---------- one run ----------
+
+async function reloadAiMenuRun({ keepScroll = true } = {}) {
+  const scroller = document.querySelector('.build-scroll');
+  const top = keepScroll && scroller ? scroller.scrollTop : 0;
+  state.aiMenu.data = await window.api.aiMenuGetRun(state.aiMenu.runId);
+  renderAiMenuRunContent();
+  const again = document.querySelector('.build-scroll');
+  if (again) again.scrollTop = top;
+}
+
+async function renderAiMenuRunView(main) {
+  main.classList.add('build-mode');
+  main.innerHTML = `
+    <div class="build-scroll" id="ai-run-scroll"><div class="empty-state">Loading…</div></div>
+    <div id="ai-run-tabs" class="builder-tabs" role="tablist" aria-label="AI menu sections"></div>`;
+  state.aiMenu.data = await window.api.aiMenuGetRun(state.aiMenu.runId);
+  renderAiMenuRunContent();
+}
+
+function aiDishFor(pick) {
+  const d = state.aiMenu.data;
+  if (pick.draft_dish_id) return { kind: 'draft', dish: d.dishes.find(x => x.id === pick.draft_dish_id) };
+  if (pick.item_id) return { kind: 'catalog', item: d.catalogItems[pick.item_id] };
+  return { kind: 'empty' };
+}
+
+function aiIsEditable() {
+  return state.aiMenu.data?.run.status === 'draft';
+}
+
+function renderAiMenuRunContent() {
+  const d = state.aiMenu.data;
+  const scroll = document.getElementById('ai-run-scroll');
+  const tabsEl = document.getElementById('ai-run-tabs');
+  if (!scroll || !d) return;
+  const { run } = d;
+  const [statusLabel, statusTone] = AI_RUN_STATUS[run.status] || [run.status, 'daily'];
+  const served = new Set(d.picks.filter(p => p.draft_dish_id).map(p => p.draft_dish_id));
+  const newCount = d.dishes.filter(x => served.has(x.id) && x.resolution === 'new').length;
+  const linkedCount = d.dishes.filter(x => served.has(x.id) && x.resolution === 'link').length;
+  const approveBlockers = [];
+  if (d.emptySlots) approveBlockers.push(`${d.emptySlots} empty slot(s)`);
+
+  scroll.innerHTML = `
+    <div class="topbar">
+      <div>
+        <button class="link-btn" id="ai-back">← All AI menus</button>
+        <h1>${aiEsc(run.label)}</h1>
+        <span class="page-description">${run.start_date} → ${run.end_date} · ${run.num_weekdays} school days · <span class="chip ${statusTone}">${statusLabel}</span></span>
+      </div>
+      <div class="action-toolbar">
+        ${aiIsEditable() ? '<button class="secondary" id="ai-discard">Discard</button>' : ''}
+        <button class="primary" id="ai-approve" disabled title="${aiEsc(approveBlockers.length ? `Blocked: ${approveBlockers.join(', ')}` : 'Approve is the next step (not built yet)')}">Approve</button>
+      </div>
+    </div>
+    <div class="ai-summary">
+      <span><strong>${newCount}</strong> new AI dishes</span>
+      <span><strong>${linkedCount}</strong> linked to existing catalog dishes</span>
+      <span class="${d.emptySlots ? 'ai-bad' : ''}"><strong>${d.emptySlots}</strong> empty slots</span>
+      <button class="link-btn" data-go-tab="warnings"><strong>${d.notes.length}</strong> rule note(s) · <strong>${(run.warnings || []).length}</strong> generation note(s)</button>
+      <span class="ai-summary-hint">CEO isn't part of the AI menu — it is generated the usual way when you approve.</span>
+    </div>
+    <div id="ai-tab-content"></div>`;
+
+  tabsEl.innerHTML = [
+    ...AI_SECTIONS.map(s => [s, AI_SECTION_LABEL[s]]),
+    ['dishes', 'All dishes'],
+    ['warnings', `Notes (${d.notes.length + (run.warnings || []).length})`],
+  ].map(([key, label]) => `<button class="nav-btn ${state.aiMenu.tab === key ? 'active' : ''}" role="tab" aria-selected="${state.aiMenu.tab === key}" data-ai-tab="${key}">${aiEsc(label)}</button>`).join('');
+
+  const go = (tab) => { state.aiMenu.tab = tab; renderAiMenuRunContent(); document.getElementById('ai-run-scroll').scrollTop = 0; };
+  tabsEl.querySelectorAll('[data-ai-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.aiTab)));
+  scroll.querySelectorAll('[data-go-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.goTab)));
+  document.getElementById('ai-back').addEventListener('click', () => { state.aiMenu.view = 'list'; state.aiMenu.data = null; renderView(); });
+  document.getElementById('ai-discard')?.addEventListener('click', async () => {
+    if (!confirm('Discard this AI menu? It can no longer be edited or approved.')) return;
+    try { await window.api.aiMenuDiscardRun(run.id); } catch (err) { return alert(err.message); }
+    state.aiMenu.view = 'list'; renderView();
+  });
+
+  const content = document.getElementById('ai-tab-content');
+  if (state.aiMenu.tab === 'dishes') renderAiDishesTab(content);
+  else if (state.aiMenu.tab === 'warnings') renderAiNotesTab(content);
+  else renderAiSectionTab(content, state.aiMenu.tab);
+}
+
+function aiDishBadges(dish) {
+  const out = [];
+  if (dish.resolution === 'link') out.push('<span class="chip daily" title="The same dish already exists in the Dish Catalog; that dish is used.">In catalog</span>');
+  else out.push('<span class="chip ai-new">New</span>');
+  if ((dish.safety_scan?.known_risk || []).length) out.push('<span class="chip ai-risk" title="A dish that is traditionally made with nuts or sesame; this kitchen makes it without them.">Made nut/sesame-free (kitchen standard)</span>');
+  if (dish.edited) out.push('<span class="chip ai-edited">Edited</span>');
+  return out.join(' ');
+}
+
+function aiAttrChips(a) {
+  if (!a) return '';
+  const out = [];
+  const pc = (a.protein_code || '').toLowerCase();
+  if (['chicken', 'beef', 'lamb'].includes(pc)) out.push(`<span class="chip ${pc}">${aiEsc(a.protein_code)}</span>`);
+  else if (pc === 'vegetarian') out.push('<span class="chip ai-veg">VEG</span>');
+  else if (pc === 'fish') out.push('<span class="chip cold-kitchen">FISH</span>');
+  if (a.am_snack_style) out.push(`<span class="chip ${a.am_snack_style === 'PASTRY' ? 'pastry' : 'cold-kitchen'}">${a.am_snack_style === 'PASTRY' ? 'Pastry' : 'Cold Kitchen'}</span>`);
+  return out.join(' ');
+}
+
+function renderAiSectionTab(container, section) {
+  const d = state.aiMenu.data;
+  const days = [...new Map(d.picks.filter(p => p.section_code === section).map(p => [p.menu_date, p.weekday])).entries()].sort();
+  const notesByDate = new Map();
+  for (const n of d.notes.filter(n => n.section === section)) {
+    if (!notesByDate.has(n.date)) notesByDate.set(n.date, []);
+    notesByDate.get(n.date).push(n);
+  }
+  const editable = aiIsEditable();
+
+  container.innerHTML = days.map(([date, weekday]) => {
+    const picks = d.picks.filter(p => p.section_code === section && p.menu_date === date);
+    // Same row order as SECTION_SLOTS (the order the picks were saved in).
+    const order = [...new Set(picks.map(p => p.category_code))];
+    const rows = [];
+    for (const cat of order) {
+      picks.filter(p => p.category_code === cat).sort((a, b) => a.slot_index - b.slot_index).forEach(p => rows.push({ cat, p }));
+    }
+    const body = rows.map((r, i) => {
+      const first = i === 0 || rows[i - 1].cat !== r.cat;
+      const span = first ? rows.filter(x => x.cat === r.cat).length : 0;
+      const info = aiDishFor(r.p);
+      const aiCat = AI_MENU_CATEGORIES[section].includes(r.cat) || !!r.p.source_section_code;
+      let cell;
+      if (info.kind === 'empty') {
+        cell = `<span class="ai-empty">Empty — choose a dish</span>`;
+      } else if (info.kind === 'draft' && info.dish) {
+        cell = `<span class="item-name">${aiEsc(info.dish.name)}</span> ${aiAttrChips(info.dish)} ${aiDishBadges(info.dish)}`;
+      } else {
+        cell = `<span class="item-name">${aiEsc(info.item?.name || 'Unknown catalog dish')}</span> ${aiCat ? aiAttrChips(info.item) + ' <span class="chip daily">Catalog</span>' : ''}`;
+      }
+      let actions = '';
+      if (r.p.source_section_code) {
+        actions = `<span class="ai-shared" title="Shared dish: change it in ${AI_SECTION_LABEL[r.p.source_section_code]} and it updates here.">from ${AI_SECTION_LABEL[r.p.source_section_code]}</span>`;
+      } else if (editable) {
+        actions = `<button class="icon-btn" data-replace="${r.p.id}">${info.kind === 'empty' ? 'Choose' : 'Replace'}</button>`
+          + (info.kind === 'draft' && info.dish ? ` <button class="icon-btn" data-edit-dish="${info.dish.id}">Edit</button>` : '');
+      }
+      return `<tr>${first ? `<td class="cat-cell" rowspan="${span}">${aiEsc(aiCategoryName(r.cat))}</td>` : ''}
+        <td class="item-cell"><div class="ai-cell"><div>${cell}</div><div class="ai-cell-actions">${actions}</div></div></td></tr>`;
+    }).join('');
+    const dayNotes = notesByDate.get(date) || [];
+    return `<div class="day-table-wrap">
+      <table class="day-table">
+        <thead><tr><th colspan="2"><span>${weekday}</span><span class="date">${date}</span>${dayNotes.length ? `<span class="ai-note-count">${dayNotes.length} note${dayNotes.length > 1 ? 's' : ''}</span>` : ''}</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+      ${dayNotes.length ? `<ul class="ai-day-notes">${dayNotes.map(n => `<li>${aiEsc(aiCategoryName(n.category))}: ${aiEsc(n.message)}</li>`).join('')}</ul>` : ''}
+    </div>`;
+  }).join('') || '<div class="empty-state">No days in this section.</div>';
+
+  container.querySelectorAll('[data-replace]').forEach(b => b.addEventListener('click', () => {
+    openAiReplaceModal(d.picks.find(p => p.id === Number(b.dataset.replace)));
+  }));
+  container.querySelectorAll('[data-edit-dish]').forEach(b => b.addEventListener('click', () => {
+    openAiDishModal(d.dishes.find(x => x.id === Number(b.dataset.editDish)));
+  }));
+}
+
+function renderAiDishesTab(container) {
+  const d = state.aiMenu.data;
+  const servedCount = new Map();
+  for (const p of d.picks) if (p.draft_dish_id) servedCount.set(p.draft_dish_id, (servedCount.get(p.draft_dish_id) || 0) + 1);
+  const cats = [...new Set(d.dishes.map(x => x.category_code))];
+  const filter = state.aiMenu.dishFilter;
+  container.innerHTML = `
+    <div class="ai-dish-toolbar">
+      <input id="ai-dish-search" type="search" placeholder="Search dishes or ingredients" value="${aiEsc(filter.q)}" aria-label="Search dishes" />
+      <select id="ai-dish-cat" aria-label="Category"><option value="">All categories</option>${cats.map(c => `<option value="${c}" ${filter.cat === c ? 'selected' : ''}>${aiEsc(aiCategoryName(c))}</option>`).join('')}</select>
+      <label><input type="checkbox" id="ai-dish-served" ${filter.servedOnly ? 'checked' : ''} /> Only dishes on the menu</label>
+    </div>
+    <div class="table-scroll"><table class="history-table ai-dish-table">
+      <thead><tr><th>Dish</th><th>Category</th><th>Sections</th><th>Served</th><th>Key ingredients</th><th></th></tr></thead>
+      <tbody id="ai-dish-rows"></tbody>
+    </table></div>`;
+
+  const draw = () => {
+    const q = filter.q.trim().toLowerCase();
+    const rows = d.dishes.filter(x => (!filter.cat || x.category_code === filter.cat)
+      && (!filter.servedOnly || servedCount.get(x.id))
+      && (!q || x.name.toLowerCase().includes(q) || x.key_ingredients.join(' ').toLowerCase().includes(q)));
+    document.getElementById('ai-dish-rows').innerHTML = rows.map(x => `
+      <tr class="${servedCount.get(x.id) ? '' : 'ai-unserved'}">
+        <td><strong>${aiEsc(x.name)}</strong><div>${aiAttrChips(x)} ${aiDishBadges(x)}</div></td>
+        <td>${aiEsc(aiCategoryName(x.category_code))}</td>
+        <td>${x.section_codes.map(s => AI_SECTION_LABEL[s] || s).join(', ')}</td>
+        <td>${servedCount.get(x.id) || '<span class="ai-muted">not on the menu</span>'}</td>
+        <td class="ai-ingredients">${aiEsc(x.key_ingredients.join(', '))}</td>
+        <td>${aiIsEditable() ? `<button class="icon-btn" data-edit-dish="${x.id}">Edit</button>` : ''}</td>
+      </tr>`).join('') || '<tr><td colspan="6" class="ai-muted">No dishes match.</td></tr>';
+    document.querySelectorAll('#ai-dish-rows [data-edit-dish]').forEach(b => b.addEventListener('click', () => {
+      openAiDishModal(d.dishes.find(x => x.id === Number(b.dataset.editDish)));
+    }));
+  };
+  document.getElementById('ai-dish-search').addEventListener('input', (e) => { filter.q = e.target.value; draw(); });
+  document.getElementById('ai-dish-cat').addEventListener('change', (e) => { filter.cat = e.target.value; draw(); });
+  document.getElementById('ai-dish-served').addEventListener('change', (e) => { filter.servedOnly = e.target.checked; draw(); });
+  draw();
+}
+
+function renderAiNotesTab(container) {
+  const d = state.aiMenu.data;
+  const gen = d.run.warnings || [];
+  const safety = gen.filter(w => w.kind === 'safety');
+  const other = gen.filter(w => w.kind !== 'safety');
+  const bySection = AI_SECTIONS.map(s => [s, d.notes.filter(n => n.section === s)]).filter(([, list]) => list.length);
+  container.innerHTML = `
+    <h2 class="ai-subhead">Menu rules (${d.notes.length})</h2>
+    <p class="ai-muted">Re-checked after every change. These are warnings — the menu can still be approved.</p>
+    ${bySection.length ? bySection.map(([s, list]) => `
+      <h3 class="ai-subsubhead">${AI_SECTION_LABEL[s]}</h3>
+      <ul class="ai-note-list">${list.map(n => `<li><span class="ai-note-date">${n.date}</span> ${aiEsc(aiCategoryName(n.category))}: ${aiEsc(n.message)}</li>`).join('')}</ul>`).join('')
+      : '<div class="empty-state">Every day follows the menu rules.</div>'}
+    <h2 class="ai-subhead">Rejected by the safety check at generation (${safety.length})</h2>
+    <p class="ai-muted">These AI dishes were never added to the menu: they matched the nut / sesame, seafood (student sections) or halal check.</p>
+    ${safety.length ? `<ul class="ai-note-list">${safety.map(w => `<li><strong>${aiEsc(w.name)}</strong> (${aiEsc(aiCategoryName(w.category))}, ${(w.sections || []).map(s => AI_SECTION_LABEL[s] || s).join(' + ')}): ${aiEsc(w.reason)}</li>`).join('')}</ul>` : '<div class="empty-state">None.</div>'}
+    <h2 class="ai-subhead">Other generation notes (${other.length})</h2>
+    ${other.length ? `<ul class="ai-note-list">${other.map(w => `<li>${aiEsc(w.message || (w.kind === 'duplicate_retired' ? `"${w.name}" matched the retired catalog dish "${w.matched_name}" and was dropped` : w.name || w.kind))}</li>`).join('')}</ul>` : '<div class="empty-state">None.</div>'}`;
+}
+
+// ---------- modals ----------
+
+function aiOpenModal(html, { wide = false } = {}) {
+  const previousFocus = document.activeElement;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal ai-modal ${wide ? 'ai-modal-wide' : ''}" role="dialog" aria-modal="true">${html}</div>`;
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); previousFocus?.focus?.(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.modal').setAttribute('aria-labelledby', 'ai-modal-title');
+  setTimeout(() => overlay.querySelector('input, select, textarea, button')?.focus(), 0);
+  return { overlay, close };
+}
+
+// The message box lives in the modal's pinned action bar, so it is always on screen.
+function aiShowBlocked(el, blocked) {
+  el.innerHTML = aiBlockedHtml(blocked);
+}
+
+function aiBlockedHtml(blocked) {
+  return `<div class="ai-blocked" role="alert"><strong>Not saved.</strong> ${aiEsc(blocked.reason)}</div>`;
+}
+
+function aiAttrFields(category, values, prefix) {
+  const { required, optional } = aiAttrsFor(category);
+  return [...required, ...optional].map(attr => {
+    const opts = attr === 'protein_code'
+      ? state.proteinTypes.map(p => [p.code, p.name])
+      : AI_ATTR_OPTIONS[attr];
+    const req = required.includes(attr);
+    return `<div class="field"><label for="${prefix}-${attr}">${AI_ATTR_LABEL[attr]}${req ? ' *' : ''}</label>
+      <select id="${prefix}-${attr}" data-attr="${attr}">
+        <option value="">${req ? '— choose —' : '— none —'}</option>
+        ${opts.map(([code, name]) => `<option value="${code}" ${values?.[attr] === code ? 'selected' : ''}>${aiEsc(name)}</option>`).join('')}
+      </select></div>`;
+  }).join('');
+}
+
+function aiReadDishForm(root) {
+  const fields = {
+    name: root.querySelector('[data-f="name"]').value.trim(),
+    description: root.querySelector('[data-f="description"]').value.trim(),
+    key_ingredients: root.querySelector('[data-f="key_ingredients"]').value.split(/\n|,/).map(s => s.trim()).filter(Boolean),
+  };
+  root.querySelectorAll('select[data-attr]').forEach(sel => { fields[sel.dataset.attr] = sel.value || null; });
+  return fields;
+}
+
+function aiDishFormHtml(category, dish, prefix) {
+  return `
+    <div class="field"><label for="${prefix}-name">Dish name *</label><input id="${prefix}-name" data-f="name" value="${aiEsc(dish?.name || '')}" /></div>
+    <div class="field"><label for="${prefix}-desc">Description</label><textarea id="${prefix}-desc" data-f="description" rows="2">${aiEsc(dish?.description || '')}</textarea></div>
+    <div class="field"><label for="${prefix}-ing">Key ingredients * (one per line)</label><textarea id="${prefix}-ing" data-f="key_ingredients" rows="4">${aiEsc((dish?.key_ingredients || []).join('\n'))}</textarea></div>
+    <div class="ai-attr-grid">${aiAttrFields(category, dish, prefix)}</div>`;
+}
+
+function openAiDishModal(dish) {
+  if (!dish) return;
+  const d = state.aiMenu.data;
+  const servedIn = d.picks.filter(p => p.draft_dish_id === dish.id);
+  const linkedItem = dish.dup_match_item_id ? d.catalogItems[dish.dup_match_item_id] : null;
+  const { overlay, close } = aiOpenModal(`
+    <h2 id="ai-modal-title">Edit dish</h2>
+    <p class="ai-muted">${aiEsc(aiCategoryName(dish.category_code))} · served ${servedIn.length} time(s) · ${dish.section_codes.map(s => AI_SECTION_LABEL[s] || s).join(', ')}. Changes apply everywhere this dish is served.</p>
+    ${dish.resolution === 'link' ? `<div class="warning-banner">This is the existing catalog dish "${aiEsc(linkedItem?.name || dish.name)}" — the catalog version is served as it is. Rename it to make it a new dish instead.</div>` : ''}
+    <div id="ai-dish-form">${aiDishFormHtml(dish.category_code, dish, 'ai-ed')}</div>
+    <div class="actions"><div id="ai-dish-error" class="ai-action-msg"></div><button class="secondary" id="ai-ed-cancel">Cancel</button><button class="primary" id="ai-ed-save">Save</button></div>`);
+  overlay.querySelector('#ai-ed-cancel').addEventListener('click', close);
+  overlay.querySelector('#ai-ed-save').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#ai-ed-save');
+    btn.disabled = true;
+    try {
+      const res = await window.api.aiMenuUpdateDish({ runId: state.aiMenu.runId, dishId: dish.id, fields: aiReadDishForm(overlay.querySelector('#ai-dish-form')) });
+      if (!res.ok) { aiShowBlocked(overlay.querySelector('#ai-dish-error'), res.blocked); btn.disabled = false; return; }
+      close();
+      showToast(res.linked ? `Saved — "${res.dish.name}" is already in the Dish Catalog, so that dish is used.` : res.unlinked ? 'Saved as a new dish (no longer the catalog dish).' : 'Dish saved.');
+      await reloadAiMenuRun();
+    } catch (err) {
+      aiShowBlocked(overlay.querySelector('#ai-dish-error'), { reason: err.message });
+      btn.disabled = false;
+    }
+  });
+}
+
+function aiPropagationNote(pick) {
+  if (pick.section_code === 'KG_LP' && ['LUNCH_MAIN', 'LUNCH_STARCH'].includes(pick.category_code)) {
+    return pick.category_code === 'LUNCH_MAIN' ? 'Also changes MS-UP (identical Lunch Main) and Staff Main.' : 'Also changes MS-UP (identical Lunch Starch).';
+  }
+  if (pick.section_code === 'DAYCARE' && pick.category_code === 'LUNCH_MAIN') return 'Also changes Staff Main (it carries Daycare’s Lunch Main).';
+  if (pick.category_code === 'AM_SNACK') return 'Also changes Staff Breakfast (it carries every school AM Snack).';
+  return '';
+}
+
+async function openAiReplaceModal(pick) {
+  if (!pick) return;
+  const info = aiDishFor(pick);
+  const currentName = info.kind === 'draft' ? info.dish?.name : info.kind === 'catalog' ? info.item?.name : null;
+  const isAiCategory = AI_MENU_CATEGORIES[pick.section_code].includes(pick.category_code);
+  // Categories the AI doesn't handle (Milk, Fruit Bar, Staff Salad...) stay catalog-only.
+  const tabs = isAiCategory
+    ? [['unused', 'Unused AI dishes'], ['catalog', 'Dish Catalog'], ['ask', 'Ask AI'], ['write', 'Write a new dish']]
+    : [['catalog', 'Dish Catalog']];
+  const { overlay, close } = aiOpenModal(`
+    <h2 id="ai-modal-title">${currentName ? 'Replace dish' : 'Choose a dish'}</h2>
+    <p class="ai-muted">${AI_SECTION_LABEL[pick.section_code]} · ${aiEsc(aiCategoryName(pick.category_code))} · ${pick.weekday} ${pick.menu_date}${currentName ? ` · now: <strong>${aiEsc(currentName)}</strong>` : ''}</p>
+    ${aiPropagationNote(pick) ? `<p class="ai-muted">${aiPropagationNote(pick)}</p>` : ''}
+    <div class="mode-toggle" role="tablist" style="margin-bottom:14px;">${tabs.map(([k, l], i) => `<button type="button" role="tab" class="mode-toggle-btn ${i === 0 ? 'active' : ''}" data-rtab="${k}">${l}</button>`).join('')}</div>
+    <div id="ai-replace-body"><div class="empty-state">Loading…</div></div>
+    <div class="actions"><div id="ai-replace-error" class="ai-action-msg"></div><button class="secondary" id="ai-rep-cancel">Cancel</button><button class="primary" id="ai-rep-primary" hidden>Use this dish</button></div>`, { wide: true });
+  overlay.querySelector('#ai-rep-cancel').addEventListener('click', close);
+  const body = overlay.querySelector('#ai-replace-body');
+  const errorEl = overlay.querySelector('#ai-replace-error');
+
+  let options = null;
+  try {
+    options = await window.api.aiMenuReplacementOptions({ runId: state.aiMenu.runId, pickId: pick.id });
+  } catch (err) {
+    body.innerHTML = aiBlockedHtml({ reason: err.message });
+    return;
+  }
+
+  const apply = async (replacement, btn) => {
+    errorEl.innerHTML = '';
+    if (btn) btn.disabled = true;
+    try {
+      const res = await window.api.aiMenuReplacePick({ runId: state.aiMenu.runId, pickId: pick.id, replacement });
+      if (!res.ok) { aiShowBlocked(errorEl, res.blocked); if (btn) btn.disabled = false; return; }
+      close();
+      showToast(res.linked ? 'That dish is already in the Dish Catalog — the catalog dish is used.' : res.reused ? 'That dish was already in this menu — it is used here too.' : `Replaced${res.updatedPicks > 1 ? ` (${res.updatedPicks} places, shared copies included)` : ''}.`);
+      await reloadAiMenuRun();
+    } catch (err) {
+      aiShowBlocked(errorEl, { reason: err.message });
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  const listHtml = (rows, kind) => `
+    <input type="search" class="ai-rep-search" placeholder="Search" aria-label="Search" />
+    <ul class="ai-option-list">${rows.map(r => `
+      <li data-q="${aiEsc(`${r.name} ${(r.key_ingredients || []).join(' ')}`.toLowerCase())}">
+        <div><strong>${aiEsc(r.name)}</strong> ${aiAttrChips(r)} ${kind === 'unused' ? aiDishBadges(r) : ''}${r.usedInThisSection ? ' <span class="ai-muted">already on this menu</span>' : ''}
+          ${r.key_ingredients ? `<div class="ai-ingredients">${aiEsc(r.key_ingredients.join(', '))}</div>` : ''}</div>
+        <button class="icon-btn" data-use="${r.id}">Use</button>
+      </li>`).join('') || '<li class="ai-muted">Nothing to choose from here.</li>'}</ul>`;
+  const wireList = (kind) => {
+    body.querySelector('.ai-rep-search')?.addEventListener('input', (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      body.querySelectorAll('.ai-option-list li[data-q]').forEach(li => { li.hidden = q && !li.dataset.q.includes(q); });
+    });
+    body.querySelectorAll('[data-use]').forEach(b => b.addEventListener('click', () => {
+      apply(kind === 'unused' ? { draftDishId: Number(b.dataset.use) } : { itemId: Number(b.dataset.use) }, b);
+    }));
+  };
+
+  // The pinned action bar's primary button is only used by "Write a new dish" (lists use per-row buttons).
+  const primary = overlay.querySelector('#ai-rep-primary');
+  const show = async (tab) => {
+    errorEl.innerHTML = '';
+    primary.hidden = true;
+    primary.onclick = null;
+    overlay.querySelectorAll('[data-rtab]').forEach(b => b.classList.toggle('active', b.dataset.rtab === tab));
+    if (tab === 'unused') {
+      body.innerHTML = `<p class="ai-muted">Dishes the AI made for this menu that aren't served in ${AI_SECTION_LABEL[pick.section_code]} yet. Already safety-checked.</p>${listHtml(options.unusedDishes, 'unused')}`;
+      wireList('unused');
+    } else if (tab === 'catalog') {
+      body.innerHTML = `<p class="ai-muted">Active Dish Catalog dishes in this category that are set up for ${AI_SECTION_LABEL[pick.section_code]}.</p>${listHtml(options.catalogItems, 'catalog')}`;
+      wireList('catalog');
+    } else if (tab === 'ask') {
+      body.innerHTML = `<p class="ai-muted">The AI suggests three new dishes for this slot, keeping what the menu rules need here (e.g. a chicken main stays chicken). Each one is safety-checked before you see it.</p>
+        <button class="primary" id="ai-ask-btn">Suggest 3 dishes</button><div id="ai-ask-results" aria-live="polite"></div>`;
+      body.querySelector('#ai-ask-btn').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        const out = body.querySelector('#ai-ask-results');
+        btn.disabled = true; btn.textContent = 'Asking the AI…';
+        try {
+          const res = await window.api.aiMenuSuggest({ runId: state.aiMenu.runId, pickId: pick.id });
+          out.innerHTML = `<ul class="ai-option-list">${res.candidates.map((c, i) => `
+            <li><div><strong>${aiEsc(c.name)}</strong> ${aiAttrChips(c)}${c.knownRisk?.length ? ' <span class="chip ai-risk">Made nut/sesame-free (kitchen standard)</span>' : ''}${c.linkedTo ? ` <span class="chip daily">In catalog as "${aiEsc(c.linkedTo)}"</span>` : ''}
+              ${c.description ? `<div>${aiEsc(c.description)}</div>` : ''}<div class="ai-ingredients">${aiEsc(c.key_ingredients.join(', '))}</div></div>
+              <button class="icon-btn" data-cand="${i}">Use</button></li>`).join('') || '<li class="ai-muted">No usable suggestions came back — try again.</li>'}</ul>
+            ${res.rejected.length ? `<p class="ai-muted">${res.rejected.length} suggestion(s) failed the safety check and were dropped: ${res.rejected.map(r => aiEsc(`${r.name} (${r.reason})`)).join('; ')}</p>` : ''}`;
+          out.querySelectorAll('[data-cand]').forEach(b => b.addEventListener('click', () => {
+            apply({ newDish: res.candidates[Number(b.dataset.cand)], origin: 'ai_suggest' }, b);
+          }));
+          btn.textContent = 'Suggest 3 more';
+        } catch (err) {
+          out.innerHTML = aiBlockedHtml({ reason: err.message });
+          btn.textContent = 'Try again';
+        }
+        btn.disabled = false;
+      });
+    } else if (tab === 'write') {
+      body.innerHTML = `<p class="ai-muted">Your own dish. It goes through the same nut / sesame, seafood and halal check (a hit blocks it), and if the Dish Catalog already has it, the catalog dish is used.</p>
+        <div id="ai-write-form">${aiDishFormHtml(pick.category_code, null, 'ai-wr')}</div>`;
+      primary.hidden = false;
+      primary.onclick = () => apply({ newDish: aiReadDishForm(body.querySelector('#ai-write-form')), origin: 'chef' }, primary);
+    }
+  };
+  overlay.querySelectorAll('[data-rtab]').forEach(b => b.addEventListener('click', () => show(b.dataset.rtab)));
+  show(tabs[0][0]);
+}
+
+// ============================================================
 // EXPORT ALL SECTIONS VIEW
 // ============================================================
 async function renderExportAllView(main) {
@@ -2383,6 +2989,8 @@ function resetDrilldownScreens() {
     state[ns.stateKey].formId = null;
     resetRecipeFormState(ns);
   });
+  state.aiMenu.view = 'list';
+  state.aiMenu.data = null;
   state.materials.view = 'list';
   state.materials.formId = null;
   state.materials.pendingPhoto = null;

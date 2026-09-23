@@ -36,6 +36,7 @@ const { generateDishImage } = require('./lib/generateDishImage');
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const { generateDraftRun } = require('./lib/aiMenuGenerate');
+const aiMenuReview = require('./lib/aiMenuReview');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -4422,6 +4423,16 @@ ipcMain.handle('ai-menu-generate', async (e, { label, startDate, endDate, create
   const send = (message) => { if (!e.sender.isDestroyed()) e.sender.send('ai-menu-progress', { message }); };
   return generateDraftRun({ label, startDate, endDate, createdBy, onProgress: send });
 });
+
+// AI Menu Generator review screen (lib/aiMenuReview.js): draft-only reads and edits. Safety and
+// duplicate checks run server-side on every change; a blocked change comes back as { blocked }.
+ipcMain.handle('ai-menu-list-runs', () => aiMenuReview.listRuns());
+ipcMain.handle('ai-menu-get-run', (e, runId) => aiMenuReview.getRun(runId));
+ipcMain.handle('ai-menu-replacement-options', (e, payload) => aiMenuReview.listReplacementOptions(payload));
+ipcMain.handle('ai-menu-replace-pick', (e, payload) => aiMenuReview.replacePick(payload));
+ipcMain.handle('ai-menu-update-dish', (e, payload) => aiMenuReview.updateDish(payload));
+ipcMain.handle('ai-menu-suggest', (e, payload) => aiMenuReview.suggestForPick(payload));
+ipcMain.handle('ai-menu-discard-run', (e, runId) => aiMenuReview.discardRun(runId));
 
 ipcMain.handle('get-section-slots', (e, sectionCode) => {
   return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count]) => ({ categoryCode, count }));

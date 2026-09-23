@@ -1209,3 +1209,70 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
   min-width: 220px; margin: 0; padding: 6px; border: 1px solid #537060; border-radius: 10px;
   background: #203c32; box-shadow: 0 12px 32px rgba(10, 24, 18, .35);
 }
+
+/* ---------------- AI Menu Generator (renderAiMenuView) ---------------- */
+.link-btn {
+  background: none; border: 0; padding: 0; color: var(--sage); font: inherit; font-size: 12.5px;
+  cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+}
+.link-btn:hover { color: var(--sage-dark); }
+.topbar .link-btn { display: block; margin-bottom: 8px; }
+.ai-progress { min-height: 20px; font-size: 12.5px; color: var(--sage-dark); margin-bottom: 18px; }
+.ai-subhead { font-size: 19px; margin: 22px 0 10px; }
+.ai-subsubhead { font-size: 15px; margin: 14px 0 6px; }
+.ai-runs-table tr.ai-run-disabled { cursor: default; opacity: .7; }
+.ai-summary {
+  display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: center; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px; margin-bottom: 20px;
+  font-size: 13px; box-shadow: var(--shadow);
+}
+.ai-summary .ai-bad { color: var(--danger); }
+.ai-summary-hint { flex: 1 1 100%; font-size: 12px; color: var(--neutral); }
+.chip.ai-new { background: var(--sage); }
+.chip.ai-edited { background: var(--gold); color: var(--ink); }
+.chip.ai-veg { background: var(--veg); }
+/* Code-generated label (never AI text) for dishes the kitchen makes without their traditional nuts / sesame. */
+.chip.ai-risk { background: var(--accent-soft); color: var(--accent); border: 1px solid #e5c7b8; }
+.ai-cell { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ai-cell .chip { margin-left: 2px; vertical-align: 1px; }
+.ai-cell-actions { flex: 0 0 auto; display: flex; gap: 6px; align-items: center; }
+.ai-empty { color: var(--danger); font-style: italic; }
+.ai-shared { font-size: 11.5px; color: var(--neutral); white-space: nowrap; }
+.ai-note-count {
+  float: right; font-family: var(--font-ui); font-size: 11px; font-weight: 600; background: var(--gold);
+  color: var(--ink); border-radius: 5px; padding: 2px 8px;
+}
+.ai-day-notes {
+  margin: 0; padding: 10px 14px 10px 32px; background: #fbf0dd; border: 1px solid var(--gold); border-top: 0;
+  font-size: 12.5px; color: #6b4a0f;
+}
+.ai-note-list { margin: 0 0 12px; padding-left: 20px; font-size: 13px; line-height: 1.7; }
+.ai-note-date { font-variant-numeric: tabular-nums; color: var(--neutral); margin-right: 6px; }
+.ai-dish-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 14px; font-size: 13px; }
+.ai-dish-toolbar input[type="search"] { flex: 1 1 260px; }
+.ai-dish-toolbar input[type="search"], .ai-dish-toolbar select, .ai-rep-search {
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 13px; background: var(--surface);
+}
+.ai-dish-table tbody tr { cursor: default; }
+.ai-dish-table tr.ai-unserved { opacity: .65; }
+.ai-muted { color: var(--neutral); font-size: 12.5px; }
+.ai-ingredients { color: var(--neutral); font-size: 12px; }
+.modal.ai-modal-wide { width: 720px; }
+/* Keep Save / Cancel reachable however tall the form gets (the modal itself scrolls). */
+.modal.ai-modal .actions { position: sticky; bottom: -28px; background: var(--surface); margin-bottom: -28px; padding-bottom: 20px; z-index: 1; }
+.ai-blocked {
+  margin-top: 12px; padding: 10px 14px; border: 1px solid var(--danger); border-radius: 8px;
+  background: #f8e4e1; color: var(--danger); font-size: 12.5px; line-height: 1.6;
+}
+.modal.ai-modal .actions { align-items: center; }
+.ai-action-msg { flex: 1 1 260px; min-width: 0; }
+.ai-action-msg:empty { display: none; }
+.ai-action-msg .ai-blocked { margin-top: 0; max-height: 120px; overflow: auto; }
+.ai-attr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 12px; }
+.modal textarea { width: 100%; resize: vertical; }
+.ai-rep-search { width: 100%; margin-bottom: 10px; }
+.ai-option-list { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.ai-option-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; font-size: 13px; }
+.ai-option-list li + li { border-top: 1px solid var(--line); }
+.ai-option-list li > button { flex: 0 0 auto; }
+#ai-ask-results { margin-top: 14px; }

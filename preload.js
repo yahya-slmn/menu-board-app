@@ -156,6 +156,13 @@ contextBridge.exposeInMainWorld('api', {
   exportBlankTemplate: (payload) => ipcRenderer.invoke('export-blank-template', payload),
 
   aiMenuGenerate: (payload) => ipcRenderer.invoke('ai-menu-generate', payload),
+  aiMenuListRuns: () => ipcRenderer.invoke('ai-menu-list-runs'),
+  aiMenuGetRun: (runId) => ipcRenderer.invoke('ai-menu-get-run', runId),
+  aiMenuReplacementOptions: (payload) => ipcRenderer.invoke('ai-menu-replacement-options', payload),
+  aiMenuReplacePick: (payload) => ipcRenderer.invoke('ai-menu-replace-pick', payload),
+  aiMenuUpdateDish: (payload) => ipcRenderer.invoke('ai-menu-update-dish', payload),
+  aiMenuSuggest: (payload) => ipcRenderer.invoke('ai-menu-suggest', payload),
+  aiMenuDiscardRun: (runId) => ipcRenderer.invoke('ai-menu-discard-run', runId),
   onAiMenuProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('ai-menu-progress', listener);
