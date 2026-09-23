@@ -12,7 +12,8 @@
 // (lib/generator.js) reads, so the menu can be scheduled from these dishes directly.
 //
 // This is only half the safety story. Every dish that comes back is checked again in code
-// (lib/aiMenuSafety.js: nut/sesame and halal for everyone, seafood for student sections) before it is
+// (lib/aiMenuSafety.js: nut/sesame, halal, banned processed meats and no-spicy for everyone, seafood
+// for student sections, and per-category rules) before it is
 // stored, and a dish that fails is rejected and reported, never silently kept.
 //
 // Deploy: `supabase functions deploy generate-menu-dishes --use-api` (the Docker bundling path hangs
@@ -80,11 +81,14 @@ The one exception is the word "za'atar" in a dish NAME (e.g. "Za'atar Manakish")
 
 Before you answer, re-read every name, description and key ingredient you wrote and rewrite any that contains a nut or sesame word or the word "free".`;
 
-// Mirrors lib/halalFilter.js, which checks every dish in code afterwards. Processed meats must name
-// their animal because a bare "pepperoni" / "sausage" / "gelatin" is rejected there.
+// Mirrors lib/halalFilter.js plus this feature's stricter bans in lib/aiMenuSafety.js, which check
+// every dish in code afterwards.
 const HALAL_RULE = `HALAL ONLY -- every dish, every audience: no pork or pork products (pork, ham, bacon, lard, pancetta, prosciutto) and no alcohol in any form, including cooking wine, beer, rum, sherry, marsala, mirin, sake, liqueur, or any dish that is traditionally cooked in alcohol (coq au vin, bourguignon).
 
-Processed meats and gelatin must always say what they are made from: write "beef pepperoni", "chicken sausage", "turkey ham", "beef bacon", "halal gelatin" (or use agar) -- never a bare "pepperoni", "sausage", "ham", "hot dog", "gelatin" or "marshmallow". Use vinegar such as apple cider vinegar, never wine vinegar. As with nuts, never mention pork or alcohol at all, not even to say it is absent -- never write "alcohol-free", "non-alcoholic" or "pork-free".`;
+NEVER SERVED, whatever meat they are made from: pepperoni, sausages of any kind (including chicken or beef sausage and cocktail sausages), hot dogs, frankfurters, wieners, salami and chorizo. Do not offer them even as "beef" or "halal" versions. Any other processed meat must say what it is made from ("turkey ham", "beef bacon"), and gelatin must be "halal gelatin" (or use agar). Use vinegar such as apple cider vinegar, never wine vinegar. As with nuts, never mention pork or alcohol at all, not even to say it is absent -- never write "alcohol-free", "non-alcoholic" or "pork-free".`;
+
+// Mirrors SPICY_TERMS in lib/aiMenuSafety.js.
+const MILD_RULE = `MILD FOOD ONLY -- no spicy or hot dishes for anyone, adults included. Never use chili in any form (fresh, flakes, powder, sweet chili sauce), jalapeno, habanero, cayenne, chipotle, sriracha, harissa, gochujang, sambal, shatta, zhug, peri-peri, buffalo sauce, cajun or jerk seasoning, crushed red pepper, hot sauce, hot paprika, vindaloo or madras curry. Never describe a dish as "spicy", "spiced", "spice-rubbed", "fiery" or "hot" (in the heat sense) -- in the name, the description or the ingredients. Warm, aromatic, non-hot seasonings are welcome and may be named: cumin, coriander, sweet or smoked paprika, cinnamon, cardamom, baharat, seven spices, shawarma spice blend, black pepper, "spices". Write "seasoned", "aromatic" or "herbed" instead of "spiced".`;
 
 function seafoodRule(allowed: boolean): string {
   return allowed
@@ -125,6 +129,8 @@ ${seafoodRule(b.seafoodAllowed)}
 
 ${HALAL_RULE}
 
+${MILD_RULE}
+
 Make the dishes genuinely varied -- different cuisines, cooking methods, main ingredients and flavours -- practical for a large kitchen to cook in volume, and appealing to the people above. Each name is a clear, appetising menu name (2 to 8 words, Title Case, English), the way it would be printed on the menu. Two dishes must not be the same dish with a slightly different name.
 
 ${ATTRIBUTE_GUIDE}
@@ -136,7 +142,7 @@ ${b.groups.map(describeGroup).join("\n")}
 
 For every dish also give a one-sentence description and 3 to 10 key_ingredients (plain lowercase ingredient names, the main components first).
 ${examples.length ? `\nThis kitchen's existing dishes in this category, for naming style only (do not repeat them): ${JSON.stringify(examples)}\n` : ""}${avoid.length ? `\nDo NOT produce any of these names or near-copies of them (already on this menu or served recently): ${JSON.stringify(avoid)}\n` : ""}
-Remember: no nuts, no sesame, and no nut or sesame word anywhere -- not in the name, not in the description, not in the key ingredients, not even as "X-free"${b.seafoodAllowed ? "" : "; no fish or seafood"}; halal only (name the meat in every processed meat, no alcohol).`;
+Remember: no nuts, no sesame, and no nut or sesame word anywhere -- not in the name, not in the description, not in the key ingredients, not even as "X-free"${b.seafoodAllowed ? "" : "; no fish or seafood"}; halal only (no alcohol, no pepperoni / sausage / hot dog / salami / chorizo); mild only (no chili, no "spicy" / "spiced").`;
 }
 
 function outputSchema(proteinCodes: string[]) {
@@ -220,7 +226,7 @@ Deno.serve(async (req) => {
       model: "claude-sonnet-5",
       max_tokens: 16000,
       thinking: { type: "disabled" },
-      system: `${NUT_SESAME_RULE}\n\n${HALAL_RULE}`,
+      system: `${NUT_SESAME_RULE}\n\n${HALAL_RULE}\n\n${MILD_RULE}`,
       messages: [{ role: "user", content: buildPrompt(body) }],
       output_config: { format: { type: "json_schema", schema: outputSchema(body.proteinCodes) } },
     });

@@ -307,13 +307,17 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
 The AI invents dishes for a date range (Daycare / KG-LP / MS-UP / Staff; CEO never), the unchanged engine schedules them, and
 the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus`. Tables: `ai_menu_runs`,
 `ai_menu_draft_dishes`, `ai_menu_draft_picks` (`supabase/migrations/20260923100000_ai_menu_generator.sql`).
-- `lib/aiMenu.js`: which categories are AI (`AI_CATEGORIES`; the rest stay catalog-only) and `computeDraftMenus`, the engine run
+- `lib/aiMenu.js`: which categories are AI (`AI_CATEGORIES`, Staff Sweets included; the rest stay catalog-only) and `computeDraftMenus`, the engine run
   over in-memory pools (`MenuGenerator({ draftPools, partnerPicks })`).
 - `lib/aiMenuGenerate.js`: pool sizing, the AI calls (`generate-menu-dishes` Edge Function, Sonnet 5, thinking off), the gates,
   and the top-up loop that reads the engine's own warnings. Deploy the function with `--use-api` (Docker bundling hangs here).
 - `lib/aiMenuSafety.js` is MANDATORY on every AI or chef-written dish (generate, edit, replace, approve): nut/sesame
   (`nutFilter`; za'atar allowed in a dish NAME only), seafood for student sections, halal (`halalFilter.js`), and known-risk dishes
-  (hummus, pesto...) must list their substitute. A hit is a hard block, reported, never cleaned up or overridden.
+  (hummus, pesto...) must list their substitute. Also feature-only (not in `halalFilter.js`): pepperoni / sausage / hot dog /
+  frankfurter / wiener / salami / chorizo banned whatever meat is named, no spicy framing (`SPICY_TERMS`; aromatic words like
+  cumin, paprika, baharat stay allowed), and per-category rules (Daycare Lunch Salad = cooked veg sticks, no puree / raw
+  carrot or celery; PM Snack never manakish; Daycare PM Snack soft only). A hit is a hard block, reported, never cleaned up or
+  overridden.
 - Catalog duplicates (`findDuplicateMatch`, same category) LINK to the existing item; deliberately not widened (reviewed).
 - Review screen (`renderAiMenuView`, `lib/aiMenuReview.js`, `lib/aiMenuRules.js`): shared picks (MS-UP Lunch Main / Starch,
   Staff's shared Main / Breakfast) are read-only copies and follow their source; menu rules only WARN after edits; empty slots

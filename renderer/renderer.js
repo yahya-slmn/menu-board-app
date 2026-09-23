@@ -1865,7 +1865,7 @@ const AI_MENU_CATEGORIES = {
   DAYCARE: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_SALAD', 'SOUP_APPETIZER', 'PM_SNACK'],
   KG_LP: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_STARCH', 'SOUP_APPETIZER', 'PM_SNACK'],
   MS_UP: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_VEGETABLE', 'LUNCH_STARCH', 'SOUP_APPETIZER', 'PM_SNACK'],
-  STAFF: ['STAFF_BREAKFAST', 'STAFF_APPETIZER', 'STAFF_MAIN', 'STAFF_LUNCHBOX'],
+  STAFF: ['STAFF_BREAKFAST', 'STAFF_APPETIZER', 'STAFF_MAIN', 'STAFF_SWEETS', 'STAFF_LUNCHBOX'],
 };
 const AI_ATTR_OPTIONS = {
   sauce_type: [['RED', 'Red (tomato)'], ['WHITE', 'White (cream / cheese / yogurt)'], ['ASIAN', 'Asian (soy / teriyaki)'], ['GLAZED', 'Glazed (honey / BBQ)'], ['GRAVY', 'Gravy / stew'], ['DRY', 'Dry (grilled / roasted)']],
@@ -1897,8 +1897,12 @@ function aiCategoryName(code) {
   return state.categories.find(c => c.code === code)?.name || code.replace(/_/g, ' ');
 }
 
-function aiAttrsFor(category) {
-  return AI_CATEGORY_ATTRS[category] || { required: [], optional: ['protein_code'] };
+// Daycare's Lunch Main is one combined dish, so it also needs its starch type (mirrors the Daycare
+// pool's requiredAttrs in lib/aiMenuGenerate.js).
+function aiAttrsFor(category, sections = []) {
+  const base = AI_CATEGORY_ATTRS[category] || { required: [], optional: ['protein_code'] };
+  if (category === 'LUNCH_MAIN' && sections.includes('DAYCARE')) return { required: [...base.required, 'carb_type'], optional: base.optional };
+  return base;
 }
 
 function renderAiMenuView(main) {
@@ -2268,8 +2272,8 @@ function aiBlockedHtml(blocked) {
   return `<div class="ai-blocked" role="alert"><strong>Not saved.</strong> ${aiEsc(blocked.reason)}</div>`;
 }
 
-function aiAttrFields(category, values, prefix) {
-  const { required, optional } = aiAttrsFor(category);
+function aiAttrFields(category, values, prefix, sections) {
+  const { required, optional } = aiAttrsFor(category, sections);
   return [...required, ...optional].map(attr => {
     const opts = attr === 'protein_code'
       ? state.proteinTypes.map(p => [p.code, p.name])
@@ -2293,12 +2297,12 @@ function aiReadDishForm(root) {
   return fields;
 }
 
-function aiDishFormHtml(category, dish, prefix) {
+function aiDishFormHtml(category, dish, prefix, sections = dish?.section_codes || []) {
   return `
     <div class="field"><label for="${prefix}-name">Dish name *</label><input id="${prefix}-name" data-f="name" value="${aiEsc(dish?.name || '')}" /></div>
     <div class="field"><label for="${prefix}-desc">Description</label><textarea id="${prefix}-desc" data-f="description" rows="2">${aiEsc(dish?.description || '')}</textarea></div>
     <div class="field"><label for="${prefix}-ing">Key ingredients * (one per line)</label><textarea id="${prefix}-ing" data-f="key_ingredients" rows="4">${aiEsc((dish?.key_ingredients || []).join('\n'))}</textarea></div>
-    <div class="ai-attr-grid">${aiAttrFields(category, dish, prefix)}</div>`;
+    <div class="ai-attr-grid">${aiAttrFields(category, dish, prefix, sections)}</div>`;
 }
 
 function openAiDishModal(dish) {
@@ -2438,7 +2442,7 @@ async function openAiReplaceModal(pick) {
       });
     } else if (tab === 'write') {
       body.innerHTML = `<p class="ai-muted">Your own dish. It goes through the same nut / sesame, seafood and halal check (a hit blocks it), and if the Dish Catalog already has it, the catalog dish is used.</p>
-        <div id="ai-write-form">${aiDishFormHtml(pick.category_code, null, 'ai-wr')}</div>`;
+        <div id="ai-write-form">${aiDishFormHtml(pick.category_code, null, 'ai-wr', [pick.section_code])}</div>`;
       primary.hidden = false;
       primary.onclick = () => apply({ newDish: aiReadDishForm(body.querySelector('#ai-write-form')), origin: 'chef' }, primary);
     }
