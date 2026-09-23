@@ -35,6 +35,7 @@ const { generateDishRecipes } = require('./lib/generateDishRecipes');
 const { generateDishImage } = require('./lib/generateDishImage');
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
+const { generateDraftRun } = require('./lib/aiMenuGenerate');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -4413,6 +4414,15 @@ ipcMain.handle('export-all-sections-to-excel', async (e, { menuIdsBySection, sav
 // ---------------------------------------------------------------
 // IPC: manual menu builder
 // ---------------------------------------------------------------
+// AI Menu Generator: invents dishes for the date range and schedules them into a DRAFT run (see
+// lib/aiMenuGenerate.js). Writes only the ai_menu_* draft tables -- the Dish Catalog and saved
+// menus are untouched until Approve. Takes several minutes (many AI calls), so progress messages
+// go out on 'ai-menu-progress'.
+ipcMain.handle('ai-menu-generate', async (e, { label, startDate, endDate, createdBy }) => {
+  const send = (message) => { if (!e.sender.isDestroyed()) e.sender.send('ai-menu-progress', { message }); };
+  return generateDraftRun({ label, startDate, endDate, createdBy, onProgress: send });
+});
+
 ipcMain.handle('get-section-slots', (e, sectionCode) => {
   return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count]) => ({ categoryCode, count }));
 });

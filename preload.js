@@ -154,4 +154,11 @@ contextBridge.exposeInMainWorld('api', {
   builderFillSuggestions: (payload) => ipcRenderer.invoke('builder-fill-suggestions', payload),
   saveManualMenu: (payload) => ipcRenderer.invoke('save-manual-menu', payload),
   exportBlankTemplate: (payload) => ipcRenderer.invoke('export-blank-template', payload),
+
+  aiMenuGenerate: (payload) => ipcRenderer.invoke('ai-menu-generate', payload),
+  onAiMenuProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('ai-menu-progress', listener);
+    return () => ipcRenderer.removeListener('ai-menu-progress', listener);
+  },
 });
