@@ -1231,6 +1231,11 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .chip.ai-new { background: var(--sage); }
 .chip.ai-edited { background: var(--gold); color: var(--ink); }
 .chip.ai-veg { background: var(--veg); }
+.chip.ai-cuisine { background: var(--gold); color: var(--ink); }
+.ai-national-day {
+  margin-left: 14px; font-family: var(--font-ui); font-size: 11.5px; font-weight: 600; background: var(--surface);
+  color: var(--sage-dark); border-radius: 5px; padding: 2px 9px;
+}
 /* Code-generated label (never AI text) for dishes the kitchen makes without their traditional nuts / sesame. */
 .chip.ai-risk { background: var(--accent-soft); color: var(--accent); border: 1px solid #e5c7b8; }
 .ai-cell { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

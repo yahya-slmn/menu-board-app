@@ -330,7 +330,14 @@ the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus
 - Review screen (`renderAiMenuView`, `lib/aiMenuReview.js`, `lib/aiMenuRules.js`): shared picks (MS-UP Lunch Main / Starch,
   Staff's shared Main / Breakfast) are read-only copies and follow their source; menu rules only WARN after edits; empty slots
   block Approve. Approve (Phase 4) is not built yet.
-- Trial scripts (`scripts/ai-menu-trial-run.js`, `scripts/ai-menu-dup-check.js`) ask for a login: run them in a normal terminal.
+- National Day (`lib/nationalDay.js`): every Tuesday, every AI category in every section is one cuisine from a 16-entry cycle,
+  calendar-anchored (2026-09-01 = Saudi; Tuesdays since then mod 16). The generator orders each Tuesday's dishes to that day's
+  exact rules (`tuesdayGroups`) in the same calls as the regular dishes (each group carries its `cuisine`, which the AI must
+  echo back); themed dishes are kept for their Tuesday (`ai_menu_draft_dishes.cuisine`). The engine's `dayTheme` option
+  (`_themeSplit` / `_pickThemed`, AI only -- the regular engine never passes it) falls back themed -> themed with the distinct
+  rule relaxed -> regular -> regular relaxed, warning at each step; never an empty slot, never relaxed safety.
+- Trial scripts (`scripts/ai-menu-trial-run.js`, `scripts/ai-menu-dup-check.js`, `scripts/staff-main-backfill.js`) ask for a
+  login: run them in a normal terminal.
 
 ## Adding a new section or category
 

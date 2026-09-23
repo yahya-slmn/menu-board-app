@@ -44,6 +44,8 @@ interface Group {
   fixed?: Partial<Record<Attr, string>>;
   // One attribute to vary evenly across the group, and optionally which values to use.
   spread?: { attr: Attr; values?: string[] };
+  // National Day: every dish in this group comes from this cuisine (other groups may be regular).
+  cuisine?: string;
 }
 
 interface RequestBody {
@@ -56,6 +58,8 @@ interface RequestBody {
   groups: Group[];
   avoidNames?: string[];
   styleExamples?: string[];
+  // National Day (Tuesdays): every dish must come from this one cuisine.
+  cuisine?: string;
 }
 
 // Written with the same severity as suggest-dish-ingredients' NUT_RESTRICTION, plus two rules
@@ -110,6 +114,7 @@ function describeGroup(g: Group, i: number): string {
   if (g.spread) {
     parts.push(`vary ${g.spread.attr} evenly across the group${g.spread.values?.length ? ` using ${g.spread.values.join(", ")}` : ""}`);
   }
+  parts.push(g.cuisine ? `NATIONAL DAY: every dish must be ${g.cuisine} cuisine (set "cuisine" to ${g.cuisine})` : `regular dishes, any cuisine (set "cuisine" to NONE)`);
   return `- ${parts.join("; ")}`;
 }
 
@@ -117,7 +122,12 @@ function buildPrompt(b: RequestBody): string {
   const total = b.groups.reduce((n, g) => n + g.count, 0);
   const avoid = (b.avoidNames || []).slice(0, MAX_LIST);
   const examples = (b.styleExamples || []).slice(0, 40);
+  const themed = [...new Set(b.groups.map((g) => g.cuisine).filter(Boolean))];
+  const nationalDay = themed.length
+    ? `\nNATIONAL DAY: the school has a cuisine day every Tuesday. The groups marked NATIONAL DAY below must be recognisable dishes of that cuisine (${themed.join(", ")}), or a genuinely authentic-style version of what this category serves, named the way they would appear on that country's themed menu. Every rule below still applies to them in full -- nut- and sesame-free, halal, mild, no banned meats${b.seafoodAllowed ? "" : ", no seafood"} -- so choose dishes of that cuisine that fit those rules naturally (or the kitchen's standard adaptation) rather than dropping the rules.\n`
+    : "";
   return `You are the menu planner for a school catering kitchen in Saudi Arabia (Arabic, Levantine, Gulf and international dishes are all welcome). Invent ${total} NEW dishes for this menu category.
+${nationalDay}
 
 Category: ${b.category.label} (${b.category.code})
 What belongs here: ${b.category.guidance}
@@ -145,7 +155,7 @@ ${examples.length ? `\nThis kitchen's existing dishes in this category, for nami
 Remember: no nuts, no sesame, and no nut or sesame word anywhere -- not in the name, not in the description, not in the key ingredients, not even as "X-free"${b.seafoodAllowed ? "" : "; no fish or seafood"}; halal only (no alcohol, no pepperoni / sausage / hot dog / salami / chorizo); mild only (no chili, no "spicy" / "spiced").`;
 }
 
-function outputSchema(proteinCodes: string[]) {
+function outputSchema(proteinCodes: string[], cuisines: string[]) {
   const withNone = (vals: string[]) => ({ type: "string", enum: [...vals, "NONE"] });
   return {
     type: "object",
@@ -164,8 +174,9 @@ function outputSchema(proteinCodes: string[]) {
             carb_type: withNone(CARB_TYPES),
             dish_concept: withNone(DISH_CONCEPTS),
             am_snack_style: withNone(AM_SNACK_STYLES),
+            cuisine: withNone(cuisines),
           },
-          required: ["group", "name", "description", "key_ingredients", ...ATTRS],
+          required: ["group", "name", "description", "key_ingredients", ...ATTRS, "cuisine"],
           additionalProperties: false,
         },
       },
@@ -191,6 +202,7 @@ function validate(b: RequestBody): string | null {
   for (const g of b.groups) {
     if (!g || !Number.isInteger(g.count) || g.count < 1) return "Every group needs a positive integer count";
     if (g.spread && !ATTRS.includes(g.spread.attr)) return "Invalid spread attribute";
+    if (g.cuisine !== undefined && (typeof g.cuisine !== "string" || !g.cuisine.trim() || g.cuisine.length > 40)) return "Invalid group cuisine";
     total += g.count;
   }
   if (total > MAX_DISHES) return `Too many dishes in one call (max ${MAX_DISHES})`;
@@ -200,6 +212,7 @@ function validate(b: RequestBody): string | null {
     }
   }
   if ([b.category.guidance, b.audience].some((s) => typeof s !== "string" || s.length > MAX_TEXT)) return "Text field too long";
+  if (b.cuisine !== undefined && (typeof b.cuisine !== "string" || !b.cuisine.trim() || b.cuisine.length > 40)) return "Invalid cuisine";
   return null;
 }
 
@@ -215,6 +228,8 @@ Deno.serve(async (req) => {
   }
   const invalid = validate(body);
   if (invalid) return ok({ success: false, error: invalid });
+  // A request-wide cuisine (the review screen's "Ask AI" on a Tuesday) applies to every group.
+  if (body.cuisine) body.groups = body.groups.map((g) => ({ ...g, cuisine: g.cuisine || body.cuisine }));
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -228,7 +243,7 @@ Deno.serve(async (req) => {
       thinking: { type: "disabled" },
       system: `${NUT_SESAME_RULE}\n\n${HALAL_RULE}\n\n${MILD_RULE}`,
       messages: [{ role: "user", content: buildPrompt(body) }],
-      output_config: { format: { type: "json_schema", schema: outputSchema(body.proteinCodes) } },
+      output_config: { format: { type: "json_schema", schema: outputSchema(body.proteinCodes, [...new Set(body.groups.map((g) => g.cuisine).filter(Boolean) as string[])]) } },
     });
 
     if (response.stop_reason === "refusal") return ok({ success: false, error: "Dish generation was declined" });

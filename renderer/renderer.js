@@ -2145,6 +2145,7 @@ function aiDishBadges(dish) {
   else out.push('<span class="chip ai-new">New</span>');
   if ((dish.safety_scan?.known_risk || []).length) out.push('<span class="chip ai-risk" title="A dish that is traditionally made with nuts or sesame; this kitchen makes it without them.">Made nut/sesame-free (kitchen standard)</span>');
   if (dish.edited) out.push('<span class="chip ai-edited">Edited</span>');
+  if (dish.cuisine) out.push(`<span class="chip ai-cuisine" title="Made for National Day">${aiEsc(dish.cuisine)}</span>`);
   return out.join(' ');
 }
 
@@ -2203,7 +2204,7 @@ function renderAiSectionTab(container, section) {
     const dayNotes = notesByDate.get(date) || [];
     return `<div class="day-table-wrap">
       <table class="day-table">
-        <thead><tr><th colspan="2"><span>${weekday}</span><span class="date">${date}</span>${dayNotes.length ? `<span class="ai-note-count">${dayNotes.length} note${dayNotes.length > 1 ? 's' : ''}</span>` : ''}</th></tr></thead>
+        <thead><tr><th colspan="2"><span>${weekday}</span><span class="date">${date}</span>${d.themes?.[date] ? `<span class="ai-national-day">National Day · ${aiEsc(d.themes[date])}</span>` : ''}${dayNotes.length ? `<span class="ai-note-count">${dayNotes.length} note${dayNotes.length > 1 ? 's' : ''}</span>` : ''}</th></tr></thead>
         <tbody>${body}</tbody>
       </table>
       ${dayNotes.length ? `<ul class="ai-day-notes">${dayNotes.map(n => `<li>${aiEsc(aiCategoryName(n.category))}: ${aiEsc(n.message)}</li>`).join('')}</ul>` : ''}
@@ -2444,13 +2445,13 @@ async function openAiReplaceModal(pick) {
     primary.onclick = null;
     overlay.querySelectorAll('[data-rtab]').forEach(b => b.classList.toggle('active', b.dataset.rtab === tab));
     if (tab === 'unused') {
-      body.innerHTML = `<p class="ai-muted">Dishes the AI made for this menu that aren't served in ${AI_SECTION_LABEL[pick.section_code]} yet. Already safety-checked.</p>${listHtml(options.unusedDishes, 'unused')}`;
+      body.innerHTML = `<p class="ai-muted">Dishes the AI made for this menu that aren't served in ${AI_SECTION_LABEL[pick.section_code]} yet. Already safety-checked.${options.cuisine ? ` National Day (${aiEsc(options.cuisine)}) dishes are listed first.` : ''}</p>${listHtml(options.unusedDishes, 'unused')}`;
       wireList('unused');
     } else if (tab === 'catalog') {
       body.innerHTML = `<p class="ai-muted">Active Dish Catalog dishes in this category that are set up for ${AI_SECTION_LABEL[pick.section_code]}.</p>${listHtml(options.catalogItems, 'catalog')}`;
       wireList('catalog');
     } else if (tab === 'ask') {
-      body.innerHTML = `<p class="ai-muted">The AI suggests three new dishes for this slot, keeping what the menu rules need here (e.g. a chicken main stays chicken). Each one is safety-checked before you see it.</p>
+      body.innerHTML = `<p class="ai-muted">The AI suggests three new dishes for this slot, keeping what the menu rules need here (e.g. a chicken main stays chicken)${options.cuisine ? `, all ${aiEsc(options.cuisine)} for National Day` : ''}. Each one is safety-checked before you see it.</p>
         <button class="primary" id="ai-ask-btn">Suggest 3 dishes</button><div id="ai-ask-results" aria-live="polite"></div>`;
       body.querySelector('#ai-ask-btn').addEventListener('click', async (e) => {
         const btn = e.currentTarget;
