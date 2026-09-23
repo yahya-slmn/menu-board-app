@@ -1620,15 +1620,17 @@ async function buildAllBuilderGrids() {
       window.api.getSectionSlots(section.code),
       window.api.getSectionItemPool(section.code),
     ]);
-    const slots = slotDefs.map(({ categoryCode, count }) => {
+    const slots = slotDefs.map(({ categoryCode, count, fixedDaily }) => {
       const items = itemsByCategory[categoryCode] || [];
       const dailyItems = items.filter(i => i.is_daily_repeating).slice(0, count);
-      return { categoryCode, count, isDaily: dailyItems.length > 0, dailyItems, eligibleItems: items };
+      // fixedDaily (Staff's three beverages): the category's daily item or nothing -- never a free
+      // choice, same as the engine (MenuGenerator._pickItems).
+      return { categoryCode, count, fixedDaily, isDaily: dailyItems.length > 0, dailyItems, eligibleItems: items };
     });
 
     const selections = {};
     for (const slot of slots) {
-      if (slot.isDaily) continue;
+      if (slot.isDaily || slot.fixedDaily) continue;
       for (const day of state.builder.days) {
         for (let idx = 0; idx < slot.count; idx++) {
           selections[builderSelectionKey(day.date, slot.categoryCode, idx)] = '';
@@ -1637,6 +1639,24 @@ async function buildAllBuilderGrids() {
     }
     state.builder.sections[section.code] = { slots, selections };
   }));
+
+  // Staff's Main Dish carries the school's shared dishes (KG-LP/MS-UP Lunch Main and Starch, MS-UP's
+  // Lunch Vegetable -- see STAFF_MAIN_SOURCE_SECTIONS in lib/generator.js), which live in those
+  // categories, not STAFF_MAIN -- offer them in Staff Main's dropdowns too, grouped by where they
+  // come from.
+  const staffMain = state.builder.sections.STAFF?.slots.find(sl => sl.categoryCode === 'STAFF_MAIN');
+  if (staffMain) {
+    const sharedFrom = [['KG_LP', 'LUNCH_MAIN', 'Shared: Lunch Main'], ['KG_LP', 'LUNCH_STARCH', 'Shared: Lunch Starch'], ['MS_UP', 'LUNCH_VEGETABLE', 'Shared: MS-UP Lunch Vegetable']];
+    const have = new Set(staffMain.eligibleItems.map(it => it.id));
+    for (const [sec, cat, group] of sharedFrom) {
+      const slot = state.builder.sections[sec]?.slots.find(sl => sl.categoryCode === cat);
+      for (const it of slot?.eligibleItems || []) {
+        if (have.has(it.id)) continue;
+        have.add(it.id);
+        staffMain.eligibleItems.push({ ...it, group });
+      }
+    }
+  }
 
   renderBuilderGrid();
   updateBuilderCompleteness();
@@ -1675,6 +1695,17 @@ function renderBuilderGrid() {
   });
 }
 
+// A slot's <option>s; items tagged with a `group` (Staff Main's shared school dishes) go under
+// their own <optgroup> after the slot's own category.
+function builderOptionsHtml(items, current) {
+  const opt = it => `<option value="${it.id}" ${String(it.id) === current ? 'selected' : ''}>${it.name}</option>`;
+  const own = items.filter(it => !it.group);
+  const groups = [...new Set(items.filter(it => it.group).map(it => it.group))];
+  if (!groups.length) return own.map(opt).join('');
+  return `<optgroup label="Staff Main">${own.map(opt).join('')}</optgroup>`
+    + groups.map(g => `<optgroup label="${g}">${items.filter(it => it.group === g).map(opt).join('')}</optgroup>`).join('');
+}
+
 // Renders one day as a vertical table (category column on the left, item rows stacked
 // top-to-bottom underneath), matching the row-per-item layout of the Excel blank menu
 // template (see buildSchoolTemplateSheet in lib/export.js) instead of a horizontal card grid.
@@ -1686,6 +1717,8 @@ function renderBuilderDayTable(code, day, section, catName) {
       slot.dailyItems.forEach(it => {
         rows.push({ label, cellHtml: `<span class="item-name">${it.name}</span>` });
       });
+    } else if (slot.fixedDaily) {
+      rows.push({ label, cellHtml: `<span class="field-warning">No fixed dish set — add one in the Dish Catalog with "Repeats every day automatically" ticked.</span>` });
     } else {
       for (let idx = 0; idx < slot.count; idx++) {
         const key = builderSelectionKey(day.date, slot.categoryCode, idx);
@@ -1695,7 +1728,7 @@ function renderBuilderDayTable(code, day, section, catName) {
           cellHtml: `
             <select class="builder-select" data-key="${key}">
               <option value="">— choose —</option>
-              ${slot.eligibleItems.map(it => `<option value="${it.id}" ${String(it.id) === current ? 'selected' : ''}>${it.name}</option>`).join('')}
+              ${builderOptionsHtml(slot.eligibleItems, current)}
             </select>`,
         });
       }
@@ -1881,7 +1914,7 @@ const AI_CATEGORY_ATTRS = {
   LUNCH_MAIN: { required: ['protein_code', 'sauce_type'], optional: [] },
   LUNCH_STARCH: { required: ['carb_type'], optional: [] },
   STAFF_BREAKFAST: { required: ['dish_concept'], optional: ['protein_code'] },
-  STAFF_MAIN: { required: ['protein_code'], optional: [] },
+  STAFF_MAIN: { required: ['protein_code', 'carb_type'], optional: [] },
   STAFF_LUNCHBOX: { required: ['protein_code'], optional: [] },
 };
 const AI_RUN_STATUS = {
@@ -2335,9 +2368,9 @@ function openAiDishModal(dish) {
 
 function aiPropagationNote(pick) {
   if (pick.section_code === 'KG_LP' && ['LUNCH_MAIN', 'LUNCH_STARCH'].includes(pick.category_code)) {
-    return pick.category_code === 'LUNCH_MAIN' ? 'Also changes MS-UP (identical Lunch Main) and Staff Main.' : 'Also changes MS-UP (identical Lunch Starch).';
+    return `Also changes MS-UP (identical ${pick.category_code === 'LUNCH_MAIN' ? 'Lunch Main' : 'Lunch Starch'}) and Staff Main.`;
   }
-  if (pick.section_code === 'DAYCARE' && pick.category_code === 'LUNCH_MAIN') return 'Also changes Staff Main (it carries Daycare’s Lunch Main).';
+  if (pick.section_code === 'MS_UP' && pick.category_code === 'LUNCH_VEGETABLE') return 'Also changes Staff Main (it carries MS-UP’s Lunch Vegetable).';
   if (pick.category_code === 'AM_SNACK') return 'Also changes Staff Breakfast (it carries every school AM Snack).';
   return '';
 }

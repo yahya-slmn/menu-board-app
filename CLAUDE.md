@@ -99,6 +99,14 @@ terminal instead of `[object Object]`.
 - `SECTION_SLOTS` is the declarative spec of what each section's daily menu
   must contain: an ordered list of `[categoryCode, count, options]`. This is
   the first place to look when a section's menu shape needs to change.
+- Staff Main (since 2026-09-23) is exactly 7: KG-LP/MS-UP's 2 Lunch Mains + 2 Lunch Starches and MS-UP's Lunch
+  Vegetable (forced in, `STAFF_MAIN_SHARED_CATEGORIES` / `STAFF_MAIN_VEGETABLE_*`), then Staff's own 1 VEGAN + 1
+  VEGETARIAN with different `carb_type` (`distinctAmongOwnOnly`). Daycare's main is no longer shared into Staff Main (the
+  export's Lists sheet still lists Daycare mains so older saved menus re-export). "Meat-free" rules (Staff Breakfast, Lunch
+  Box) accept VEGAN or VEGETARIAN. Daycare's Lunch Main never repeats the previous school day's protein
+  (`noConsecutiveProtein`, including the last saved school day before the run). Staff's lunch drinks are three FIXED
+  daily-repeating items (`STAFF_WATER` / `STAFF_SOFT_DRINK` / `STAFF_FRESH_JUICE`, `fixedDaily`), replacing `STAFF_JUICE`,
+  which stays only for old menus; with no daily item set the row stays empty and a warning says so.
 - `options` can include `distinctProtein` (no two picks share a protein
   type), `distinctAttr` (no two picks share a `sauce_type`/`carb_type`/
   `dish_concept` value), and `composition` (ordered sub-rules like "exactly 1

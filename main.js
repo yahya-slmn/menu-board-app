@@ -4285,40 +4285,49 @@ async function fetchListsSheetData(sectionCodes) {
       const meta = getCategoryByCode(categoryCode);
       let items = pool.filter(it => it.category_id === meta.id);
 
-      // Staff's Main Dish slot force-includes that day's shared KG-LP/MS-UP/Daycare Lunch
-      // Main picks verbatim (see lib/generator.js's STAFF_MAIN_SOURCE_SECTIONS/
-      // STAFF_MAIN_DAYCARE_SOURCE_SECTION) -- those items are catalogued as LUNCH_MAIN, not
-      // STAFF_MAIN, so the plain category_id filter above never finds them. Without this,
-      // they'd never enter STAFF's STAFF_MAIN bucket, so List_STAFF_STAFF_MAIN/
-      // Lookup_STAFF_STAFF_MAIN wouldn't contain them either -- the exported sheet's live
-      // INDEX/MATCH lookup formula would return blank via IFERROR no matter what
+      // Staff's Main Dish slot force-includes that day's shared school dishes verbatim (see
+      // lib/generator.js's STAFF_MAIN_SOURCE_SECTIONS): KG-LP/MS-UP's Lunch Main and Lunch Starch
+      // and MS-UP's Lunch Vegetable. Daycare's Lunch Main is kept in the list too -- it was shared
+      // into Staff Main before 2026-09-23, and menus saved then must still export. Those items are
+      // catalogued under their own categories, not STAFF_MAIN, so the plain category_id filter above
+      // never finds them. Without this, they'd never enter STAFF's STAFF_MAIN bucket, so
+      // List_STAFF_STAFF_MAIN/Lookup_STAFF_STAFF_MAIN wouldn't contain them either -- the exported
+      // sheet's live INDEX/MATCH lookup formula would return blank via IFERROR no matter what
       // item_portions data exists, since MATCH can't find a name that was never in the list.
       if (sectionCode === 'STAFF' && categoryCode === 'STAFF_MAIN') {
-        const lunchMainCat = getCategoryByCode('LUNCH_MAIN');
-        // Filter to the LUNCH_MAIN catalog FIRST (bounded, one category) rather than starting
-        // from item_portions filtered only by age_group_id -- that pulls in every portion row
-        // across KG-LP/MS-UP/Daycare's ENTIRE catalogs (LUNCH_MAIN alone is 700+ rows just for
-        // MS-UP), silently blowing past PostgREST's 1000-row cap with no .range() pagination,
-        // which is exactly what caused "Korean Fried Chicken" and "Chicken Emansei..." to drop
-        // out of an earlier version of this fix despite meeting every eligibility criterion.
-        const lunchMainItems = await fetchAllRowsMain(() => supabase
-          .from('menu_items').select('id, name, rc_code, is_daily_repeating, category_id')
-          .eq('is_active', 1).eq('category_id', lunchMainCat.id));
-
-        if (lunchMainItems.length) {
-          const sourceAgeGroupIds = ['KG_LP', 'MS_UP', 'DAYCARE']
+        const shares = [
+          ['LUNCH_MAIN', ['KG_LP', 'MS_UP', 'DAYCARE']],
+          ['LUNCH_STARCH', ['KG_LP', 'MS_UP']],
+          ['LUNCH_VEGETABLE', ['MS_UP']],
+        ];
+        const existingIds = new Set(items.map(i => i.id));
+        for (const [shareCode, sourceSections] of shares) {
+          const shareCat = getCategoryByCode(shareCode);
+          if (!shareCat) continue;
+          // Filter to the one category FIRST (bounded) rather than starting from item_portions
+          // filtered only by age_group_id -- that pulls in every portion row across the source
+          // sections' ENTIRE catalogs (LUNCH_MAIN alone is 700+ rows just for MS-UP), silently
+          // blowing past PostgREST's 1000-row cap with no .range() pagination, which is exactly what
+          // caused "Korean Fried Chicken" and "Chicken Emansei..." to drop out of an earlier version
+          // of this fix despite meeting every eligibility criterion.
+          const shareItems = await fetchAllRowsMain(() => supabase
+            .from('menu_items').select('id, name, rc_code, is_daily_repeating, category_id')
+            .eq('is_active', 1).eq('category_id', shareCat.id));
+          if (!shareItems.length) continue;
+          const sourceAgeGroupIds = sourceSections
             .flatMap(code => getAgeGroupsForSection(getSectionByCode(code).id)).map(a => a.id);
           const chunkSize = 300;
           const eligibleIds = new Set();
-          const lunchMainItemIds = lunchMainItems.map(i => i.id);
-          for (let i = 0; i < lunchMainItemIds.length; i += chunkSize) {
-            const chunk = lunchMainItemIds.slice(i, i + chunkSize);
+          const shareItemIds = shareItems.map(i => i.id);
+          for (let i = 0; i < shareItemIds.length; i += chunkSize) {
+            const chunk = shareItemIds.slice(i, i + chunkSize);
             const rows = await fetchAllRowsMain(() => supabase
               .from('item_portions').select('item_id').in('item_id', chunk).in('age_group_id', sourceAgeGroupIds));
             rows.forEach(r => eligibleIds.add(r.item_id));
           }
-          const existingIds = new Set(items.map(i => i.id));
-          items = items.concat(lunchMainItems.filter(i => eligibleIds.has(i.id) && !existingIds.has(i.id)));
+          for (const it of shareItems) {
+            if (eligibleIds.has(it.id) && !existingIds.has(it.id)) { items.push(it); existingIds.add(it.id); }
+          }
         }
       }
 
@@ -4435,7 +4444,7 @@ ipcMain.handle('ai-menu-suggest', (e, payload) => aiMenuReview.suggestForPick(pa
 ipcMain.handle('ai-menu-discard-run', (e, runId) => aiMenuReview.discardRun(runId));
 
 ipcMain.handle('get-section-slots', (e, sectionCode) => {
-  return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count]) => ({ categoryCode, count }));
+  return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count, options]) => ({ categoryCode, count, fixedDaily: !!options.fixedDaily }));
 });
 
 ipcMain.handle('get-school-days', (e, { startDate, numWeekdays }) => {
