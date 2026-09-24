@@ -11,7 +11,8 @@ const state = {
   // Menu Planner (2026-09-25): Generate Menu / Build Menu / Export All Sections behind one nav entry.
   // mode 'generate' | 'build'; scope (Generate only) 'one' = Generate Menu, 'all' = Export All Sections.
   // busy: a generation run is in flight -- the switches stay disabled until it finishes.
-  menuPlanner: { mode: 'generate', scope: 'one', busy: false },
+  // fields: the Generate form's name / created by / dates, shared by both scopes for the session.
+  menuPlanner: { mode: 'generate', scope: 'one', busy: false, restored: false, fields: { label: '', createdBy: '', start: '', end: '' } },
   categories: [],
   proteinTypes: [],
   currentGeneratedMenuId: null,
@@ -832,6 +833,7 @@ async function renderView() {
   updateItemCatalogExpansion();
   const main = document.getElementById('main');
   main.dataset.view = state.currentView;
+  if (state.currentView === 'menuPlanner') restoreMenuPlannerMode(state.menuPlanner); // before the layout below
   main.classList.toggle('build-mode', state.currentView === 'build' || (state.currentView === 'menuPlanner' && state.menuPlanner.mode === 'build'));
   try {
   if (state.currentView === 'items') return await renderItemsView(main);
@@ -1478,8 +1480,47 @@ async function openItemModal(existingItem) {
 // Nothing here touches generation: every screen keeps calling the same IPC. Build Menu's grid
 // lives in state.builder, so switching modes never loses it.
 // ============================================================
+// The last mode used is remembered on this computer (a convenience only: any storage failure just
+// means the default, Generate + One Section).
+const MENU_PLANNER_MODE_KEY = 'menuPlannerMode';
+function restoreMenuPlannerMode(mp) {
+  if (mp.restored) return;
+  mp.restored = true;
+  try {
+    const saved = JSON.parse(localStorage.getItem(MENU_PLANNER_MODE_KEY) || 'null');
+    if (saved && ['generate', 'build'].includes(saved.mode)) mp.mode = saved.mode;
+    if (saved && ['one', 'all'].includes(saved.scope)) mp.scope = saved.scope;
+  } catch { /* keep the default */ }
+}
+function saveMenuPlannerMode(mp) {
+  try { localStorage.setItem(MENU_PLANNER_MODE_KEY, JSON.stringify({ mode: mp.mode, scope: mp.scope })); } catch { /* not critical */ }
+}
+
+// Generate + One Section and Generate + All Sections ask for the same four things: carry them across
+// the switch (session only). Fills the screen's own inputs after it has rendered and records edits;
+// the date change event lets the screen's own date-range wiring update its "N school days" hint.
+const MENU_PLANNER_FIELD_IDS = {
+  one: { label: 'g-label', createdBy: 'g-created-by', start: 'g-start', end: 'g-end' },
+  all: { label: 'ea-label', createdBy: 'ea-created-by', start: 'ea-start', end: 'ea-end' },
+};
+function wireMenuPlannerFields(mp) {
+  const ids = MENU_PLANNER_FIELD_IDS[mp.scope];
+  for (const key of ['label', 'createdBy', 'start', 'end']) {
+    const el = document.getElementById(ids[key]);
+    if (!el) continue;
+    if (mp.fields[key] && !el.value) {
+      el.value = mp.fields[key];
+      if (key === 'start' || key === 'end') el.dispatchEvent(new Event('change'));
+    }
+    const record = () => { mp.fields[key] = el.value; };
+    el.addEventListener('input', record);
+    el.addEventListener('change', record);
+  }
+}
+
 function renderMenuPlannerView(main) {
   const mp = state.menuPlanner;
+  restoreMenuPlannerMode(mp);
   const seg = (group, value, label, current) =>
     `<button type="button" class="planner-seg-btn ${current === value ? 'active' : ''}" data-planner-${group}="${value}" aria-pressed="${current === value}">${label}</button>`;
   main.innerHTML = `
@@ -1500,12 +1541,14 @@ function renderMenuPlannerView(main) {
       if (mp.busy) return;
       if (btn.dataset.plannerMode) mp.mode = btn.dataset.plannerMode;
       if (btn.dataset.plannerScope) mp.scope = btn.dataset.plannerScope;
+      saveMenuPlannerMode(mp);
       renderView();
     });
   });
   const body = document.getElementById('planner-body');
   if (mp.mode === 'build') return renderBuildMenuView(body);
-  return mp.scope === 'all' ? renderExportAllView(body) : renderGenerateView(body);
+  const rendered = mp.scope === 'all' ? renderExportAllView(body) : renderGenerateView(body);
+  return Promise.resolve(rendered).then((r) => { wireMenuPlannerFields(mp); return r; });
 }
 
 // A Generate / Export All run is in flight: lock the Menu Planner switches until it finishes.

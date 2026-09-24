@@ -59,7 +59,10 @@ terminal instead of `[object Object]`.
   Generate / Build switch (Generate adds All Sections = Export All / One Section = Generate Menu) above
   the three screens' own, unchanged render functions, drawn into `#planner-body` (`display: contents`,
   so Build Menu's scroll area + docked tabs still lay out in `#main`). `state.menuPlanner` holds the
-  mode; the switches lock while a run is in flight (`setMenuPlannerBusy`). `login.html`/
+  mode; the switches lock while a run is in flight (`setMenuPlannerBusy`). The Generate name / created by
+  / dates carry between All Sections and One Section for the session (`wireMenuPlannerFields`, which
+  fills the screens' own inputs after they render); Build Menu keeps its own. The last mode is
+  remembered in `localStorage.menuPlannerMode` (default Generate + One Section). `login.html`/
   `login.js` are a separate, pre-auth window (`createLoginWindow()` in
   `main.js`) shown before the main window ever loads.
 
