@@ -140,7 +140,11 @@ name, mirroring the logic originally used to import the seed Excel file. Pure
 function, no DB access — returns `{ category: null, ... }` when it can't
 guess, forcing manual selection in the UI.
 
-**Export (`lib/export.js`):** builds `.xlsx` workbooks with `exceljs`. Each
+**Export (`lib/export.js`):** builds `.xlsx` workbooks with `exceljs`. Since 2026-09-24 no menu export (Generate Menu,
+Build Menu and its blank template, Export All, AI Menu Generator, History re-exports) carries an RC or a quantity column --
+just meal period, category / item type and dish name(s); RC stays in-app catalog data. The hidden `_Lists` sheet holds only
+dish names for the dish-name dropdowns (`List_*` ranges). The blank template keeps its fill-in headcount (School) and
+department (Staff) columns. Each
 section has its own sheet builder in `SECTION_BUILDERS` (school sections
 share `buildSchoolSheet`; Staff and CEO each get a distinct layout) because
 their source spreadsheets have fundamentally different column structures —
