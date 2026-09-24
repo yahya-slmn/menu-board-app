@@ -1643,6 +1643,43 @@ function builderSelectionKey(date, categoryCode, idx) {
   return `${date}|${categoryCode}|${idx}`;
 }
 
+// Daycare and KG-LP serve ONE shared AM Snack and ONE shared PM Snack a day (lib/generator.js
+// SECTION_COUPLINGS, 2026-09-24): chosen on the Daycare tab, KG-LP's cells follow read-only.
+const BUILDER_SHARED_SNACKS = { source: 'DAYCARE', copy: 'KG_LP', categories: ['AM_SNACK', 'PM_SNACK'] };
+// Pastry / Cold Kitchen for a snack cell on the grid's dayIndex-th school day (1-based); mirrors
+// SNACK_STYLE_BY_PATTERN / snackStyleFor in lib/generator.js (Pattern A on day 1 of the range).
+const BUILDER_SNACK_STYLE = {
+  A: { AM_SNACK: { DAYCARE: 'PASTRY', KG_LP: 'PASTRY', MS_UP: 'COLD_KITCHEN' }, PM_SNACK: { DAYCARE: 'COLD_KITCHEN', KG_LP: 'COLD_KITCHEN', MS_UP: 'PASTRY' } },
+  B: { AM_SNACK: { DAYCARE: 'COLD_KITCHEN', KG_LP: 'COLD_KITCHEN', MS_UP: 'PASTRY' }, PM_SNACK: { DAYCARE: 'PASTRY', KG_LP: 'PASTRY', MS_UP: 'COLD_KITCHEN' } },
+};
+const BUILDER_STYLE_LABEL = { PASTRY: 'Pastry', COLD_KITCHEN: 'Cold Kitchen' };
+function builderSnackStyle(dayIndex, categoryCode, sectionCode) {
+  return BUILDER_SNACK_STYLE[dayIndex % 2 === 1 ? 'A' : 'B'][categoryCode]?.[sectionCode] || null;
+}
+
+// Copies Daycare's snack choices into KG-LP's (hidden, read-only) selections. Run after any change
+// that can touch them, and before the completeness count and the export.
+function syncBuilderSharedSnacks() {
+  const src = state.builder.sections[BUILDER_SHARED_SNACKS.source];
+  const dst = state.builder.sections[BUILDER_SHARED_SNACKS.copy];
+  if (!src || !dst) return;
+  for (const day of state.builder.days) {
+    for (const cat of BUILDER_SHARED_SNACKS.categories) {
+      const key = builderSelectionKey(day.date, cat, 0);
+      if (key in dst.selections) dst.selections[key] = src.selections[key] || '';
+    }
+  }
+}
+
+// The style note under a snack cell: nothing when the dish matches today's style, otherwise
+// "breaks today's rotation" (allowed -- Build Menu is the manual override screen; Auto-Fill keeps it).
+function builderStyleNoteHtml(item, requiredStyle) {
+  if (!requiredStyle || !item) return '';
+  if (item.am_snack_style === requiredStyle) return '';
+  const what = item.am_snack_style ? BUILDER_STYLE_LABEL[item.am_snack_style] : 'No style set';
+  return `<div class="builder-style-note">${what} — breaks today's rotation (${BUILDER_STYLE_LABEL[requiredStyle]} today)</div>`;
+}
+
 function renderBuildMenuView(main) {
   if (!state.builder.activeSection) state.builder.activeSection = state.sections[0].code;
 
@@ -1754,6 +1791,17 @@ async function buildAllBuilderGrids() {
     state.builder.sections[section.code] = { slots, selections };
   }));
 
+  // The shared Daycare / KG-LP snacks: Daycare's dropdown offers only dishes both catalogs have
+  // (the engine's shared pool); KG-LP's cells follow Daycare's pick.
+  for (const cat of BUILDER_SHARED_SNACKS.categories) {
+    const src = state.builder.sections[BUILDER_SHARED_SNACKS.source]?.slots.find(sl => sl.categoryCode === cat);
+    const dst = state.builder.sections[BUILDER_SHARED_SNACKS.copy]?.slots.find(sl => sl.categoryCode === cat);
+    if (!src || !dst) continue;
+    const inCopy = new Set(dst.eligibleItems.map(it => it.id));
+    src.eligibleItems = src.eligibleItems.filter(it => inCopy.has(it.id));
+    dst.sharedFrom = BUILDER_SHARED_SNACKS.source;
+  }
+
   // Staff's Main Dish carries the school's shared dishes (KG-LP/MS-UP Lunch Main and Starch, MS-UP's
   // Lunch Vegetable -- see STAFF_MAIN_SOURCE_SECTIONS in lib/generator.js), which live in those
   // categories, not STAFF_MAIN -- offer them in Staff Main's dropdowns too, grouped by where they
@@ -1804,15 +1852,31 @@ function renderBuilderGrid() {
   daysContainer.querySelectorAll('select[data-key]').forEach(sel => {
     sel.addEventListener('change', () => {
       state.builder.sections[code].selections[sel.dataset.key] = sel.value;
+      if (code === BUILDER_SHARED_SNACKS.source) syncBuilderSharedSnacks();
+      // Refresh this cell's "breaks today's rotation" note in place.
+      const note = sel.parentElement.querySelector('.builder-style-note-slot');
+      if (note) {
+        const slot = section.slots.find(sl => sl.categoryCode === sel.dataset.cat);
+        const item = slot?.eligibleItems.find(it => String(it.id) === sel.value);
+        note.innerHTML = sel.value ? builderStyleNoteHtml(item, sel.dataset.style || null) : '';
+      }
       updateBuilderCompleteness();
     });
   });
 }
 
 // A slot's <option>s; items tagged with a `group` (Staff Main's shared school dishes) go under
-// their own <optgroup> after the slot's own category.
-function builderOptionsHtml(items, current) {
+// their own <optgroup> after the slot's own category. requiredStyle (snack cells): today's style
+// first, then the other style, labelled as breaking the rotation, then dishes without a style.
+function builderOptionsHtml(items, current, requiredStyle = null) {
   const opt = it => `<option value="${it.id}" ${String(it.id) === current ? 'selected' : ''}>${it.name}</option>`;
+  if (requiredStyle) {
+    const other = requiredStyle === 'PASTRY' ? 'COLD_KITCHEN' : 'PASTRY';
+    const groupHtml = (label, list) => (list.length ? `<optgroup label="${label}">${list.map(opt).join('')}</optgroup>` : '');
+    return groupHtml(`${BUILDER_STYLE_LABEL[requiredStyle]} — today's style`, items.filter(it => it.am_snack_style === requiredStyle))
+      + groupHtml(`${BUILDER_STYLE_LABEL[other]} — breaks today's rotation`, items.filter(it => it.am_snack_style === other))
+      + groupHtml('No style set', items.filter(it => !BUILDER_STYLE_LABEL[it.am_snack_style]));
+  }
   const own = items.filter(it => !it.group);
   const groups = [...new Set(items.filter(it => it.group).map(it => it.group))];
   if (!groups.length) return own.map(opt).join('');
@@ -1825,9 +1889,23 @@ function builderOptionsHtml(items, current) {
 // template (see buildSchoolTemplateSheet in lib/export.js) instead of a horizontal card grid.
 function renderBuilderDayTable(code, day, section, catName) {
   const rows = [];
+  const dayIndex = state.builder.days.findIndex(d => d.date === day.date) + 1;
   section.slots.forEach(slot => {
     const label = catName[slot.categoryCode] || slot.categoryCode.replace(/_/g, ' ');
-    if (slot.isDaily) {
+    const requiredStyle = builderSnackStyle(dayIndex, slot.categoryCode, code);
+    if (slot.sharedFrom) {
+      // KG-LP's AM / PM Snack: Daycare's dish, read-only here.
+      const src = state.builder.sections[slot.sharedFrom];
+      const srcSlot = src?.slots.find(sl => sl.categoryCode === slot.categoryCode);
+      const id = src?.selections[builderSelectionKey(day.date, slot.categoryCode, 0)] || '';
+      const item = srcSlot?.eligibleItems.find(it => String(it.id) === id);
+      rows.push({
+        label,
+        cellHtml: item
+          ? `<span class="item-name">${item.name}</span> <span class="ai-shared" title="Shared dish: choose it on the Daycare tab and it updates here.">from Daycare</span>${builderStyleNoteHtml(item, requiredStyle)}`
+          : `<span class="ai-shared">Shared with Daycare — choose it on the Daycare tab</span>`,
+      });
+    } else if (slot.isDaily) {
       slot.dailyItems.forEach(it => {
         rows.push({ label, cellHtml: `<span class="item-name">${it.name}</span>` });
       });
@@ -1837,13 +1915,14 @@ function renderBuilderDayTable(code, day, section, catName) {
       for (let idx = 0; idx < slot.count; idx++) {
         const key = builderSelectionKey(day.date, slot.categoryCode, idx);
         const current = state.builder.sections[code].selections[key] || '';
+        const item = requiredStyle && current ? slot.eligibleItems.find(it => String(it.id) === current) : null;
         rows.push({
           label,
           cellHtml: `
-            <select class="builder-select" data-key="${key}">
+            <select class="builder-select" data-key="${key}" data-cat="${slot.categoryCode}" ${requiredStyle ? `data-style="${requiredStyle}" title="${BUILDER_STYLE_LABEL[requiredStyle]} today (Pastry / Cold Kitchen rotation)"` : ''}>
               <option value="">— choose —</option>
-              ${builderOptionsHtml(slot.eligibleItems, current)}
-            </select>`,
+              ${builderOptionsHtml(slot.eligibleItems, current, requiredStyle)}
+            </select>${requiredStyle ? `<div class="builder-style-note-slot">${builderStyleNoteHtml(item, requiredStyle)}</div>` : ''}`,
         });
       }
     }
@@ -1879,7 +1958,26 @@ async function fillBuilderSuggestions(code) {
   const statusEl = document.getElementById('bm-status');
   statusEl.textContent = `Auto-filling ${currentBuilderSectionName(code)}…`;
 
-  const { resultDays, warnings } = await window.api.builderFillSuggestions({ sectionCode: code, startDate, numWeekdays });
+  // The other sections' picks in this grid (not saved anywhere yet) stand in for their saved menus, so
+  // Auto-Fill copies the shared dishes from here: KG-LP's snacks from Daycare, MS-UP's lunch from
+  // KG-LP (or the reverse), Staff's shares from the school tabs.
+  syncBuilderSharedSnacks();
+  const gridPicks = {};
+  for (const [sec, { slots, selections }] of Object.entries(state.builder.sections)) {
+    if (sec === code) continue;
+    const byDate = {};
+    for (const day of state.builder.days) {
+      for (const slot of slots) {
+        // KG-LP's snack cells only mirror Daycare's: never feed them back when filling Daycare.
+        if (code === BUILDER_SHARED_SNACKS.source && sec === BUILDER_SHARED_SNACKS.copy && BUILDER_SHARED_SNACKS.categories.includes(slot.categoryCode)) continue;
+        const chosen = slot.isDaily ? slot.dailyItems.map(it => it.id)
+          : Array.from({ length: slot.count }, (_, idx) => selections[builderSelectionKey(day.date, slot.categoryCode, idx)]).filter(Boolean).map(Number);
+        if (chosen.length) ((byDate[day.date] = byDate[day.date] || {})[slot.categoryCode] = chosen);
+      }
+    }
+    if (Object.keys(byDate).length) gridPicks[sec] = byDate;
+  }
+  const { resultDays, warnings } = await window.api.builderFillSuggestions({ sectionCode: code, startDate, numWeekdays, gridPicks });
   const section = state.builder.sections[code];
 
   for (const day of resultDays) {
@@ -1899,11 +1997,12 @@ async function fillBuilderSuggestions(code) {
         const key = builderSelectionKey(day.date, catCode, idx);
         if (key in section.selections) section.selections[key] = String(item.id);
         if (slot && !slot.eligibleItems.find(it => it.id === item.id)) {
-          slot.eligibleItems.push({ id: item.id, name: item.name });
+          slot.eligibleItems.push({ id: item.id, name: item.name, am_snack_style: item.am_snack_style ?? null });
         }
       });
     }
   }
+  syncBuilderSharedSnacks();
 
   renderBuilderGrid();
   updateBuilderCompleteness();
@@ -1921,6 +2020,7 @@ function updateBuilderCompleteness() {
   const statusEl = document.getElementById('bm-status');
   if (!btn) return;
 
+  syncBuilderSharedSnacks();
   const allCodes = state.sections.map(s => s.code);
   const builtCodes = Object.keys(state.builder.sections);
   const missing = allCodes.filter(c => !builtCodes.includes(c));
@@ -1942,6 +2042,7 @@ function updateBuilderCompleteness() {
 }
 
 async function exportBuilderMenu() {
+  syncBuilderSharedSnacks();
   const { label, createdBy, startDate, days, sections } = state.builder;
   const statusEl = document.getElementById('bm-status');
   document.getElementById('bm-export-btn').disabled = true;
@@ -2003,7 +2104,8 @@ async function exportBuilderBlankTemplate() {
 // Catalog or History. Every change goes through main.js, which re-runs the nut/sesame, seafood and
 // halal check (a hit blocks the change, no override) and the catalog duplicate check; menu rules
 // are re-checked after each change but only warn. Shared dishes (MS-UP's Lunch Main / Starch,
-// Staff's shared Main and Breakfast) are read-only copies: change the source and they follow.
+// KG-LP's AM / PM Snack from Daycare, Staff's shared Main and Breakfast) are read-only copies:
+// change the source and they follow.
 // ============================================================
 const AI_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF'];
 const AI_SECTION_LABEL = { DAYCARE: 'Daycare', KG_LP: 'KG-LP', MS_UP: 'MS-UP', STAFF: 'Staff' };
@@ -2020,14 +2122,15 @@ const AI_ATTR_OPTIONS = {
   dish_concept: [['EGG', 'Egg'], ['PASTRY', 'Pastry'], ['SANDWICH', 'Sandwich / wrap'], ['CEREAL_DAIRY', 'Cereal / dairy'], ['CHEESE', 'Cheese'], ['OTHER', 'Other']],
   am_snack_style: [['PASTRY', 'Pastry'], ['COLD_KITCHEN', 'Cold Kitchen']],
 };
-const AI_ATTR_LABEL = { protein_code: 'Protein', sauce_type: 'Sauce style', carb_type: 'Starch type', dish_concept: 'Dish type', am_snack_style: 'AM Snack style' };
+const AI_ATTR_LABEL = { protein_code: 'Protein', sauce_type: 'Sauce style', carb_type: 'Starch type', dish_concept: 'Dish type', am_snack_style: 'Pastry / Cold Kitchen' };
 // Which attributes each category's rules read (required ones are marked *); mirrors REQUIRED_ATTRS
 // in lib/aiMenuGenerate.js.
 const AI_CATEGORY_ATTRS = {
   AM_SNACK: { required: ['am_snack_style', 'dish_concept'], optional: ['protein_code'] },
   LUNCH_MAIN: { required: ['protein_code', 'sauce_type'], optional: [] },
   LUNCH_STARCH: { required: ['carb_type'], optional: [] },
-  STAFF_BREAKFAST: { required: ['dish_concept'], optional: ['protein_code'] },
+  PM_SNACK: { required: ['am_snack_style'], optional: [] },
+  STAFF_BREAKFAST: { required: ['dish_concept', 'am_snack_style'], optional: ['protein_code'] },
   STAFF_MAIN: { required: ['protein_code', 'carb_type'], optional: [] },
   STAFF_LUNCHBOX: { required: ['protein_code'], optional: [] },
 };

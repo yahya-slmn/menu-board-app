@@ -4567,8 +4567,33 @@ ipcMain.handle('get-section-item-pool', async (e, sectionCode) => {
   return byCategory;
 });
 
-ipcMain.handle('builder-fill-suggestions', async (e, { sectionCode, startDate, numWeekdays }) => {
-  const gen = new MenuGenerator();
+// gridPicks: { [sectionCode]: { [date]: { [categoryCode]: [itemId, ...] } } } -- the OTHER sections'
+// current Build Menu picks (unsaved). They stand in for saved partner menus (the engine's
+// partnerPicks, the same in-memory path the AI Menu Generator uses), so the shared dishes follow the
+// grid: KG-LP's snacks from Daycare (or the reverse), MS-UP's lunch from KG-LP, Staff's shares. A
+// section with nothing picked yet is simply absent, and the engine generates fresh for it.
+ipcMain.handle('builder-fill-suggestions', async (e, { sectionCode, startDate, numWeekdays, gridPicks }) => {
+  let partnerPicks = null;
+  if (gridPicks && Object.keys(gridPicks).length) {
+    const ids = [...new Set(Object.values(gridPicks).flatMap(byDate => Object.values(byDate).flatMap(byCat => Object.values(byCat).flat())))];
+    const byId = new Map();
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data, error } = await supabase.from('menu_items')
+        .select('id, name, rc_code, protein_type_id, is_daily_repeating, sauce_type, carb_type, dish_concept, am_snack_style, category_id, is_active')
+        .in('id', ids.slice(i, i + 300));
+      if (error) throw supaFail('builder-fill-suggestions: load grid items', error);
+      for (const it of data) byId.set(it.id, it);
+    }
+    partnerPicks = {};
+    for (const [sec, byDate] of Object.entries(gridPicks)) {
+      partnerPicks[sec] = {};
+      for (const [date, byCat] of Object.entries(byDate)) {
+        partnerPicks[sec][date] = {};
+        for (const [cat, list] of Object.entries(byCat)) partnerPicks[sec][date][cat] = list.map(id => byId.get(id)).filter(Boolean);
+      }
+    }
+  }
+  const gen = new MenuGenerator({ partnerPicks });
   const { resultDays } = await gen.computeMenu(sectionCode, new Date(startDate), numWeekdays);
   return { resultDays, warnings: gen.warnings };
 });
