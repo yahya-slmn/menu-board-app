@@ -461,16 +461,15 @@ function showToast(message) {
 // Whether it's safe to blow away #main's current content and re-render the active view.
 // Every view in SAFE_VIEWS re-fetches its own primary data live on every render already (see
 // renderItemsView/renderHistoryView/renderRecipeListView/renderIngredientsView/
-// renderExtractedIngredientsView/renderExportAllView/renderGenerateView), so replacing them just shows the same screen with
-// fresher data underneath. Build Menu (state.builder.sections[...].selections) and an
+// renderExtractedIngredientsView, and Menu Planner's Generate modes), so replacing them just shows the same screen with
+// fresher data underneath. Menu Planner's Build mode (state.builder.sections[...].selections) and an
 // in-progress Recipe/Extractor form (state.recipes/extractor.ingredientRows) hold real unsaved work that a
 // re-render would silently discard, and an open Add/Edit modal (Item/Ingredient, appended to
 // document.body) was populated from data fetched at modal-open time -- none of these should
 // ever be touched by a background refresh.
-const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'exportAll', 'generate', 'menuPlanner'];
+const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'menuPlanner'];
 function isSafeToForceRerender() {
   if (document.querySelector('.modal-overlay')) return false;
-  if (state.currentView === 'build') return false;
   // Menu Planner: Build mode holds the unsaved grid; a Generate run in flight must finish first.
   if (state.currentView === 'menuPlanner' && (state.menuPlanner.mode === 'build' || state.menuPlanner.busy)) return false;
   if (state.currentView === 'recipes' && state.recipes.view === 'form') return false;
@@ -688,8 +687,9 @@ function renderSectionNav() {
   });
 }
 
-// The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
-const MENU_GROUP_VIEWS = ['menuPlanner', 'generate', 'build', 'aiMenu', 'exportAll', 'menuIngredients', 'cleanMenu'];
+// The screens grouped under the "Menu" nav parent (see index.html's #menu-sublist). Generate Menu,
+// Build Menu and Export All Sections are modes of Menu Planner, not views of their own.
+const MENU_GROUP_VIEWS = ['menuPlanner', 'aiMenu', 'menuIngredients', 'cleanMenu'];
 
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
@@ -717,8 +717,8 @@ function wireNav() {
   });
 
   // "Menu" parent button has no data-view/screen of its own -- it just expands/collapses its
-  // sub-list, landing on the first child (Generate Menu) the first time you enter the group,
-  // same interaction as Dish Catalog above.
+  // sub-list, landing on the first child (Menu Planner, in its last-used mode) the first time you
+  // enter the group, same interaction as Dish Catalog above.
   document.getElementById('menu-parent-btn').addEventListener('click', () => {
     if (isSidebarCollapsed()) {
       toggleRailFlyout(document.getElementById('menu-parent-btn'), document.getElementById('menu-sublist'));
@@ -834,15 +834,12 @@ async function renderView() {
   const main = document.getElementById('main');
   main.dataset.view = state.currentView;
   if (state.currentView === 'menuPlanner') restoreMenuPlannerMode(state.menuPlanner); // before the layout below
-  main.classList.toggle('build-mode', state.currentView === 'build' || (state.currentView === 'menuPlanner' && state.menuPlanner.mode === 'build'));
+  main.classList.toggle('build-mode', state.currentView === 'menuPlanner' && state.menuPlanner.mode === 'build');
   try {
   if (state.currentView === 'items') return await renderItemsView(main);
   if (state.currentView === 'menuPlanner') return await renderMenuPlannerView(main);
-  if (state.currentView === 'generate') return await renderGenerateView(main);
-  if (state.currentView === 'build') return await renderBuildMenuView(main);
   if (state.currentView === 'aiMenu') return await renderAiMenuView(main);
   if (state.currentView === 'history') return await renderHistoryView(main);
-  if (state.currentView === 'exportAll') return await renderExportAllView(main);
   if (state.currentView === 'menuIngredients') return await renderMenuIngredientsView(main);
   if (state.currentView === 'cleanMenu') return await renderCleanMenuView(main);
   if (state.currentView === 'recipes') return await renderRecipesView(main);

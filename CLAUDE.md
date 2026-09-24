@@ -62,7 +62,8 @@ terminal instead of `[object Object]`.
   mode; the switches lock while a run is in flight (`setMenuPlannerBusy`). The Generate name / created by
   / dates carry between All Sections and One Section for the session (`wireMenuPlannerFields`, which
   fills the screens' own inputs after they render); Build Menu keeps its own. The last mode is
-  remembered in `localStorage.menuPlannerMode` (default Generate + One Section). `login.html`/
+  remembered in `localStorage.menuPlannerMode` (default Generate + One Section). There are no
+  separate `generate` / `build` / `exportAll` views any more: they are Menu Planner modes only. `login.html`/
   `login.js` are a separate, pre-auth window (`createLoginWindow()` in
   `main.js`) shown before the main window ever loads.
 
