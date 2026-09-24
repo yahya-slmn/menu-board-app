@@ -106,7 +106,13 @@ terminal instead of `[object Object]`.
   Box) accept VEGAN or VEGETARIAN. Daycare's Lunch Main never repeats the previous school day's protein
   (`noConsecutiveProtein`, including the last saved school day before the run). Staff's lunch drinks are three FIXED
   daily-repeating items (`STAFF_WATER` / `STAFF_SOFT_DRINK` / `STAFF_FRESH_JUICE`, `fixedDaily`), replacing `STAFF_JUICE`,
-  which stays only for old menus; with no daily item set the row stays empty and a warning says so.
+  which stays only for old menus; with no daily item set the row stays empty and a warning says so. They export under one
+  "Beverages" label. Staff Fruit Basket left Staff lunch on 2026-09-24 (`STAFF_FRUIT_BASKET` stays in the export map / parser
+  vocabulary only so older menus still export and parse).
+- Reading exports back in (`lib/menuIngredients.js` `parseWorkbookDishes`, used by Menu Ingredients Generator and the Recipe
+  Generator's upload): a day block is found by date + weekday; layout comes from the old RC / Quantity / Weight-Unit markers
+  when present (files already sent out), else CEO by its person-name header cells (`lib/menuLayout.js` `CEO_PERSONS`, shared
+  with the exporter) or by two twin dish columns, and School vs Staff by vocabulary (warns only when the fit is unclear).
 - `options` can include `distinctProtein` (no two picks share a protein
   type), `distinctAttr` (no two picks share a `sauce_type`/`carb_type`/
   `dish_concept` value), and `composition` (ordered sub-rules like "exactly 1
