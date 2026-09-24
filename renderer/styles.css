@@ -329,6 +329,18 @@ table.items-table td.cat-cell {
   box-shadow: var(--shadow);
 }
 
+/* ---------------- Menu Planner shell ---------------- */
+/* The three screens render into #planner-body; display: contents keeps Build Menu's
+   .build-scroll / .builder-tabs laid out as direct flex children of .main.build-mode. */
+#planner-body { display: contents; }
+.planner-switch { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
+.planner-switch.in-build { flex: 0 0 auto; margin: 0; padding: 18px var(--space-page) 0; }
+.planner-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.planner-seg-btn { border: 0; background: transparent; padding: 8px 16px; font: inherit; font-size: 13px; font-weight: 600; color: var(--neutral); cursor: pointer; }
+.planner-seg-btn + .planner-seg-btn { border-left: 1px solid var(--line); }
+.planner-seg-btn.active { background: var(--sage-dark); color: white; }
+.planner-seg-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
 /* ---------------- Build Menu view ---------------- */
 /* Build Menu splits .main into its own scroll region (.build-scroll) plus a docked footer
    (.builder-tabs) -- unlike position:sticky, this keeps the tab strip fully outside the

@@ -54,7 +54,12 @@ terminal instead of `[object Object]`.
   view-render functions (`renderItemsView`, `renderGenerateView`,
   `renderBuildMenuView`, `renderHistoryView`, `renderExportAllView`,
   `renderRecipeListView`/`renderRecipeFormView`, `renderCalculatorView`,
-  `renderIngredientsView`) swapped via `state.currentView`. `login.html`/
+  `renderIngredientsView`) swapped via `state.currentView`. Generate Menu, Build Menu and Export
+  All Sections sit behind ONE nav entry, **Menu Planner** (`renderMenuPlannerView`, 2026-09-25): a
+  Generate / Build switch (Generate adds All Sections = Export All / One Section = Generate Menu) above
+  the three screens' own, unchanged render functions, drawn into `#planner-body` (`display: contents`,
+  so Build Menu's scroll area + docked tabs still lay out in `#main`). `state.menuPlanner` holds the
+  mode; the switches lock while a run is in flight (`setMenuPlannerBusy`). `login.html`/
   `login.js` are a separate, pre-auth window (`createLoginWindow()` in
   `main.js`) shown before the main window ever loads.
 

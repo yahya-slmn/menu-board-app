@@ -8,6 +8,10 @@ const state = {
   // Whether the "Menu" nav group (Generate/Build/Export All) is expanded -- same toggle
   // pattern as itemCatalogExpanded, just gated on any of MENU_GROUP_VIEWS instead of 'items'.
   menuGroupExpanded: true,
+  // Menu Planner (2026-09-25): Generate Menu / Build Menu / Export All Sections behind one nav entry.
+  // mode 'generate' | 'build'; scope (Generate only) 'one' = Generate Menu, 'all' = Export All Sections.
+  // busy: a generation run is in flight -- the switches stay disabled until it finishes.
+  menuPlanner: { mode: 'generate', scope: 'one', busy: false },
   categories: [],
   proteinTypes: [],
   currentGeneratedMenuId: null,
@@ -462,10 +466,12 @@ function showToast(message) {
 // re-render would silently discard, and an open Add/Edit modal (Item/Ingredient, appended to
 // document.body) was populated from data fetched at modal-open time -- none of these should
 // ever be touched by a background refresh.
-const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'exportAll', 'generate'];
+const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'exportAll', 'generate', 'menuPlanner'];
 function isSafeToForceRerender() {
   if (document.querySelector('.modal-overlay')) return false;
   if (state.currentView === 'build') return false;
+  // Menu Planner: Build mode holds the unsaved grid; a Generate run in flight must finish first.
+  if (state.currentView === 'menuPlanner' && (state.menuPlanner.mode === 'build' || state.menuPlanner.busy)) return false;
   if (state.currentView === 'recipes' && state.recipes.view === 'form') return false;
   if (state.currentView === 'extractor' && state.extractor.view === 'form') return false;
   if (state.currentView === 'recipeGenerator' && state.generatedRecipes.view === 'form') return false;
@@ -682,7 +688,7 @@ function renderSectionNav() {
 }
 
 // The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
-const MENU_GROUP_VIEWS = ['generate', 'build', 'aiMenu', 'exportAll', 'menuIngredients', 'cleanMenu'];
+const MENU_GROUP_VIEWS = ['menuPlanner', 'generate', 'build', 'aiMenu', 'exportAll', 'menuIngredients', 'cleanMenu'];
 
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
@@ -722,7 +728,7 @@ function wireNav() {
     } else {
       resetDrilldownScreens();
       state.menuGroupExpanded = true;
-      state.currentView = 'generate';
+      state.currentView = 'menuPlanner';
     }
     renderView();
   });
@@ -826,9 +832,10 @@ async function renderView() {
   updateItemCatalogExpansion();
   const main = document.getElementById('main');
   main.dataset.view = state.currentView;
-  main.classList.toggle('build-mode', state.currentView === 'build');
+  main.classList.toggle('build-mode', state.currentView === 'build' || (state.currentView === 'menuPlanner' && state.menuPlanner.mode === 'build'));
   try {
   if (state.currentView === 'items') return await renderItemsView(main);
+  if (state.currentView === 'menuPlanner') return await renderMenuPlannerView(main);
   if (state.currentView === 'generate') return await renderGenerateView(main);
   if (state.currentView === 'build') return await renderBuildMenuView(main);
   if (state.currentView === 'aiMenu') return await renderAiMenuView(main);
@@ -1462,6 +1469,51 @@ async function openItemModal(existingItem) {
 // features used to share that one piece of state, which made whichever nav button was
 // clicked last silently change what the other view meant by "section"; owning it locally
 // removes that coupling entirely.
+// ============================================================
+// MENU PLANNER (2026-09-25) -- one nav entry for Generate Menu, Build Menu and Export All Sections.
+// A thin shell: two switches on top, and below them the three screens' OWN, unchanged render
+// functions draw into #planner-body (display: contents, so Build Menu's scroll area and docked tab
+// strip still lay out as direct children of #main, exactly as before). Generate + One Section =
+// renderGenerateView, Generate + All Sections = renderExportAllView, Build = renderBuildMenuView.
+// Nothing here touches generation: every screen keeps calling the same IPC. Build Menu's grid
+// lives in state.builder, so switching modes never loses it.
+// ============================================================
+function renderMenuPlannerView(main) {
+  const mp = state.menuPlanner;
+  const seg = (group, value, label, current) =>
+    `<button type="button" class="planner-seg-btn ${current === value ? 'active' : ''}" data-planner-${group}="${value}" aria-pressed="${current === value}">${label}</button>`;
+  main.innerHTML = `
+    <div class="planner-switch ${mp.mode === 'build' ? 'in-build' : ''}">
+      <div class="planner-seg" role="group" aria-label="Menu Planner mode">
+        ${seg('mode', 'generate', 'Generate Menu', mp.mode)}${seg('mode', 'build', 'Build Menu', mp.mode)}
+      </div>
+      ${mp.mode === 'generate' ? `
+      <div class="planner-seg" role="group" aria-label="Sections">
+        ${seg('scope', 'all', 'All Sections', mp.scope)}${seg('scope', 'one', 'One Section', mp.scope)}
+      </div>` : ''}
+    </div>
+    <div id="planner-body"></div>
+  `;
+  main.querySelectorAll('[data-planner-mode], [data-planner-scope]').forEach(btn => {
+    btn.disabled = mp.busy;
+    btn.addEventListener('click', () => {
+      if (mp.busy) return;
+      if (btn.dataset.plannerMode) mp.mode = btn.dataset.plannerMode;
+      if (btn.dataset.plannerScope) mp.scope = btn.dataset.plannerScope;
+      renderView();
+    });
+  });
+  const body = document.getElementById('planner-body');
+  if (mp.mode === 'build') return renderBuildMenuView(body);
+  return mp.scope === 'all' ? renderExportAllView(body) : renderGenerateView(body);
+}
+
+// A Generate / Export All run is in flight: lock the Menu Planner switches until it finishes.
+function setMenuPlannerBusy(busy) {
+  state.menuPlanner.busy = busy;
+  document.querySelectorAll('[data-planner-mode], [data-planner-scope]').forEach(b => { b.disabled = busy; });
+}
+
 function renderGenerateView(main) {
   main.innerHTML = `
     <div class="topbar">
@@ -1517,9 +1569,13 @@ function renderGenerateView(main) {
 
     const resultEl = document.getElementById('g-result');
     resultEl.innerHTML = 'Generating…';
-    const { menuId, resultDays, warnings } = await window.api.generateMenu({
-      sectionCode: sectionSelect.value, label, startDate, numWeekdays, createdBy,
-    });
+    let menuId, resultDays, warnings;
+    setMenuPlannerBusy(true);
+    try {
+      ({ menuId, resultDays, warnings } = await window.api.generateMenu({
+        sectionCode: sectionSelect.value, label, startDate, numWeekdays, createdBy,
+      }));
+    } finally { setMenuPlannerBusy(false); }
     state.currentGeneratedMenuId = menuId;
     renderMenuResult(resultEl, menuId, resultDays, warnings, createdBy);
   });
@@ -2953,7 +3009,11 @@ async function renderExportAllView(main) {
     const resultEl = document.getElementById('ea-result');
     resultEl.textContent = 'Generating all 5 sections and exporting…';
 
-    const result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy });
+    let result;
+    setMenuPlannerBusy(true);
+    try {
+      result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy });
+    } finally { setMenuPlannerBusy(false); }
 
     if (!result.success) {
       resultEl.textContent = result.cancelled ? '' : 'Export failed.';
