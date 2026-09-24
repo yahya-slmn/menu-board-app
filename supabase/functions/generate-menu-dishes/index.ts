@@ -101,7 +101,7 @@ function seafoodRule(allowed: boolean): string {
 }
 
 const ATTRIBUTE_GUIDE = `Attributes (fill every one for every dish; answer "NONE" only where it truly doesn't apply and the attribute is not listed as required):
-- protein_code: the dish's main protein, one of the given codes. VEGETARIAN means no meat, poultry or fish at all. NONE for a dish with no real protein focus (a plain starch, a vegetable side, a fruit or sweet snack).
+- protein_code: the dish's main protein, one of the given codes. VEGETARIAN means no meat, poultry or fish at all. Turkey, including turkey ham, is TURKEY, never CHICKEN. NONE for a dish with no real protein focus (a plain starch, a vegetable side, a fruit or sweet snack).
 - sauce_type: RED (tomato-based), WHITE (cream / cheese / yogurt / bechamel), ASIAN (soy / teriyaki / sweet-chili style), GLAZED (honey / BBQ / sticky glaze), GRAVY (brown gravy / jus / stew liquid), DRY (grilled, roasted, spiced, no real sauce).
 - carb_type: RICE, PASTA, POTATO, or OTHER (bulgur, couscous, bread-based, freekeh, corn, etc.).
 - dish_concept: EGG (egg is the dish), PASTRY (baked dough item), SANDWICH (sandwich / wrap / roll / toast with filling), CEREAL_DAIRY (oats, granola, cereal, yogurt, pudding, labneh bowls), CHEESE (a cheese-led plate or item), OTHER.

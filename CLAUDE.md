@@ -129,7 +129,13 @@ terminal instead of `[object Object]`.
   catalog replace list. Offending catalog dishes stay in the catalog, tagged "Not served: chicken/beef in a snack"
   (`snack_rule_blocked` from `get-items`); Add / Edit Item only warns. History is never changed or flagged; the Excel `_Lists`
   dropdowns are not filtered. Staff Breakfast's own dishes are out of scope. `scripts/snack-chicken-beef-list.js` (read-only,
-  login) lists the offending dishes to `backups/snack-chicken-beef-list.txt`.
+  login) lists the offending dishes to `backups/snack-chicken-beef-list.txt`, plus every dish (any category) whose name says
+  turkey but whose protein type is chicken / beef.
+- TURKEY protein type (`supabase/migrations/20260924160000_turkey_protein_type.sql`, additive): before it, the AI filed turkey
+  as CHICKEN (then blocked as a snack, or counted as a KG-LP / MS-UP chicken main). Turkey counts as meat for the Staff Lunch Box
+  rule (generator / aiMenuGenerate `MEAT_PROTEINS` / aiMenuRules `MEAT`), never as the chicken main; `lib/classify.js` suggests
+  it for turkey names; the `generate-menu-dishes` guide says "Turkey, including turkey ham, is TURKEY, never CHICKEN". Not
+  retroactive. Protein codes the live table lacks are simply unused (request spreads filter by live codes).
 - Reading exports back in (`lib/menuIngredients.js` `parseWorkbookDishes`, used by Menu Ingredients Generator and the Recipe
   Generator's upload): a day block is found by date + weekday; layout comes from the old RC / Quantity / Weight-Unit markers
   when present (files already sent out), else CEO by its person-name header cells (`lib/menuLayout.js` `CEO_PERSONS`, shared

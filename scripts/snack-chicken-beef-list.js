@@ -6,7 +6,11 @@
 // another category, or deactivates them. Menus already in History are not touched or flagged.
 //
 // For each dish: category, sections (portion rows), active or not, protein type, what matched, and
-// how often / when it was last served in a saved menu (context only). Nothing is written to Supabase.
+// how often / when it was last served in a saved menu (context only). A dish whose NAME says turkey
+// but whose protein type is chicken or beef is marked "name says turkey -- protein type likely
+// mis-set" (the AI Menu Generator filed turkey as chicken before the TURKEY protein type existed), and
+// a second section lists such dishes in EVERY category -- in a KG-LP / MS-UP Lunch Main one wrongly
+// counts as the day's chicken pick. Nothing is written to Supabase.
 //
 //   cd ~/menu-board && node scripts/snack-chicken-beef-list.js
 //
@@ -15,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { supabase } = require('../lib/supabaseClient');
-const { loadReferenceData, getCategoryByCode, getAgeGroups, getSectionById, getProteinById } = require('../lib/referenceData');
+const { loadReferenceData, getCategoryByCode, getCategoryById, getAgeGroups, getSectionById, getProteinById, getProteinByCode } = require('../lib/referenceData');
 const { snackLunchOnlyHit, SNACK_CATEGORIES } = require('../lib/categoryRules');
 
 function ask(question, { hidden = false } = {}) {
@@ -43,6 +47,8 @@ async function fetchAll(buildQuery) {
   }
 }
 
+const TURKEY_WORD = /\bturkey\b/i;
+const TURKEY_HINT = 'name says turkey -- protein type likely mis-set';
 const SECTION_LABEL = { DAYCARE: 'Daycare', KG_LP: 'KG-LP', MS_UP: 'MS-UP', STAFF: 'Staff', CEO: 'CEO' };
 const CATEGORY_LABEL = { AM_SNACK: 'AM Snack', PM_SNACK: 'PM Snack' };
 
@@ -55,6 +61,13 @@ const CATEGORY_LABEL = { AM_SNACK: 'AM Snack', PM_SNACK: 'PM Snack' };
 
   const lines = [];
   const log = (s = '') => { lines.push(s); console.log(s); };
+
+  // Every category: turkey in the name, chicken / beef as the protein type.
+  const chickenBeefIds = ['CHICKEN', 'BEEF'].map((c) => getProteinByCode(c)?.id).filter(Boolean);
+  const turkeyMistagged = chickenBeefIds.length
+    ? (await fetchAll(() => supabase.from('menu_items').select('id, name, is_active, protein_type_id, category_id, created_by_label')
+      .in('protein_type_id', chickenBeefIds).order('id'))).filter((it) => TURKEY_WORD.test(it.name))
+    : [];
 
   const found = [];
   for (const code of SNACK_CATEGORIES) {
@@ -69,7 +82,7 @@ const CATEGORY_LABEL = { AM_SNACK: 'AM Snack', PM_SNACK: 'PM Snack' };
   }
 
   // Sections (portion rows) and saved-menu use, for the found dishes only.
-  const ids = found.map((f) => f.id);
+  const ids = [...new Set([...found.map((f) => f.id), ...turkeyMistagged.map((t) => t.id)])];
   const sectionsOf = new Map();
   const servedOf = new Map(); // id -> { count, last }
   if (ids.length) {
@@ -107,8 +120,9 @@ const CATEGORY_LABEL = { AM_SNACK: 'AM Snack', PM_SNACK: 'PM Snack' };
     const secs = [...(sectionsOf.get(f.id) || [])].map((s) => SECTION_LABEL[s] || s).sort().join(', ') || 'no section';
     const used = servedOf.get(f.id);
     const why = f.hit.field === 'protein_code' ? `protein type ${f.proteinCode}` : `"${f.hit.term}" in the name`;
+    const hint = TURKEY_WORD.test(f.name) && ['CHICKEN', 'BEEF'].includes(f.proteinCode) ? ` | ${TURKEY_HINT}` : '';
     return `  #${String(f.id).padEnd(6)} ${f.name}\n          ${CATEGORY_LABEL[f.category]} | ${secs} | ${why}${f.proteinCode && f.hit.field !== 'protein_code' ? ` (protein type ${f.proteinCode})` : ''} | ` +
-      `${used ? `served ${used.count}x, last ${used.last}` : 'never served'}${f.created_by_label ? ` | created by ${f.created_by_label}` : ''}`;
+      `${used ? `served ${used.count}x, last ${used.last}` : 'never served'}${f.created_by_label ? ` | created by ${f.created_by_label}` : ''}${hint}`;
   };
   for (const [title, list] of [['ACTIVE', active], ['INACTIVE (already not offered)', inactive]]) {
     log(`== ${title}: ${list.length}`);
@@ -120,6 +134,27 @@ const CATEGORY_LABEL = { AM_SNACK: 'AM Snack', PM_SNACK: 'PM Snack' };
     }
     log('');
   }
+
+  // Turkey dishes tagged chicken / beef, every category (snacks above are listed again here).
+  log(`== NAME SAYS TURKEY, PROTEIN TYPE CHICKEN OR BEEF (every category): ${turkeyMistagged.length}`);
+  log('   Protein type likely mis-set: set it to Turkey in Edit Item once the TURKEY protein type exists (for AM / PM Snack,');
+  log('   saving the dish in Edit Item clears its protein type). A KG-LP / MS-UP Lunch Main here counts as that day\'s chicken.');
+  const byCat = new Map();
+  for (const t of turkeyMistagged) {
+    const code = getCategoryById(t.category_id)?.code || String(t.category_id);
+    if (!byCat.has(code)) byCat.set(code, []);
+    byCat.get(code).push(t);
+  }
+  for (const [code, list] of [...byCat].sort((a, b) => a[0].localeCompare(b[0]))) {
+    log(`-- ${getCategoryById(list[0].category_id)?.name || code} (${list.length})`);
+    for (const t of list.sort((a, b) => a.name.localeCompare(b.name))) {
+      const secs = [...(sectionsOf.get(t.id) || [])].map((x) => SECTION_LABEL[x] || x).sort().join(', ') || 'no section';
+      const used = servedOf.get(t.id);
+      log(`  #${String(t.id).padEnd(6)} ${t.name}\n          ${secs} | protein type ${getProteinById(t.protein_type_id)?.code} | ${t.is_active === 1 ? 'active' : 'inactive'} | ` +
+        `${used ? `served ${used.count}x, last ${used.last}` : 'never served'}${t.created_by_label ? ` | created by ${t.created_by_label}` : ''}`);
+    }
+  }
+  log('');
 
   const out = path.join(__dirname, '..', 'backups', 'snack-chicken-beef-list.txt');
   fs.mkdirSync(path.dirname(out), { recursive: true });
