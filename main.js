@@ -36,6 +36,7 @@ const { generateDishImage } = require('./lib/generateDishImage');
 const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const { generateDraftRun } = require('./lib/aiMenuGenerate');
+const { loadCalorieCandidates, aiKeyIngredientDescriptions } = require('./lib/calorieScope');
 const aiMenuReview = require('./lib/aiMenuReview');
 const { approveRun } = require('./lib/aiMenuApprove');
 const {
@@ -774,8 +775,10 @@ ipcMain.handle('update-item-rc', async (e, { id, rcCode }) => {
 });
 
 // Nutritional Menu Analysis, Phase 1 -- backfills calories_per_100g for every existing item
-// that's missing it, scoped to Daycare/KG_LP/MS_UP only (Staff/CEO are adults, explicitly out of
-// scope for this whole feature, not just its later analysis screen -- see conversation notes).
+// that's missing it, scoped to Daycare/KG_LP/MS_UP (Staff/CEO are adults, out of scope for this
+// feature) -- EXCEPT AI-generated dishes, which are estimated in every section (2026-09-23; see
+// lib/calorieScope.js). Also run automatically after an AI Menu Generator Approve, for that run's
+// new dishes (estimateApprovedRunCalories).
 // Deliberately reusable, not a one-shot migration script: it only ever touches rows where
 // calories_per_100g IS NULL, so re-running it later after new items are added just backfills
 // whatever's still missing, same idempotent shape as the rest of this app's catalog tooling.
@@ -793,7 +796,7 @@ ipcMain.handle('update-item-rc', async (e, { id, rcCode }) => {
 // same run's final, smaller 79-item batch succeeded cleanly. Paired with the Edge Function's
 // max_tokens bump to 8192, 50 is a conservative margin below the ~79-100 boundary that actually
 // failed, not just relying on the token-budget fix alone.
-const CALORIE_ESTIMATE_IN_SCOPE_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
+// Which items are in scope (school sections + every AI-generated dish) lives in lib/calorieScope.js.
 const CALORIE_ESTIMATE_BATCH_SIZE = 50;
 
 // Joins a Dish Catalog item's ROWS (recipe_ingredients/generated_recipe_ingredients/
@@ -920,36 +923,25 @@ function checkCaloriePlausibility({ calories, categoryName, proteinName }) {
   return null;
 }
 
-ipcMain.handle('estimate-missing-calories', async (e) => {
-  const ageGroupIds = CALORIE_ESTIMATE_IN_SCOPE_SECTIONS
-    .map(code => getSectionByCode(code))
-    .filter(Boolean)
-    .flatMap(section => getAgeGroupsForSection(section.id).map(a => a.id));
-  if (ageGroupIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
-
-  // item_portions rows for three whole sections can comfortably exceed PostgREST's 1000-row
-  // default page -- see fetchAllRowsMain's own comment (the same reason get-eligible-swap-items
-  // and the Lunch Main pool query below both already page through it).
-  const portionRows = await fetchAllRowsMain(() => supabase
-    .from('item_portions').select('item_id').in('age_group_id', ageGroupIds))
-    .catch(err => { throw supaFail('estimate-missing-calories: load item_portions', err); });
-  const itemIds = [...new Set(portionRows.map(r => r.item_id))];
-  if (itemIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
-
-  const { data: items, error: itemsErr } = await supabase
-    .from('menu_items')
-    .select('id, name, category_id, protein_type_id')
-    .in('id', itemIds)
-    .is('calories_per_100g', null);
-  if (itemsErr) throw supaFail('estimate-missing-calories: load menu_items', itemsErr);
-  if (items.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
+// Scope (widened 2026-09-23): every Daycare / KG-LP / MS-UP item with no calorie value, as
+// before, PLUS every AI-generated item (is_ai_generated, from the AI Menu Generator's Approve) in
+// ANY section -- so an AI Staff dish isn't left blank next to the AI school dishes from the same
+// run. Hand-entered Staff / CEO items stay out (adults, not calorie-tracked by default).
+// `onlyItemIds` limits it to those items (Approve's own post-step for one run's new dishes).
+// `send` gets the same { message, current?, total? } progress payloads as before.
+async function runCalorieBackfill({ send = () => {}, onlyItemIds = null } = {}) {
+  const items = await loadCalorieCandidates({ onlyItemIds });
+  if (items.length === 0) return { success: true, estimated: 0, flagged: 0, totalMissing: 0, failures: [] };
+  const keyIngredientsById = await aiKeyIngredientDescriptions(items);
 
   // Looked up ONCE per item, before any batch/retry attempt (not re-queried on a retry) -- a real
   // matching recipe's ingredients when one exists, so the prompt has actual composition to reason
   // from instead of guessing from name/category/protein alone. See
-  // findRecipeIngredientsForDishName's own comment for why this is an exact-name match only.
+  // findRecipeIngredientsForDishName's own comment for why this is an exact-name match only. A
+  // real recipe wins over an AI dish's key ingredients (it has quantities).
   for (const it of items) {
     it.ingredientsDescription = await findRecipeIngredientsForDishName(it.name);
+    if (!it.ingredientsDescription && keyIngredientsById.has(it.id)) it.ingredientsDescription = keyIngredientsById.get(it.id);
   }
 
   // Tags each item with its own positional `index` and reconciles the response by that index
@@ -1019,7 +1011,7 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   const batches = chunk(items, CALORIE_ESTIMATE_BATCH_SIZE);
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
-    e.sender.send('calorie-estimate-progress', {
+    send({
       message: `Estimating batch ${b + 1} of ${batches.length} (${batch.length} items)…`, current: b + 1, total: batches.length,
     });
     const result = await estimateAndWriteBatch(batch);
@@ -1035,12 +1027,12 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
   // until just now, so restarting the bar's count from a smaller total would read as the bar
   // going backwards; the shared panel just freezes at 100% and updates the message text instead.
   if (stillMissing.length > 0) {
-    e.sender.send('calorie-estimate-progress', { message: `Retrying ${stillMissing.length} item(s) that didn't come back the first time…` });
+    send({ message: `Retrying ${stillMissing.length} item(s) that didn't come back the first time…` });
     const retryBatches = chunk(stillMissing, CALORIE_ESTIMATE_BATCH_SIZE);
     const retryMissing = [];
     for (let b = 0; b < retryBatches.length; b++) {
       const batch = retryBatches[b];
-      e.sender.send('calorie-estimate-progress', { message: `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…` });
+      send({ message: `Retry batch ${b + 1} of ${retryBatches.length} (${batch.length} items)…` });
       const result = await estimateAndWriteBatch(batch);
       estimated += result.written;
       if (result.error) failures.push(`Retry batch ${b + 1} (${batch.length} items): ${result.error}`);
@@ -1084,9 +1076,13 @@ ipcMain.handle('estimate-missing-calories', async (e) => {
     }
   }
 
-  e.sender.send('calorie-estimate-progress', { message: `Done -- ${estimated} of ${items.length} items updated (${flagged} flagged unverified).`, current: batches.length, total: batches.length });
+  send({ message: `Done -- ${estimated} of ${items.length} items updated (${flagged} flagged unverified).`, current: batches.length, total: batches.length });
   return { success: true, estimated, flagged, totalMissing: items.length, failures };
-});
+}
+
+ipcMain.handle('estimate-missing-calories', async (e) => runCalorieBackfill({
+  send: (payload) => { if (!e.sender.isDestroyed()) e.sender.send('calorie-estimate-progress', payload); },
+}));
 
 // AM Snack Pastry/Cold-Kitchen weekly rotation, Phase 1 -- backfills am_snack_style for every
 // existing AM_SNACK item that's missing it, scoped to Daycare/KG_LP/MS_UP (the only sections the
@@ -4452,8 +4448,52 @@ ipcMain.handle('ai-menu-approve', async (e, { runId }) => {
   const { data } = await supabase.auth.getUser();
   const approvedBy = (data?.user?.email || '').split('@')[0] || null;
   const send = (message) => { if (!e.sender.isDestroyed()) e.sender.send('ai-menu-progress', { message }); };
-  return approveRun({ runId, approvedBy, onProgress: send });
+  const result = await approveRun({ runId, approvedBy, onProgress: send });
+  // Calories are a separate step, deliberately NOT part of Approve (an AI outage must never hold up
+  // or undo an approval): started in the background once the approval has fully succeeded, outside
+  // the approval claim. Its progress / result is stored on the run (approve_progress.calories).
+  if (result.ok && !result.alreadyApproved) estimateApprovedRunCalories(runId).catch(err => log.warn(`[ai-menu calories] run ${runId}: ${err.message}`));
+  return result;
 });
+
+// Merges `calories` into the run's approve_progress (read-modify-write; only this step writes it
+// once a run is approved).
+async function setRunCalorieStatus(runId, calories) {
+  const { data, error } = await supabase.from('ai_menu_runs').select('approve_progress').eq('id', runId).single();
+  if (error) throw supaFail('ai-menu calories: load run', error);
+  const { error: upErr } = await supabase.from('ai_menu_runs')
+    .update({ approve_progress: { ...(data.approve_progress || {}), calories } }).eq('id', runId);
+  if (upErr) throw supaFail('ai-menu calories: save status', upErr);
+}
+
+// Estimates calories for the dishes an approved run created (is_ai_generated, ai_menu_run_id), using
+// the shared backfill (runCalorieBackfill: same batching, plausibility check and unverified flag,
+// each dish's key ingredients as input). Safe to re-run: it only fills dishes still without a value.
+async function estimateApprovedRunCalories(runId) {
+  const startedAt = new Date().toISOString();
+  await setRunCalorieStatus(runId, { status: 'running', started_at: startedAt });
+  try {
+    const rows = await fetchAllRowsMain(() => supabase.from('menu_items').select('id').eq('ai_menu_run_id', runId));
+    const result = await runCalorieBackfill({ onlyItemIds: rows.map(r => r.id) });
+    // Counted from the database afterwards, so a re-run reports the run's real state, not just
+    // this pass.
+    const after = await fetchAllRowsMain(() => supabase.from('menu_items').select('id, calories_per_100g, calories_unverified').eq('ai_menu_run_id', runId));
+    const status = {
+      status: 'done', started_at: startedAt, finished_at: new Date().toISOString(),
+      dishes: after.length, estimated: after.filter(r => r.calories_per_100g != null).length,
+      flagged: after.filter(r => r.calories_unverified).length,
+      stillMissing: after.filter(r => r.calories_per_100g == null).length,
+      thisPass: result.estimated, failures: (result.failures || []).slice(0, 5),
+    };
+    await setRunCalorieStatus(runId, status);
+    return status;
+  } catch (err) {
+    await setRunCalorieStatus(runId, { status: 'failed', started_at: startedAt, finished_at: new Date().toISOString(), error: err.message }).catch(() => {});
+    throw err;
+  }
+}
+// The approved run's "Estimate calories" button (and a re-run after a failure). Waits for the result.
+ipcMain.handle('ai-menu-estimate-calories', (e, { runId }) => estimateApprovedRunCalories(runId));
 
 ipcMain.handle('get-section-slots', (e, sectionCode) => {
   return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count, options]) => ({ categoryCode, count, fixedDaily: !!options.fixedDaily }));

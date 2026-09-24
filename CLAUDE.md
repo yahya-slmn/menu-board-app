@@ -337,6 +337,11 @@ the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus
   clash links instead of duplicating), missing `item_portions` for the sections whose menus have the dish's category (shared
   copies don't add Staff portions), the four sections via `persistMenu` (recorded in `approve_progress`; a half-saved one is
   deleted and redone) and CEO by the unchanged engine, all in one `batch_id`. Every step is idempotent, so Resume finishes it.
+- Calories are NOT part of Approve: after a successful Approve, main.js `estimateApprovedRunCalories` runs the shared
+  `runCalorieBackfill` in the background for that run's new dishes and stores the result in `approve_progress.calories` (the
+  approved run shows it and can re-run it). Scope (`lib/calorieScope.js`): school sections as before, plus every
+  `is_ai_generated` dish in any section; AI dishes' draft key ingredients are the estimator's input when no real recipe matches.
+  Dish Catalog has an "Estimate missing calories" button and an AI badge / "AI-generated only" filter.
 - National Day (`lib/nationalDay.js`): every Tuesday, every AI category in every section is one cuisine from a 16-entry cycle,
   calendar-anchored (2026-09-01 = Saudi; Tuesdays since then mod 16). The generator orders each Tuesday's dishes to that day's
   exact rules (`tuesdayGroups`) in the same calls as the regular dishes (each group carries its `cuisine`, which the AI must

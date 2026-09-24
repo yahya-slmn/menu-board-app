@@ -164,6 +164,7 @@ contextBridge.exposeInMainWorld('api', {
   aiMenuSuggest: (payload) => ipcRenderer.invoke('ai-menu-suggest', payload),
   aiMenuDiscardRun: (runId) => ipcRenderer.invoke('ai-menu-discard-run', runId),
   aiMenuApprove: (payload) => ipcRenderer.invoke('ai-menu-approve', payload),
+  aiMenuEstimateCalories: (payload) => ipcRenderer.invoke('ai-menu-estimate-calories', payload),
   onAiMenuProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('ai-menu-progress', listener);

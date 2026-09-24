@@ -865,8 +865,12 @@ async function renderItemsView(main) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Dish Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
-      <button class="primary" id="add-item-btn">+ Add Item</button>
+      <div class="action-toolbar">
+        <button class="secondary" id="estimate-calories-btn" title="Estimates calories for every Daycare / KG-LP / MS-UP dish without a value, and every AI-generated dish in any section. Only fills empty values.">Estimate missing calories</button>
+        <button class="primary" id="add-item-btn">+ Add Item</button>
+      </div>
     </div>
+    <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
       <label for="item-search">Search by name</label>
       <input id="item-search" type="search" />
@@ -886,6 +890,24 @@ async function renderItemsView(main) {
     <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
+  document.getElementById('estimate-calories-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const statusEl = document.getElementById('calorie-estimate-status');
+    btn.disabled = true;
+    const unsubscribe = window.api.onCalorieEstimateProgress(({ message }) => { statusEl.textContent = message; });
+    try {
+      const r = await window.api.estimateMissingCalories();
+      const problems = (r.failures || []).length ? ` Notes: ${r.failures.slice(0, 3).join(' | ')}` : '';
+      showToast(r.totalMissing ? `Calories estimated for ${r.estimated} of ${r.totalMissing} dish(es)${r.flagged ? ` (${r.flagged} flagged unverified)` : ''}.` : 'Every dish in scope already has calories.');
+      unsubscribe();
+      await renderItemsView(main);
+      if (problems) document.getElementById('calorie-estimate-status').textContent = problems.trim();
+    } catch (err) {
+      unsubscribe();
+      statusEl.textContent = `Calorie estimate failed: ${err.message}`;
+      btn.disabled = false;
+    }
+  });
 
   const searchInput = document.getElementById('item-search');
   const categoryFilter = document.getElementById('item-category-filter');
@@ -2126,7 +2148,8 @@ function renderAiMenuRunContent() {
         ${actionBtn}
       </div>
     </div>
-    ${run.status === 'approved' ? `<div class="ai-approved-banner">Approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}${run.approved_at ? ` on ${aiEsc(new Date(run.approved_at).toLocaleString())}` : ''}. Its dishes are in the Dish Catalog (tagged AI-generated) and all five menus are in History as one "All Sections" entry.</div>` : ''}
+    ${run.status === 'approved' ? `<div class="ai-approved-banner">Approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}${run.approved_at ? ` on ${aiEsc(new Date(run.approved_at).toLocaleString())}` : ''}. Its dishes are in the Dish Catalog (tagged AI-generated) and all five menus are in History as one "All Sections" entry.
+      <div class="ai-calorie-status">${aiCalorieStatusHtml(run.approve_progress?.calories)}</div></div>` : ''}
     ${run.status === 'approving' ? `<div class="warning-banner">This menu is being approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}. If that was interrupted, "Resume approval" finishes it from where it stopped.</div>` : ''}
     <div class="ai-summary">
       <span><strong>${newCount}</strong> new AI dishes</span>
@@ -2148,6 +2171,13 @@ function renderAiMenuRunContent() {
   scroll.querySelectorAll('[data-go-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.goTab)));
   document.getElementById('ai-back').addEventListener('click', () => { state.aiMenu.view = 'list'; state.aiMenu.data = null; renderView(); });
   document.getElementById('ai-approve')?.addEventListener('click', () => openAiApproveModal(false));
+  document.getElementById('ai-calories-btn')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = 'Estimating calories…';
+    try { await window.api.aiMenuEstimateCalories({ runId: run.id }); } catch (err) { alert(err.message); }
+    reloadAiMenuRun();
+  });
+  aiScheduleCaloriePoll(run);
   document.getElementById('ai-resume')?.addEventListener('click', () => openAiApproveModal(true));
   document.getElementById('ai-export')?.addEventListener('click', () => aiExportApproved(run));
   document.getElementById('ai-discard')?.addEventListener('click', async () => {
@@ -2390,6 +2420,26 @@ function openAiDishModal(dish) {
   });
 }
 
+// The post-Approve calorie step's status (approve_progress.calories), written by main.js.
+function aiCalorieStatusHtml(c) {
+  const btn = (label) => `<button class="link-btn" id="ai-calories-btn">${label}</button>`;
+  if (!c) return `Calories: not estimated yet for this run's new dishes. ${btn('Estimate calories')}`;
+  if (c.status === 'running') return 'Estimating calories for this run\u2019s new dishes in the background…';
+  if (c.status === 'failed') return `Calorie estimate failed: ${aiEsc(c.error || 'unknown error')}. The approval is unaffected. ${btn('Try again')}`;
+  const extra = [c.flagged ? `${c.flagged} flagged unverified` : '', c.stillMissing ? `${c.stillMissing} still without a value` : ''].filter(Boolean).join(', ');
+  return `${c.estimated} of ${c.dishes} new dish(es) have calories${extra ? ` (${extra})` : ''}.${c.stillMissing ? ` ${btn('Try the rest again')}` : ''}`;
+}
+
+// While the background calorie step runs, re-check every few seconds (only while this run is on screen).
+let aiCaloriePollTimer = null;
+function aiScheduleCaloriePoll(run) {
+  clearTimeout(aiCaloriePollTimer);
+  if (run.status !== 'approved' || run.approve_progress?.calories?.status !== 'running') return;
+  aiCaloriePollTimer = setTimeout(() => {
+    if (state.currentView === 'aiMenu' && state.aiMenu.view === 'run' && state.aiMenu.runId === run.id) reloadAiMenuRun();
+  }, 5000);
+}
+
 async function aiExportApproved(run) {
   try {
     const res = await window.api.exportAllSectionsToExcel({ menuIdsBySection: run.approve_progress?.sections || {}, label: run.label });
@@ -2431,6 +2481,7 @@ function openAiApproveModal(resume) {
       const body = overlay.querySelector('#ai-approve-body');
       if (res.ok) {
         body.innerHTML = `<p><strong>Approved.</strong> ${res.created ?? 0} new dish(es) added to the Dish Catalog, ${res.linked ?? 0} linked to existing ones${res.portionsAdded ? `, ${res.portionsAdded} section portion(s) added` : ''}. All five menus are in History.</p>
+          <p class="ai-muted">Calories for the new dishes are being estimated in the background now; the approved run shows when they're done.</p>
           ${(res.ceoWarnings || []).length ? `<p class="ai-muted">CEO menu notes: ${res.ceoWarnings.map(aiEsc).join('; ')}</p>` : ''}`;
         overlay.querySelector('.actions').innerHTML = `<button class="secondary" id="ai-ap-close">Close</button><button class="primary" id="ai-ap-export">Export workbook</button>`;
         overlay.querySelector('#ai-ap-close').addEventListener('click', () => { close(); reloadAiMenuRun(); });

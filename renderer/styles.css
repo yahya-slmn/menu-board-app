@@ -1287,3 +1287,5 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
   padding: 10px 14px; font-size: 12.5px; margin-bottom: 16px;
 }
 .ai-confirm { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 10px 0 4px; }
+.ai-calorie-status { margin-top: 6px; }
+#calorie-estimate-status:empty { display: none; }
