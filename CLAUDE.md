@@ -329,7 +329,14 @@ the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus
 - Catalog duplicates (`findDuplicateMatch`, same category) LINK to the existing item; deliberately not widened (reviewed).
 - Review screen (`renderAiMenuView`, `lib/aiMenuReview.js`, `lib/aiMenuRules.js`): shared picks (MS-UP Lunch Main / Starch,
   Staff's shared Main / Breakfast) are read-only copies and follow their source; menu rules only WARN after edits; empty slots
-  block Approve. Approve (Phase 4) is not built yet.
+  block Approve.
+- Approve (`lib/aiMenuApprove.js`, needs `20260924120000_ai_menu_approve.sql`): the only step that writes the Dish Catalog and
+  History. Claim draft -> approving by compare-and-swap (`approve_claim` + heartbeat `approve_claimed_at`; a claim quiet for
+  `STALE_MS` can be resumed). Before any write: empty slots, the full safety check and the retired-name check block and hand the
+  run back as a draft. Then dishes -> `menu_items` (`is_ai_generated`, `ai_menu_run_id`; marker `resolved_item_id`; a unique-name
+  clash links instead of duplicating), missing `item_portions` for the sections whose menus have the dish's category (shared
+  copies don't add Staff portions), the four sections via `persistMenu` (recorded in `approve_progress`; a half-saved one is
+  deleted and redone) and CEO by the unchanged engine, all in one `batch_id`. Every step is idempotent, so Resume finishes it.
 - National Day (`lib/nationalDay.js`): every Tuesday, every AI category in every section is one cuisine from a 16-entry cycle,
   calendar-anchored (2026-09-01 = Saudi; Tuesdays since then mod 16). The generator orders each Tuesday's dishes to that day's
   exact rules (`tuesdayGroups`) in the same calls as the regular dishes (each group carries its `cuisine`, which the AI must

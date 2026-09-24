@@ -37,6 +37,7 @@ const doughShapePresets = require('./lib/doughShapePresets');
 const { extractMenuDishesAI } = require('./lib/extractMenuDishesAI');
 const { generateDraftRun } = require('./lib/aiMenuGenerate');
 const aiMenuReview = require('./lib/aiMenuReview');
+const { approveRun } = require('./lib/aiMenuApprove');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -4442,6 +4443,14 @@ ipcMain.handle('ai-menu-replace-pick', (e, payload) => aiMenuReview.replacePick(
 ipcMain.handle('ai-menu-update-dish', (e, payload) => aiMenuReview.updateDish(payload));
 ipcMain.handle('ai-menu-suggest', (e, payload) => aiMenuReview.suggestForPick(payload));
 ipcMain.handle('ai-menu-discard-run', (e, runId) => aiMenuReview.discardRun(runId));
+// Approve (lib/aiMenuApprove.js): the permanent step. Also resumes an interrupted approval. The
+// approver is the signed-in account, not a typed name.
+ipcMain.handle('ai-menu-approve', async (e, { runId }) => {
+  const { data } = await supabase.auth.getUser();
+  const approvedBy = (data?.user?.email || '').split('@')[0] || null;
+  const send = (message) => { if (!e.sender.isDestroyed()) e.sender.send('ai-menu-progress', { message }); };
+  return approveRun({ runId, approvedBy, onProgress: send });
+});
 
 ipcMain.handle('get-section-slots', (e, sectionCode) => {
   return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count, options]) => ({ categoryCode, count, fixedDaily: !!options.fixedDaily }));

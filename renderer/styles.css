@@ -1281,3 +1281,9 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .ai-option-list li + li { border-top: 1px solid var(--line); }
 .ai-option-list li > button { flex: 0 0 auto; }
 #ai-ask-results { margin-top: 14px; }
+
+.ai-approved-banner {
+  background: var(--sage-fill); border: 1px solid var(--sage); color: var(--sage-dark); border-radius: 8px;
+  padding: 10px 14px; font-size: 12.5px; margin-bottom: 16px;
+}
+.ai-confirm { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 10px 0 4px; }

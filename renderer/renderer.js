@@ -1981,7 +1981,7 @@ async function renderAiMenuListView(main) {
     <div class="table-scroll"><table class="history-table ai-runs-table">
       <thead><tr><th>Name</th><th>Dates</th><th>School days</th><th>Status</th><th>Created by</th><th>Created</th><th></th></tr></thead>
       <tbody>${runs.map(r => {
-        const [label, tone] = r.failed ? ['Failed', 'beef'] : (AI_RUN_STATUS[r.status] || [r.status, 'daily']);
+        const [label, tone] = r.failed ? ['Failed', 'beef'] : r.interrupted ? ['Approval interrupted', 'beef'] : (AI_RUN_STATUS[r.status] || [r.status, 'daily']);
         const openable = ['draft', 'approved', 'approving', 'discarded'].includes(r.status);
         return `<tr data-run="${r.id}" class="${openable ? '' : 'ai-run-disabled'}">
           <td><strong>${aiEsc(r.label)}</strong></td>
@@ -2095,6 +2095,15 @@ function renderAiMenuRunContent() {
   const linkedCount = d.dishes.filter(x => served.has(x.id) && x.resolution === 'link').length;
   const approveBlockers = [];
   if (d.emptySlots) approveBlockers.push(`${d.emptySlots} empty slot(s)`);
+  const sections = run.approve_progress?.sections || {};
+  let actionBtn = '';
+  if (run.status === 'draft') {
+    actionBtn = `<button class="primary" id="ai-approve" ${approveBlockers.length ? 'disabled' : ''} title="${aiEsc(approveBlockers.length ? `Blocked: ${approveBlockers.join(', ')}` : 'Save this menu for real: new dishes join the Dish Catalog, and all five menus go to History')}">Approve</button>`;
+  } else if (run.status === 'approving') {
+    actionBtn = `<button class="primary" id="ai-resume" title="Finishes an approval that was interrupted part-way (nothing is done twice)">Resume approval</button>`;
+  } else if (run.status === 'approved' && Object.keys(sections).length) {
+    actionBtn = `<button class="primary" id="ai-export">Export workbook</button>`;
+  }
 
   scroll.innerHTML = `
     <div class="topbar">
@@ -2105,9 +2114,11 @@ function renderAiMenuRunContent() {
       </div>
       <div class="action-toolbar">
         ${aiIsEditable() ? '<button class="secondary" id="ai-discard">Discard</button>' : ''}
-        <button class="primary" id="ai-approve" disabled title="${aiEsc(approveBlockers.length ? `Blocked: ${approveBlockers.join(', ')}` : 'Approve is the next step (not built yet)')}">Approve</button>
+        ${actionBtn}
       </div>
     </div>
+    ${run.status === 'approved' ? `<div class="ai-approved-banner">Approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}${run.approved_at ? ` on ${aiEsc(new Date(run.approved_at).toLocaleString())}` : ''}. Its dishes are in the Dish Catalog (tagged AI-generated) and all five menus are in History as one "All Sections" entry.</div>` : ''}
+    ${run.status === 'approving' ? `<div class="warning-banner">This menu is being approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}. If that was interrupted, "Resume approval" finishes it from where it stopped.</div>` : ''}
     <div class="ai-summary">
       <span><strong>${newCount}</strong> new AI dishes</span>
       <span><strong>${linkedCount}</strong> linked to existing catalog dishes</span>
@@ -2127,6 +2138,9 @@ function renderAiMenuRunContent() {
   tabsEl.querySelectorAll('[data-ai-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.aiTab)));
   scroll.querySelectorAll('[data-go-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.goTab)));
   document.getElementById('ai-back').addEventListener('click', () => { state.aiMenu.view = 'list'; state.aiMenu.data = null; renderView(); });
+  document.getElementById('ai-approve')?.addEventListener('click', () => openAiApproveModal(false));
+  document.getElementById('ai-resume')?.addEventListener('click', () => openAiApproveModal(true));
+  document.getElementById('ai-export')?.addEventListener('click', () => aiExportApproved(run));
   document.getElementById('ai-discard')?.addEventListener('click', async () => {
     if (!confirm('Discard this AI menu? It can no longer be edited or approved.')) return;
     try { await window.api.aiMenuDiscardRun(run.id); } catch (err) { return alert(err.message); }
@@ -2363,6 +2377,75 @@ function openAiDishModal(dish) {
     } catch (err) {
       aiShowBlocked(overlay.querySelector('#ai-dish-error'), { reason: err.message });
       btn.disabled = false;
+    }
+  });
+}
+
+async function aiExportApproved(run) {
+  try {
+    const res = await window.api.exportAllSectionsToExcel({ menuIdsBySection: run.approve_progress?.sections || {}, label: run.label });
+    if (res?.success) showToast(`Exported to ${res.path}`);
+  } catch (err) { alert(err.message); }
+}
+
+// The permanent step: confirm what will happen, run it with progress, then show the outcome.
+function openAiApproveModal(resume) {
+  const d = state.aiMenu.data;
+  const servedIds = new Set(d.picks.filter(p => p.draft_dish_id).map(p => p.draft_dish_id));
+  const served = d.dishes.filter(x => servedIds.has(x.id));
+  const toCreate = served.filter(x => x.resolution === 'new' && !x.resolved_item_id).length;
+  const toLink = served.filter(x => x.resolution === 'link' && !x.resolved_item_id).length;
+  const { overlay, close } = aiOpenModal(`
+    <h2 id="ai-modal-title">${resume ? 'Resume approval' : 'Approve this menu'}</h2>
+    <div id="ai-approve-body">
+      <p>${resume ? 'This finishes an approval that stopped part-way. Steps already done are skipped, so nothing is created or saved twice.' : 'This makes the menu permanent:'}</p>
+      <ul class="ai-note-list">
+        <li><strong>${toCreate}</strong> new dish${toCreate === 1 ? '' : 'es'} added to the Dish Catalog, tagged AI-generated</li>
+        <li><strong>${toLink}</strong> dish${toLink === 1 ? '' : 'es'} use${toLink === 1 ? 's' : ''} the existing catalog dish of the same name</li>
+        <li>Daycare, KG-LP, MS-UP and Staff saved to History as one "All Sections" entry, with CEO generated now by the usual engine</li>
+      </ul>
+      <p class="ai-muted">Every dish is safety-checked again first; anything that fails stops the approval before anything is saved.${d.notes.length ? ` ${d.notes.length} menu rule note(s) remain — they don't block approval.` : ''}</p>
+      ${resume ? '' : '<label class="ai-confirm"><input type="checkbox" id="ai-approve-ok" /> I have reviewed this menu and want to save it permanently</label>'}
+      <div id="ai-approve-progress" class="ai-progress" role="status" aria-live="polite"></div>
+    </div>
+    <div class="actions"><div id="ai-approve-error" class="ai-action-msg"></div><button class="secondary" id="ai-ap-cancel">Cancel</button><button class="primary" id="ai-ap-go" ${resume ? '' : 'disabled'}>${resume ? 'Resume' : 'Approve'}</button></div>`);
+  const go = overlay.querySelector('#ai-ap-go');
+  const cancel = overlay.querySelector('#ai-ap-cancel');
+  cancel.addEventListener('click', close);
+  overlay.querySelector('#ai-approve-ok')?.addEventListener('change', (e) => { go.disabled = !e.target.checked; });
+  go.addEventListener('click', async () => {
+    go.disabled = true; cancel.disabled = true;
+    const progressEl = overlay.querySelector('#ai-approve-progress');
+    const unsubscribe = window.api.onAiMenuProgress(({ message }) => { progressEl.textContent = message; });
+    try {
+      const res = await window.api.aiMenuApprove({ runId: state.aiMenu.runId });
+      const body = overlay.querySelector('#ai-approve-body');
+      if (res.ok) {
+        body.innerHTML = `<p><strong>Approved.</strong> ${res.created ?? 0} new dish(es) added to the Dish Catalog, ${res.linked ?? 0} linked to existing ones${res.portionsAdded ? `, ${res.portionsAdded} section portion(s) added` : ''}. All five menus are in History.</p>
+          ${(res.ceoWarnings || []).length ? `<p class="ai-muted">CEO menu notes: ${res.ceoWarnings.map(aiEsc).join('; ')}</p>` : ''}`;
+        overlay.querySelector('.actions').innerHTML = `<button class="secondary" id="ai-ap-close">Close</button><button class="primary" id="ai-ap-export">Export workbook</button>`;
+        overlay.querySelector('#ai-ap-close').addEventListener('click', () => { close(); reloadAiMenuRun(); });
+        overlay.querySelector('#ai-ap-export').addEventListener('click', async () => {
+          await aiExportApproved({ label: d.run.label, approve_progress: { sections: res.menuIdsBySection } });
+        });
+      } else {
+        const b = res.blocked;
+        body.innerHTML = `<p><strong>Not approved${res.handedBack ? ' — the menu is a draft again' : ''}.</strong> Nothing permanent was written. Fix these first:</p>
+          <ul class="ai-note-list">
+            ${b.emptySlots ? `<li>${b.emptySlots} empty slot(s)</li>` : ''}
+            ${b.safety.map(x => `<li><strong>${aiEsc(x.name)}</strong> (${aiEsc(aiCategoryName(x.category))}): ${aiEsc(x.reason)}</li>`).join('')}
+            ${b.retired.map(x => `<li><strong>${aiEsc(x.name)}</strong> now matches the retired catalog dish "${aiEsc(x.matched)}" — rename it or reactivate that dish</li>`).join('')}
+          </ul>`;
+        overlay.querySelector('.actions').innerHTML = `<button class="primary" id="ai-ap-close">Close</button>`;
+        overlay.querySelector('#ai-ap-close').addEventListener('click', () => { close(); reloadAiMenuRun(); });
+      }
+    } catch (err) {
+      aiShowBlocked(overlay.querySelector('#ai-approve-error'), { reason: `${err.message} If it stopped part-way, "Resume approval" finishes it.` });
+      cancel.disabled = false;
+      cancel.textContent = 'Close';
+      cancel.onclick = () => { close(); reloadAiMenuRun(); };
+    } finally {
+      unsubscribe();
     }
   });
 }
