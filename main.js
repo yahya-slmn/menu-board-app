@@ -494,7 +494,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style')
+    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id')
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
 
@@ -515,6 +515,9 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         calories_per_100g: mi.calories_per_100g,
         calories_unverified: mi.calories_unverified,
         am_snack_style: mi.am_snack_style,
+        // Set by the AI Menu Generator's Approve on the dishes it created (never on linked ones).
+        is_ai_generated: !!mi.is_ai_generated,
+        ai_menu_run_id: mi.ai_menu_run_id ?? null,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };

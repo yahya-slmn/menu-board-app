@@ -874,6 +874,10 @@ async function renderItemsView(main) {
         <option value="">All Categories</option>
         ${categoryNames.map(c => `<option value="${c}">${c}</option>`).join('')}
       </select>
+      <select id="item-source-filter" aria-label="Source" ${items.some(it => it.is_ai_generated) ? '' : 'hidden'}>
+        <option value="">All dishes</option>
+        <option value="ai">AI-generated only</option>
+      </select>
       <select id="item-protein-filter" hidden>
         <option value="">All Proteins</option>
         ${proteinTypes.map(p => `<option value="${p.code}">${p.name}</option>`).join('')}
@@ -886,6 +890,7 @@ async function renderItemsView(main) {
   const searchInput = document.getElementById('item-search');
   const categoryFilter = document.getElementById('item-category-filter');
   const proteinFilter = document.getElementById('item-protein-filter');
+  const sourceFilter = document.getElementById('item-source-filter');
   const content = document.getElementById('items-content');
 
   if (items.length === 0) {
@@ -905,15 +910,18 @@ async function renderItemsView(main) {
     renderFiltered();
   });
   proteinFilter.addEventListener('change', renderFiltered);
+  sourceFilter.addEventListener('change', renderFiltered);
 
   function renderFiltered() {
     const query = searchInput.value.trim().toLowerCase();
     const cat = categoryFilter.value;
     const protein = proteinFilter.hidden ? '' : proteinFilter.value;
+    const aiOnly = sourceFilter.value === 'ai';
     const filtered = items.filter(it =>
       (!query || it.name.toLowerCase().includes(query)) &&
       (!cat || it.category_name === cat) &&
-      (!protein || it.protein_code === protein)
+      (!protein || it.protein_code === protein) &&
+      (!aiOnly || it.is_ai_generated)
     );
 
     if (filtered.length === 0) {
@@ -951,6 +959,7 @@ async function renderItemsView(main) {
               ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
               ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
+              ${it.is_ai_generated ? `<span class="chip ai-new" title="Created by the AI Menu Generator${it.ai_menu_run_id ? ` (AI menu run #${it.ai_menu_run_id})` : ''}">AI</span>` : ''}
             </td>
             <td>
               <input class="rc-input ${it.rc_code ? '' : 'rc-missing'}" data-rc="${it.id}" value="${it.rc_code || ''}" placeholder="NEW" />
