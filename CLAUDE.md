@@ -358,6 +358,11 @@ the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus
   echo back); themed dishes are kept for their Tuesday (`ai_menu_draft_dishes.cuisine`). The engine's `dayTheme` option
   (`_themeSplit` / `_pickThemed`, AI only -- the regular engine never passes it) falls back themed -> themed with the distinct
   rule relaxed -> regular -> regular relaxed, warning at each step; never an empty slot, never relaxed safety.
+  Exports of an approved run's menus (at Approve and History re-exports) label each themed Tuesday's weekday header cell
+  `TUESDAY · ARMENIAN DAY` (School and Staff; never CEO, which is unthemed): main.js `fetchGeneratedMenuExportData` matches the
+  menu's `batch_id` to an approved `ai_menu_runs` row and `nationalDayThemesForBatch` (`lib/aiMenuApprove.js`) reads the cuisine
+  SAVED on that date's picked draft dishes (never recalculated from the calendar). Other menus get no label. The parser reads
+  the weekday as the text before the `·`; School's weekday column widens only on sheets that carry a label.
 - Trial scripts (`scripts/ai-menu-trial-run.js`, `scripts/ai-menu-dup-check.js`, `scripts/staff-main-backfill.js`) ask for a
   login: run them in a normal terminal.
 
