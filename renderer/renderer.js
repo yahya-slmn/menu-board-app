@@ -1010,14 +1010,9 @@ async function renderItemsView(main) {
               ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
               ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/beef in a snack</span>` : ''}
-              ${it.is_ai_generated ? `<span class="chip ai-new" title="Created by the AI Menu Generator${it.ai_menu_run_id ? ` (AI menu run #${it.ai_menu_run_id})` : ''}">AI</span>` : ''}
             </td>
-            <td>
-              <input class="rc-input created-by-input" data-created-by="${it.id}" value="${aiEsc(it.created_by_label || '')}" placeholder="—" list="created-by-list" aria-label="Created by, ${aiEsc(it.name)}" />
-            </td>
-            <td>
-              <input class="rc-input ${it.rc_code ? '' : 'rc-missing'}" data-rc="${it.id}" value="${it.rc_code || ''}" placeholder="NEW" />
-            </td>
+            <td class="created-by-cell" data-created-by="${it.id}">${it.created_by_label ? aiEsc(it.created_by_label) : '<span class="list-empty">—</span>'}</td>
+            <td class="code-cell" data-code="${it.id}">${it.rc_code ? aiEsc(it.rc_code) : '<span class="code-missing">NEW</span>'}</td>
             <td style="text-align:right">
               <button class="icon-btn" data-edit="${it.id}">Edit</button>
               <button class="icon-btn danger" data-delete="${it.id}">Delete</button>
@@ -1029,7 +1024,7 @@ async function renderItemsView(main) {
 
     content.innerHTML = `
       <div class="table-scroll"><table class="items-table dish-catalog-table">
-        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Tags</th><th>Created By</th><th>RC</th><th></th></tr></thead>
+        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Tags</th><th>Created By</th><th>Code</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
       </table></div>
     `;
@@ -1056,35 +1051,6 @@ async function renderItemsView(main) {
         }
       });
     });
-    content.querySelectorAll('[data-created-by]').forEach(input => {
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
-      input.addEventListener('change', async () => {
-        const id = Number(input.dataset.createdBy);
-        try {
-          const { createdByLabel } = await window.api.updateItemCreatedBy({ id, createdByLabel: input.value });
-          input.value = createdByLabel || '';
-          const it = items.find(i => i.id == id);
-          if (it) it.created_by_label = createdByLabel;
-          const keep = sourceFilter.value;
-          sourceFilter.innerHTML = createdByFilterOptions(items);
-          sourceFilter.value = [...sourceFilter.options].some(o => o.value === keep) ? keep : '';
-          fillCreatedByList();
-        } catch (err) {
-          alert(`Couldn't save Created By: ${err.message}`);
-        }
-      });
-    });
-    content.querySelectorAll('[data-rc]').forEach(input => {
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
-      input.addEventListener('change', async () => {
-        const id = input.dataset.rc;
-        const rcCode = input.value.trim() || null;
-        await window.api.updateItemRc({ id, rcCode });
-        const it = items.find(i => i.id == id);
-        if (it) it.rc_code = rcCode;
-        input.classList.toggle('rc-missing', !rcCode);
-      });
-    });
   }
 
   searchInput.addEventListener('input', renderFiltered);
@@ -1103,8 +1069,9 @@ async function fillCreatedByList() {
   for (const name of names) { const o = document.createElement('option'); o.value = name; list.appendChild(o); }
 }
 
-// The Created By filter: All / AI-generated (the is_ai_generated FLAG, whatever the label says) / one entry
-// per label in use in this section (case-insensitive) / Not set.
+// The Created By filter: All / one entry per Created By value in use in this section (AI, OLD, a chef's
+// name; case-insensitive) / Not set. (The flag-based "AI-generated" entry was dropped 2026-09-24: Created
+// By owns provenance in the Dish Catalog; is_ai_generated still drives calorie estimation.)
 function createdByFilterOptions(items) {
   const labels = new Map();
   for (const it of items) {
@@ -1114,7 +1081,6 @@ function createdByFilterOptions(items) {
   const sorted = [...labels.values()].sort((a, b) => a.localeCompare(b));
   return [
     `<option value="">Created by: all</option>`,
-    items.some(it => it.is_ai_generated) ? `<option value="ai">AI-generated</option>` : '',
     ...sorted.map(l => `<option value="label:${aiEsc(l.toLowerCase())}">Created by: ${aiEsc(l)}</option>`),
     items.some(it => !(it.created_by_label || '').trim()) ? `<option value="none">Created by: not set</option>` : '',
   ].join('');
@@ -1122,7 +1088,6 @@ function createdByFilterOptions(items) {
 
 function createdByFilterMatch(it, value) {
   if (!value) return true;
-  if (value === 'ai') return !!it.is_ai_generated;
   const label = (it.created_by_label || '').trim().toLowerCase();
   if (value === 'none') return !label;
   return label === value.slice('label:'.length);
@@ -1144,9 +1109,15 @@ async function openItemModal(existingItem) {
         <input id="m-name" value="${isEdit ? existingItem.name : ''}" />
         <div class="field-warning" id="m-snack-rule-warning" role="status" style="display:none;"></div>
       </div>
-      <div class="field" style="max-width:280px;">
-        <label for="m-created-by">Created By</label>
-        <input id="m-created-by" list="created-by-list" value="${isEdit ? aiEsc(existingItem.created_by_label || '') : ''}" placeholder="e.g. Tetiana" />
+      <div class="field-row" style="display:flex; gap:14px;">
+        <div class="field" style="max-width:280px; flex:1;">
+          <label for="m-created-by">Created By</label>
+          <input id="m-created-by" list="created-by-list" value="${isEdit ? aiEsc(existingItem.created_by_label || '') : ''}" placeholder="e.g. Tetiana" />
+        </div>
+        <div class="field" style="max-width:200px; flex:1;">
+          <label for="m-code">Code</label>
+          <input id="m-code" value="${isEdit ? aiEsc(existingItem.rc_code || '') : ''}" placeholder="e.g. RC or RG code" />
+        </div>
       </div>
       <div class="field">
         <label>Meal period</label>
@@ -1372,6 +1343,7 @@ async function openItemModal(existingItem) {
           amSnackStyle,
           removeInvalidSectionPortions,
           createdByLabel: overlay.querySelector('#m-created-by').value,
+          rcCode: overlay.querySelector('#m-code').value,
         })
       : await window.api.addItem({
           name, categoryCode: categorySelect.value,
@@ -1382,6 +1354,7 @@ async function openItemModal(existingItem) {
           portions: checkedAgeGroupCodes,
           sectionCode: state.currentSection,
           createdByLabel: overlay.querySelector('#m-created-by').value,
+          rcCode: overlay.querySelector('#m-code').value,
         });
 
     // menu_items has UNIQUE(name, category_id) -- the same dish name legitimately recurs across

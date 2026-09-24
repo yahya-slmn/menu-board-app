@@ -279,6 +279,9 @@ table.items-table td.cat-cell {
 .rc-input:focus { border-color: var(--sage); }
 .rc-input.rc-missing { border-color: var(--gold); color: var(--danger); font-style: italic; }
 .rc-input.rc-missing::placeholder { color: var(--danger); opacity: 0.7; }
+/* Dish Catalog's read-only Created By / Code cells (edited in Add / Edit Item). */
+.code-missing { color: var(--danger); font-style: italic; opacity: 0.8; }
+.list-empty { color: var(--neutral); }
 
 .chip {
   display: inline-block;

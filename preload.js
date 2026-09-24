@@ -16,8 +16,6 @@ contextBridge.exposeInMainWorld('api', {
   addItem: (payload) => ipcRenderer.invoke('add-item', payload),
   updateItem: (payload) => ipcRenderer.invoke('update-item', payload),
   checkCategoryChangeImpact: (payload) => ipcRenderer.invoke('check-category-change-impact', payload),
-  updateItemRc: (payload) => ipcRenderer.invoke('update-item-rc', payload),
-  updateItemCreatedBy: (payload) => ipcRenderer.invoke('update-item-created-by', payload),
   listCreatedByLabels: () => ipcRenderer.invoke('list-created-by-labels'),
   deleteItem: (itemId) => ipcRenderer.invoke('delete-item', itemId),
   estimateMissingCalories: () => ipcRenderer.invoke('estimate-missing-calories'),

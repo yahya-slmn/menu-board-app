@@ -577,12 +577,6 @@ async function resolveAmSnackStyle(categoryCode, name, explicitStyle) {
 // Dish Catalog "Created By" (menu_items.created_by_label): see lib/catalogCreatedBy.js.
 ipcMain.handle('list-created-by-labels', async () => listCreatedByLabels(await listRecipePeople()));
 
-ipcMain.handle('update-item-created-by', async (e, { id, createdByLabel }) => {
-  const label = await normalizeCreatedByLabel(createdByLabel, id);
-  const { error } = await supabase.from('menu_items').update({ created_by_label: label }).eq('id', id);
-  if (error) throw supaFail('update-item-created-by', error);
-  return { success: true, createdByLabel: label };
-});
 
 // menu_items has UNIQUE(name, category_id) in Postgres too -- adding/renaming/re-categorizing
 // an item so it collides with another item of the same name already in that category throws
@@ -590,7 +584,7 @@ ipcMain.handle('update-item-created-by', async (e, { id, createdByLabel }) => {
 // below) and reported back as { success: false, duplicate: true } instead of throwing, since
 // the same dish name legitimately recurs across many categories in this catalog and the
 // renderer needs to tell the user why the save didn't go through rather than have it silently fail.
-ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode, createdByLabel }) => {
+ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode, createdByLabel, rcCode }) => {
   const category = getCategoryByCode(categoryCode);
   const createdBy = await normalizeCreatedByLabel(createdByLabel);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
@@ -607,6 +601,8 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       am_snack_style: resolvedAmSnackStyle,
       // Blank unless she typed one: "OLD" means "existed before Created By was added".
       created_by_label: createdBy,
+      // The dish's Code (RC for older dishes, RG for program-made ones): typed in Add / Edit Item, never generated.
+      rc_code: String(rcCode ?? '').trim() || null,
       // Both pre-existing bugs, unrelated to item_portions.quantity retirement -- found while
       // smoke-testing Add Item afterward, neither previously set here:
       // - is_active: violates NOT NULL in Postgres (update-item always sets it; add-item never
@@ -708,13 +704,15 @@ ipcMain.handle('check-category-change-impact', async (e, { itemId, newCategoryCo
 // sections/how-many rows would go stale (via check-category-change-impact above) and she's
 // explicitly confirmed -- never inferred or defaulted true, so a category save never deletes
 // portion data the chef hasn't seen and approved in the moment.
-ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions, createdByLabel }) => {
+ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions, createdByLabel, rcCode }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
   const resolvedAmSnackStyle = await resolveAmSnackStyle(categoryCode, name, amSnackStyle);
   // Only written when the caller sends it (the Edit Item form always does); a caller that doesn't
   // know about Created By leaves it as it is. Never touches is_ai_generated.
   const createdByPatch = createdByLabel === undefined ? {} : { created_by_label: await normalizeCreatedByLabel(createdByLabel, id) };
+  // Code (menu_items.rc_code): likewise only when sent; blank clears it.
+  if (rcCode !== undefined) createdByPatch.rc_code = String(rcCode ?? '').trim() || null;
 
   const { error } = await supabase
     .from('menu_items')
@@ -796,11 +794,6 @@ ipcMain.handle('delete-item', async (e, itemId) => {
   return { success: true };
 });
 
-ipcMain.handle('update-item-rc', async (e, { id, rcCode }) => {
-  const { error } = await supabase.from('menu_items').update({ rc_code: rcCode || null }).eq('id', id);
-  if (error) throw supaFail('update-item-rc', error);
-  return { success: true };
-});
 
 // Nutritional Menu Analysis, Phase 1 -- backfills calories_per_100g for every existing item
 // that's missing it, scoped to Daycare/KG_LP/MS_UP (Staff/CEO are adults, out of scope for this
