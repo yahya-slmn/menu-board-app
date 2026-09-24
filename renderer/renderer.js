@@ -403,7 +403,9 @@ const PROTEIN_ELIGIBLE_CATEGORIES = new Set([
 // (AM_SNACK_STYLE_BY_PATTERN), scoped to Daycare/KG-LP/MS-UP the same way AM_SNACK itself only
 // ever appears in those three sections' own category lists (SECTION_SLOTS never lists it for
 // Staff/CEO), so no separate section check is needed here.
-const STYLE_ELIGIBLE_CATEGORIES = new Set(['AM_SNACK']);
+// Categories with a Pastry / Cold Kitchen style (menu_items.am_snack_style) -- PM Snack and Staff Breakfast
+// since 2026-09-24; mirrors STYLED_CATEGORIES in main.js.
+const STYLE_ELIGIBLE_CATEGORIES = new Set(['AM_SNACK', 'PM_SNACK', 'STAFF_BREAKFAST']);
 const AM_SNACK_STYLE_OPTIONS = [
   { code: 'PASTRY', name: 'Pastry' },
   { code: 'COLD_KITCHEN', name: 'Cold Kitchen' },
@@ -867,6 +869,7 @@ async function renderItemsView(main) {
     <div class="topbar">
       <div><h1>Dish Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
       <div class="action-toolbar">
+        <button class="secondary" id="estimate-styles-btn" title="Tags every AM Snack / PM Snack (Daycare, KG-LP, MS-UP) and Staff Breakfast dish without a style as Pastry or Cold Kitchen. Only fills empty values; correct any of them in Edit Item.">Estimate missing styles</button>
         <button class="secondary" id="estimate-calories-btn" title="Estimates calories for every Daycare / KG-LP / MS-UP dish without a value, and every AI-generated dish in any section. Only fills empty values.">Estimate missing calories</button>
         <button class="primary" id="add-item-btn">+ Add Item</button>
       </div>
@@ -888,6 +891,23 @@ async function renderItemsView(main) {
     <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
+  document.getElementById('estimate-styles-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const statusEl = document.getElementById('calorie-estimate-status');
+    btn.disabled = true;
+    const unsubscribe = window.api.onAmSnackStyleEstimateProgress(({ message }) => { statusEl.textContent = message; });
+    try {
+      const r = await window.api.estimateMissingAmSnackStyles();
+      unsubscribe();
+      showToast(r.totalMissing ? `Style set for ${r.estimated} of ${r.totalMissing} dish(es).` : 'Every AM Snack, PM Snack and Staff Breakfast dish already has a style.');
+      await renderItemsView(main);
+      if ((r.failures || []).length) document.getElementById('calorie-estimate-status').textContent = `Notes: ${r.failures.slice(0, 3).join(' | ')}`;
+    } catch (err) {
+      unsubscribe();
+      statusEl.textContent = `Style estimate failed: ${err.message}`;
+      btn.disabled = false;
+    }
+  });
   document.getElementById('estimate-calories-btn').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const statusEl = document.getElementById('calorie-estimate-status');
@@ -1145,8 +1165,8 @@ async function openItemModal(existingItem) {
         <label>Calories per 100g</label>
         <input id="m-calories" type="number" min="0" step="1" value="${isEdit && existingItem.calories_per_100g != null ? existingItem.calories_per_100g : ''}" />
       </div>
-      <div class="field" style="max-width:220px;">
-        <label>Style (AM Snack only)</label>
+      <div class="field" style="max-width:320px;">
+        <label>Style (AM Snack, PM Snack, Staff Breakfast)</label>
         <select id="m-am-snack-style">
           <option value="">— auto-classify with AI —</option>
           ${AM_SNACK_STYLE_OPTIONS.map(s => `<option value="${s.code}" ${isEdit && existingItem.am_snack_style === s.code ? 'selected' : ''}>${s.name}</option>`).join('')}

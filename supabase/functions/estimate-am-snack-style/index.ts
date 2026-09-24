@@ -5,9 +5,9 @@
 // preserve exact 1:1 correspondence over a batch of many short, structurally similar items -- see
 // that function's own header comment for the full reasoning, unchanged here).
 //
-// Classifies AM Snack items (Daycare/KG-LP/MS-UP only -- see main.js's
-// estimate-missing-am-snack-styles) as PASTRY or COLD_KITCHEN, backing the weekly rotation rule
-// in lib/generator.js (AM_SNACK_STYLE_BY_PATTERN). Applied directly as the final value, same as
+// Classifies AM Snack / PM Snack items (Daycare/KG-LP/MS-UP) and Staff Breakfast items (see main.js's
+// estimate-missing-am-snack-styles) as PASTRY or COLD_KITCHEN, one category per call, backing the
+// Pastry / Cold Kitchen rotation in lib/generator.js (AM_SNACK_STYLE_BY_PATTERN). Applied directly as the final value, same as
 // calories_per_100g -- no review-flag/indicator, confirmed with the chef; manually correctable
 // afterward via the Item Catalog form either way.
 //
@@ -50,11 +50,34 @@ const CLASSIFY_SCHEMA = {
   additionalProperties: false,
 };
 
-function buildPrompt(items: ClassifyItem[]): string {
-  return `For each AM Snack menu item below (served at a school Daycare/KG-LP/MS-UP morning snack time), classify it as exactly one of two kitchen styles:
+// What the two styles mean in each category the rotation covers. The column is still called
+// am_snack_style, but since 2026-09-24 it also tags PM Snack and Staff Breakfast items (the four
+// daily snack cells and Staff Breakfast are 2 Pastry + 2 Cold Kitchen / 3 + 3). A call without a
+// category is an AM Snack call, as before.
+const CATEGORY_DEFINITIONS: Record<string, { label: string; pastry: string; cold: string }> = {
+  AM_SNACK: {
+    label: "AM Snack menu item (served at a school Daycare/KG-LP/MS-UP morning snack time)",
+    pastry: "a baked/griddled sweet or bread-based item -- e.g. pancakes, chia pudding, croissant, muffin, waffle, cereal bar, cake.",
+    cold: "an assembled savory item -- e.g. sandwiches, omelette, pizza, wraps, cheese/vegetable plates.",
+  },
+  PM_SNACK: {
+    label: "PM Snack menu item (the light afternoon snack at a school Daycare/KG-LP/MS-UP before home time)",
+    pastry: "a sweet baked or pastry-style item -- e.g. vanilla cake, muffins, date balls, cookies, small sweet baked goods.",
+    cold: "the savory / salty side -- e.g. salted pretzels, baked vegetable chips, crackers, savory bites, cheese fingers, labneh roll-ups.",
+  },
+  STAFF_BREAKFAST: {
+    label: "Staff Breakfast buffet dish (a school's staff breakfast)",
+    pastry: "a baked/griddled sweet or bread-based item -- e.g. croissants, manakish, muffins, pancakes, waffles, cakes, sweet or cheese pastries.",
+    cold: "an assembled or plated savory item -- e.g. sandwiches, wraps, egg dishes, foul or bean dishes, labneh / cheese / vegetable plates, salads.",
+  },
+};
 
-- PASTRY: a baked/griddled sweet or bread-based item -- e.g. pancakes, chia pudding, croissant, muffin, waffle, cereal bar, cake.
-- COLD_KITCHEN: an assembled savory item -- e.g. sandwiches, omelette, pizza, wraps, cheese/vegetable plates.
+function buildPrompt(items: ClassifyItem[], category: string): string {
+  const def = CATEGORY_DEFINITIONS[category];
+  return `For each ${def.label} below, classify it as exactly one of two kitchen styles:
+
+- PASTRY: ${def.pastry}
+- COLD_KITCHEN: ${def.cold}
 
 Base the classification on the item's name alone, using general knowledge of similar dishes.
 
@@ -78,7 +101,7 @@ Deno.serve(async (req) => {
     return ok({ success: false, error: "Server misconfigured: ANTHROPIC_API_KEY not set" });
   }
 
-  let body: { items?: ClassifyItem[] };
+  let body: { items?: ClassifyItem[]; category?: string };
   try {
     body = await req.json();
   } catch {
@@ -86,6 +109,10 @@ Deno.serve(async (req) => {
   }
 
   const items = body.items;
+  const category = body.category || "AM_SNACK";
+  if (!CATEGORY_DEFINITIONS[category]) {
+    return ok({ success: false, error: `Unknown category ${category}` });
+  }
   if (!Array.isArray(items)) {
     return ok({ success: false, error: "Missing items array" });
   }
@@ -116,7 +143,7 @@ Deno.serve(async (req) => {
       max_tokens: 8192,
       thinking: { type: "disabled" },
       messages: [
-        { role: "user", content: buildPrompt(items) },
+        { role: "user", content: buildPrompt(items, category) },
       ],
       output_config: { format: { type: "json_schema", schema: CLASSIFY_SCHEMA } },
     });

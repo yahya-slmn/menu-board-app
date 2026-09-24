@@ -554,11 +554,14 @@ ipcMain.handle('suggest-classification', (e, { name, mealPeriod, sectionCode }) 
 // the item unclassified (null) rather than blocking the save, since classification is secondary
 // to the item existing at all -- she can still classify it later via the bulk backfill button or
 // by editing the item directly.
+// The categories that carry a Pastry / Cold Kitchen style (menu_items.am_snack_style): AM Snack, and
+// since 2026-09-24 PM Snack and Staff Breakfast too (the daily snack / Staff Breakfast style mix).
+const STYLED_CATEGORIES = new Set(['AM_SNACK', 'PM_SNACK', 'STAFF_BREAKFAST']);
 async function resolveAmSnackStyle(categoryCode, name, explicitStyle) {
-  if (categoryCode !== 'AM_SNACK') return null;
+  if (!STYLED_CATEGORIES.has(categoryCode)) return null;
   if (explicitStyle) return explicitStyle;
   try {
-    const estimates = await estimateAmSnackStyle({ items: [{ index: 0, name }] });
+    const estimates = await estimateAmSnackStyle({ items: [{ index: 0, name }], category: categoryCode });
     const match = estimates.find(est => est.index === 0);
     return match?.am_snack_style ?? null;
   } catch (err) {
@@ -1105,38 +1108,40 @@ ipcMain.handle('estimate-missing-calories', async (e) => runCalorieBackfill({
   send: (payload) => { if (!e.sender.isDestroyed()) e.sender.send('calorie-estimate-progress', payload); },
 }));
 
-// AM Snack Pastry/Cold-Kitchen weekly rotation, Phase 1 -- backfills am_snack_style for every
-// existing AM_SNACK item that's missing it, scoped to Daycare/KG_LP/MS_UP (the only sections the
-// AM_SNACK category and the rotation rule apply to -- lib/generator.js's own
-// AM_SNACK_ROTATION_SECTIONS). Idempotent, same convention as estimate-missing-calories: only
-// ever touches rows where am_snack_style IS NULL, so re-running it later after new items are
-// added just backfills whatever's still missing. Batching/retry/progress-event shape mirrors
+// Pastry / Cold Kitchen style backfill -- fills am_snack_style for every item that's missing it in
+// the styled categories: AM Snack and PM Snack in Daycare/KG-LP/MS-UP, Staff Breakfast in Staff
+// (STYLE_SCOPES; PM Snack and Staff Breakfast added 2026-09-24). Idempotent, same convention as
+// estimate-missing-calories: only ever touches rows where am_snack_style IS NULL, so re-running it
+// later after new items are added just backfills whatever's still missing. One category per AI call
+// (the two styles mean different things per category). Batching/retry/progress-event shape mirrors
 // estimate-missing-calories exactly -- see that handler's own comments for the full reasoning
 // (index-tagged reconciliation, sequential batches, per-item parallel writes within a batch).
-const AM_SNACK_STYLE_IN_SCOPE_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
+const STYLE_SCOPES = [
+  { category: 'AM_SNACK', sections: ['DAYCARE', 'KG_LP', 'MS_UP'] },
+  { category: 'PM_SNACK', sections: ['DAYCARE', 'KG_LP', 'MS_UP'] },
+  { category: 'STAFF_BREAKFAST', sections: ['STAFF'] },
+];
 const AM_SNACK_STYLE_BATCH_SIZE = 50;
 
 ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
-  const ageGroupIds = AM_SNACK_STYLE_IN_SCOPE_SECTIONS
-    .map(code => getSectionByCode(code))
-    .filter(Boolean)
-    .flatMap(section => getAgeGroupsForSection(section.id).map(a => a.id));
-  if (ageGroupIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
-
-  const portionRows = await fetchAllRowsMain(() => supabase
-    .from('item_portions').select('item_id').in('age_group_id', ageGroupIds))
-    .catch(err => { throw supaFail('estimate-missing-am-snack-styles: load item_portions', err); });
-  const itemIds = [...new Set(portionRows.map(r => r.item_id))];
-  if (itemIds.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
-
-  const amSnackCategory = getCategoryByCode('AM_SNACK');
-  const { data: items, error: itemsErr } = await supabase
-    .from('menu_items')
-    .select('id, name')
-    .in('id', itemIds)
-    .eq('category_id', amSnackCategory.id)
-    .is('am_snack_style', null);
-  if (itemsErr) throw supaFail('estimate-missing-am-snack-styles: load menu_items', itemsErr);
+  const items = []; // { id, name, category }
+  for (const scope of STYLE_SCOPES) {
+    const category = getCategoryByCode(scope.category);
+    if (!category) continue;
+    const ageGroupIds = scope.sections
+      .map(code => getSectionByCode(code))
+      .filter(Boolean)
+      .flatMap(section => getAgeGroupsForSection(section.id).map(a => a.id));
+    if (ageGroupIds.length === 0) continue;
+    const portionRows = await fetchAllRowsMain(() => supabase
+      .from('item_portions').select('item_id').in('age_group_id', ageGroupIds).order('item_id').order('age_group_id'))
+      .catch(err => { throw supaFail('estimate-missing-am-snack-styles: load item_portions', err); });
+    const inScope = new Set(portionRows.map(r => r.item_id));
+    const rows = await fetchAllRowsMain(() => supabase
+      .from('menu_items').select('id, name').eq('category_id', category.id).is('am_snack_style', null).order('id'))
+      .catch(err => { throw supaFail('estimate-missing-am-snack-styles: load menu_items', err); });
+    for (const r of rows) if (inScope.has(r.id)) items.push({ ...r, category: scope.category });
+  }
   if (items.length === 0) return { success: true, estimated: 0, totalMissing: 0, failures: [] };
 
   async function classifyAndWriteBatch(batch) {
@@ -1144,7 +1149,7 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
 
     let estimates;
     try {
-      estimates = await estimateAmSnackStyle({ items: payloadItems });
+      estimates = await estimateAmSnackStyle({ items: payloadItems, category: batch[0].category });
     } catch (err) {
       return { written: 0, missing: batch, error: err.message };
     }
@@ -1159,7 +1164,8 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
     });
 
     const writeResults = await Promise.all(toWrite.map(({ it, value }) =>
-      supabase.from('menu_items').update({ am_snack_style: value }).eq('id', it.id)
+      // Only while still blank: a style a chef set by hand meanwhile (the app is used concurrently) wins.
+      supabase.from('menu_items').update({ am_snack_style: value }).eq('id', it.id).is('am_snack_style', null)
         .then(({ error }) => ({ ok: !error, it }))
     ));
     writeResults.filter(r => !r.ok).forEach(r => missing.push(r.it));
@@ -1167,9 +1173,13 @@ ipcMain.handle('estimate-missing-am-snack-styles', async (e) => {
     return { written: writeResults.filter(r => r.ok).length, missing, error: null };
   }
 
+  // Batches never mix categories (one category per AI call).
   function chunk(arr, size) {
     const out = [];
-    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    for (const cat of [...new Set(arr.map(it => it.category))]) {
+      const ofCat = arr.filter(it => it.category === cat);
+      for (let i = 0; i < ofCat.length; i += size) out.push(ofCat.slice(i, i + size));
+    }
     return out;
   }
 
