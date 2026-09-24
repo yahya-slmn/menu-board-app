@@ -40,6 +40,7 @@ const { loadCalorieCandidates, aiKeyIngredientDescriptions } = require('./lib/ca
 const aiMenuReview = require('./lib/aiMenuReview');
 const { approveRun, nationalDayThemesForBatch } = require('./lib/aiMenuApprove');
 const { normalizeCreatedByLabel, listCreatedByLabels } = require('./lib/catalogCreatedBy');
+const { snackLunchOnlyHit } = require('./lib/categoryRules');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -523,6 +524,9 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         // Free-text attribution ("AI" / "OLD" / a chef's name), edited in the Dish Catalog. Separate
         // from is_ai_generated on purpose: editing it never changes what counts as AI-generated.
         created_by_label: mi.created_by_label ?? null,
+        // An AM / PM Snack with chicken or beef: kept in the catalog, never put on a new menu
+        // (lib/categoryRules.js) -- the Dish Catalog tags it so it isn't silently missing from menus.
+        snack_rule_blocked: !!snackLunchOnlyHit(cat?.code, pt?.code ?? null, [['name', mi.name]]),
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };
@@ -4559,6 +4563,9 @@ ipcMain.handle('get-section-item-pool', async (e, sectionCode) => {
   for (const item of items) {
     const code = getCategoryById(item.category_id)?.code;
     if (!code) continue;
+    // Build Menu never offers a chicken / beef AM or PM Snack (lib/categoryRules.js).
+    const proteinCode = item.protein_type_id ? getProteinById(item.protein_type_id)?.code : null;
+    if (snackLunchOnlyHit(code, proteinCode, [['name', item.name]])) continue;
     (byCategory[code] = byCategory[code] || []).push(item);
   }
   for (const code of Object.keys(byCategory)) {

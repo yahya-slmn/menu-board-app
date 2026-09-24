@@ -120,7 +120,16 @@ terminal instead of `[object Object]`.
   outranks different dish types (relaxed first), then the mix gives way, warned. Build Menu: KG-LP's snack cells follow Daycare
   read-only (`syncBuilderSharedSnacks`), Daycare's dropdown lists dishes both catalogs have, grouped by today's style; a
   wrong-style pick is allowed and labelled "breaks today's rotation"; Auto-Fill sends the grid's other sections as the engine's
-  `partnerPicks` (`builder-fill-suggestions` `gridPicks`), never feeding KG-LP's mirror back into Daycare.
+  `partnerPicks` (`builder-fill-suggestions` `gridPicks`), never feeding KG-LP's mirror back into Daycare. In a styleMix slot
+  a dish not served in 28 days also outranks different dish types (a repeat is worse than two of one kind on a 6-dish buffet).
+- Chicken / beef are never AM or PM Snack, for EVERY dish (`lib/categoryRules.js` `snackLunchOnlyHit`: protein type, or a
+  whole word in the name; one definition, also used by `lib/aiMenuSafety.js`). Enforced 2026-09-24 as the chef's explicit
+  exception to "new rules apply forward only": the engine's catalog / draft pools (`_snackAllowed`), copies from a partner's
+  saved menu and Staff Breakfast shares (refused + warned), Build Menu's dropdowns (`get-section-item-pool`) and the AI review
+  catalog replace list. Offending catalog dishes stay in the catalog, tagged "Not served: chicken/beef in a snack"
+  (`snack_rule_blocked` from `get-items`); Add / Edit Item only warns. History is never changed or flagged; the Excel `_Lists`
+  dropdowns are not filtered. Staff Breakfast's own dishes are out of scope. `scripts/snack-chicken-beef-list.js` (read-only,
+  login) lists the offending dishes to `backups/snack-chicken-beef-list.txt`.
 - Reading exports back in (`lib/menuIngredients.js` `parseWorkbookDishes`, used by Menu Ingredients Generator and the Recipe
   Generator's upload): a day block is found by date + weekday; layout comes from the old RC / Quantity / Weight-Unit markers
   when present (files already sent out), else CEO by its person-name header cells (`lib/menuLayout.js` `CEO_PERSONS`, shared

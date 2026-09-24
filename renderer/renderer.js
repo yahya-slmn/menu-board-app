@@ -406,6 +406,11 @@ const PROTEIN_ELIGIBLE_CATEGORIES = new Set([
 // Categories with a Pastry / Cold Kitchen style (menu_items.am_snack_style) -- PM Snack and Staff Breakfast
 // since 2026-09-24; mirrors STYLED_CATEGORIES in main.js.
 const STYLE_ELIGIBLE_CATEGORIES = new Set(['AM_SNACK', 'PM_SNACK', 'STAFF_BREAKFAST']);
+// Chicken / beef are lunch only, never AM or PM Snack -- mirrors lib/categoryRules.js (the engine,
+// Build Menu and the AI review screen enforce it; the Add / Edit Item form only warns).
+const SNACK_LUNCH_ONLY_CATEGORIES = new Set(['AM_SNACK', 'PM_SNACK']);
+const SNACK_LUNCH_ONLY_PROTEINS = new Set(['CHICKEN', 'BEEF']);
+const SNACK_LUNCH_ONLY_WORDS = /\b(chicken|beef)\b/i;
 const AM_SNACK_STYLE_OPTIONS = [
   { code: 'PASTRY', name: 'Pastry' },
   { code: 'COLD_KITCHEN', name: 'Cold Kitchen' },
@@ -999,6 +1004,7 @@ async function renderItemsView(main) {
               ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
               ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
+              ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/beef in a snack</span>` : ''}
               ${it.is_ai_generated ? `<span class="chip ai-new" title="Created by the AI Menu Generator${it.ai_menu_run_id ? ` (AI menu run #${it.ai_menu_run_id})` : ''}">AI</span>` : ''}
             </td>
             <td>
@@ -1131,6 +1137,7 @@ async function openItemModal(existingItem) {
       <div class="field">
         <label>Item name</label>
         <input id="m-name" value="${isEdit ? existingItem.name : ''}" />
+        <div class="field-warning" id="m-snack-rule-warning" role="status" style="display:none;"></div>
       </div>
       <div class="field" style="max-width:280px;">
         <label for="m-created-by">Created By</label>
@@ -1258,7 +1265,24 @@ async function openItemModal(existingItem) {
     if (!eligible) styleSelect.value = '';
   }
 
-  periodSelect.addEventListener('change', () => refreshCategoryOptions());
+  // Non-blocking: a chicken / beef AM or PM Snack can still be saved (e.g. to rename it later), but it
+  // is never put on a new menu.
+  const snackRuleWarning = overlay.querySelector('#m-snack-rule-warning');
+  function refreshSnackRuleWarning() {
+    const cat = categorySelect.value;
+    const m = nameInput.value.match(SNACK_LUNCH_ONLY_WORDS);
+    const byProtein = SNACK_LUNCH_ONLY_PROTEINS.has(proteinSelect.value);
+    const show = SNACK_LUNCH_ONLY_CATEGORIES.has(cat) && (m || byProtein);
+    snackRuleWarning.style.display = show ? 'block' : 'none';
+    if (show) {
+      snackRuleWarning.textContent = `Chicken and beef are served at lunch only: ${m ? `"${m[0]}" in the name` : 'its protein type'} keeps this snack off every new menu. You can still save it — rename it (e.g. a turkey version) or choose another category to have it served.`;
+    }
+  }
+  nameInput.addEventListener('input', refreshSnackRuleWarning);
+  proteinSelect.addEventListener('change', refreshSnackRuleWarning);
+  categorySelect.addEventListener('change', refreshSnackRuleWarning);
+
+  periodSelect.addEventListener('change', () => { refreshCategoryOptions(); refreshSnackRuleWarning(); });
   categorySelect.addEventListener('change', () => {
     categoryWarning.style.display = 'none';
     saveBtn.disabled = !categorySelect.value;
@@ -1267,6 +1291,7 @@ async function openItemModal(existingItem) {
   });
 
   refreshCategoryOptions(isEdit ? existingItem.category_code : undefined);
+  refreshSnackRuleWarning();
 
   nameInput.addEventListener('blur', async () => {
     if (isEdit || !nameInput.value.trim()) return;
@@ -1280,6 +1305,7 @@ async function openItemModal(existingItem) {
     }
     if (suggestion.protein && !proteinSelect.disabled) proteinSelect.value = suggestion.protein;
     dailyCheckbox.checked = suggestion.isDailyRepeating;
+    refreshSnackRuleWarning();
   });
 
   overlay.querySelector('#m-cancel').addEventListener('click', () => overlay.remove());
