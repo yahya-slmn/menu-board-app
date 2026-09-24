@@ -127,7 +127,8 @@ terminal instead of `[object Object]`.
   exception to "new rules apply forward only": the engine's catalog / draft pools (`_snackAllowed`), copies from a partner's
   saved menu and Staff Breakfast shares (refused + warned), Build Menu's dropdowns (`get-section-item-pool`) and the AI review
   catalog replace list. Offending catalog dishes stay in the catalog, tagged "Not served: chicken/beef in a snack"
-  (`snack_rule_blocked` from `get-items`); Add / Edit Item only warns. History is never changed or flagged; the Excel `_Lists`
+  (`snack_rule_blocked` from `get-items`); Add / Edit Item only warns. AM / PM Snack have an editable protein type
+  (`PROTEIN_ELIGIBLE_CATEGORIES`, 2026-09-24) -- set the real one (Turkey, Vegetarian...); saving keeps it. History is never changed or flagged; the Excel `_Lists`
   dropdowns are not filtered. Staff Breakfast's own dishes are out of scope. `scripts/snack-chicken-beef-list.js` (read-only,
   login) lists the offending dishes to `backups/snack-chicken-beef-list.txt`, plus every dish (any category) whose name says
   turkey but whose protein type is chicken / beef.
