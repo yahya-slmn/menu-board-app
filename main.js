@@ -41,6 +41,7 @@ const aiMenuReview = require('./lib/aiMenuReview');
 const { approveRun, nationalDayThemesForBatch } = require('./lib/aiMenuApprove');
 const { normalizeCreatedByLabel, listCreatedByLabels } = require('./lib/catalogCreatedBy');
 const { snackLunchOnlyHit } = require('./lib/categoryRules');
+const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWorkbook, planCalorieImport, loadImportTargets, applyCalorieImport } = require('./lib/calorieReview');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -1100,6 +1101,35 @@ async function runCalorieBackfill({ send = () => {}, onlyItemIds = null } = {}) 
   send({ message: `Done -- ${estimated} of ${items.length} items updated (${flagged} flagged unverified).`, current: batches.length, total: batches.length });
   return { success: true, estimated, flagged, totalMissing: items.length, failures };
 }
+
+// One-time calorie review (lib/calorieReview.js): export every active Daycare / KG-LP / MS-UP dish for a
+// researcher, then import the reviewed values. Preview first: the plan is kept here and only the plan
+// the chef saw is written (apply-calorie-import with its token). No AI.
+let calorieImportPlan = null; // { token, updates }
+ipcMain.handle('export-calorie-review', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export calories for review',
+    defaultPath: `calories-review-${today}.xlsx`,
+    filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+  const rows = await loadCalorieReviewRows();
+  await writeCalorieReviewWorkbook(rows, result.filePath);
+  return { success: true, path: result.filePath, count: rows.length };
+});
+ipcMain.handle('preview-calorie-import', async (e, { base64 }) => {
+  const parsed = await parseCalorieReviewWorkbook(Buffer.from(base64, 'base64'));
+  const plan = planCalorieImport(parsed, await loadImportTargets());
+  calorieImportPlan = { token: crypto.randomUUID(), updates: plan.updates };
+  return { token: calorieImportPlan.token, rows: parsed.length, ...plan };
+});
+ipcMain.handle('apply-calorie-import', async (e, { token }) => {
+  if (!calorieImportPlan || calorieImportPlan.token !== token) throw new Error('That preview is out of date -- choose the file again.');
+  const { updates } = calorieImportPlan;
+  calorieImportPlan = null;
+  return applyCalorieImport(updates);
+});
 
 ipcMain.handle('estimate-missing-calories', async (e) => runCalorieBackfill({
   send: (payload) => { if (!e.sender.isDestroyed()) e.sender.send('calorie-estimate-progress', payload); },

@@ -180,6 +180,13 @@ Edge Function takes a `category` (PM Snack Cold Kitchen = the savory / salty sid
 button fills blanks only. `scripts/snack-style-pool-check.js` (read-only, asks for a login) reports the pool sizes by style for the
 Daycare / KG-LP shared snack rule (it writes `backups/snack-style-pool-check.txt`; a test must never run it unredirected).
 
+**One-time calorie review** (`lib/calorieReview.js`, 2026-09-25; no AI): the Dish Catalog's "Export calories for review" /
+"Import reviewed calories" strip. Export = every ACTIVE Daycare / KG-LP / MS-UP dish, one row per dish (ID | Item name | Category |
+Section(s) | Current calories per 100g ("(flagged)" = unverified) | Reviewed calories per 100g | Notes). Import reads headers by
+name, matches by ID AND name, only filled Reviewed values count (0-900), shows a preview (`preview-calorie-import`), and Confirm
+writes only that plan (`apply-calorie-import` by token): calories_per_100g set, calories_unverified cleared. Notes aren't saved.
+Remove the strip once the review is done.
+
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its
 name, mirroring the logic originally used to import the seed Excel file. Pure

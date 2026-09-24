@@ -884,6 +884,12 @@ async function renderItemsView(main) {
         <button class="primary" id="add-item-btn">+ Add Item</button>
       </div>
     </div>
+    <div class="calorie-review-bar">
+      <span>One-time calorie review (Daycare, KG-LP and MS-UP, whichever tab is open):</span>
+      <button class="secondary small" id="calorie-review-export-btn" title="An Excel file of every active Daycare, KG-LP and MS-UP dish with its current calories, for a researcher to fill in real values.">Export calories for review</button>
+      <button class="secondary small" id="calorie-review-import-btn" title="Upload the reviewed file: shows what will change first, then writes only the filled-in Reviewed values.">Import reviewed calories</button>
+      <input type="file" id="calorie-review-file" accept=".xlsx" hidden />
+    </div>
     <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
       <label for="item-search">Search by name</label>
@@ -916,6 +922,34 @@ async function renderItemsView(main) {
       unsubscribe();
       statusEl.textContent = `Style estimate failed: ${err.message}`;
       btn.disabled = false;
+    }
+  });
+  document.getElementById('calorie-review-export-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const r = await window.api.exportCalorieReview();
+      if (r.success) showToast(`Exported ${r.count} dish(es) to ${r.path}`);
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+    } finally { btn.disabled = false; }
+  });
+  const reviewFile = document.getElementById('calorie-review-file');
+  document.getElementById('calorie-review-import-btn').addEventListener('click', () => { reviewFile.value = ''; reviewFile.click(); });
+  reviewFile.addEventListener('change', async () => {
+    const file = reviewFile.files[0];
+    if (!file) return;
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const plan = await window.api.previewCalorieImport({ base64 });
+      openCalorieImportPreview(plan, file.name, () => renderItemsView(main));
+    } catch (err) {
+      alert(`Couldn't read that file: ${err.message}`);
     }
   });
   document.getElementById('estimate-calories-btn').addEventListener('click', async (e) => {
@@ -1055,6 +1089,57 @@ async function renderItemsView(main) {
 
   searchInput.addEventListener('input', renderFiltered);
   renderFiltered();
+}
+
+// The one-time calorie import's preview (main.js preview-calorie-import): what will change, what stays,
+// what is skipped and why. Nothing is written until Confirm, and then only this plan (by its token).
+function openCalorieImportPreview(plan, fileName, onDone) {
+  const fmt = (v) => (v == null ? '—' : v);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-labelledby="cr-title" style="max-width:760px;">
+      <h2 id="cr-title">Import reviewed calories</h2>
+      <p style="margin-top:-6px; color:var(--neutral);">${aiEsc(fileName)} — ${plan.rows} row(s) read.</p>
+      <ul class="cr-summary">
+        <li><strong>${plan.updates.length}</strong> dish(es) will be updated</li>
+        <li><strong>${plan.unchanged}</strong> already have that value (no change)</li>
+        <li><strong>${plan.blank}</strong> row(s) with no Reviewed value (no change)</li>
+        <li><strong>${plan.skipped.length}</strong> row(s) skipped${plan.skipped.length ? ' (listed below)' : ''}</li>
+      </ul>
+      ${plan.updates.length ? `
+        <div class="cr-scroll" style="max-height:260px;"><table class="cr-table">
+          <thead><tr><th>Dish</th><th>Now</th><th>New</th></tr></thead>
+          <tbody>${plan.updates.map(u => `<tr><td>${aiEsc(u.name)}</td><td>${fmt(u.from)}${u.fromFlagged ? ' <span class="chip unverified">flagged</span>' : ''}</td><td><strong>${u.to}</strong></td></tr>`).join('')}</tbody>
+        </table></div>` : ''}
+      ${plan.skipped.length ? `
+        <h3 style="margin:14px 0 6px; font-size:14px;">Skipped</h3>
+        <div class="cr-scroll" style="max-height:180px;"><table class="cr-table">
+          <thead><tr><th>Row</th><th>Dish</th><th>Why</th></tr></thead>
+          <tbody>${plan.skipped.map(k => `<tr><td>${k.rowNumber}</td><td>${aiEsc(k.name || '')}</td><td>${aiEsc(k.reason)}</td></tr>`).join('')}</tbody>
+        </table></div>` : ''}
+      <div class="actions">
+        <button class="secondary" id="cr-cancel">Cancel</button>
+        <button class="primary" id="cr-confirm" ${plan.updates.length ? '' : 'disabled'}>Update ${plan.updates.length} dish(es)</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#cr-cancel').addEventListener('click', close);
+  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  overlay.querySelector('#cr-confirm').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await window.api.applyCalorieImport({ token: plan.token });
+      close();
+      showToast(r.failed.length ? `Updated ${r.written} dish(es); ${r.failed.length} failed: ${r.failed.slice(0, 3).map(f => f.name).join(', ')}` : `Updated calories for ${r.written} dish(es).`);
+      onDone();
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+      e.currentTarget.disabled = false;
+    }
+  });
+  overlay.querySelector('#cr-cancel').focus();
 }
 
 // Dish Catalog "Created By" (menu_items.created_by_label): free text with suggestions -- every label already
