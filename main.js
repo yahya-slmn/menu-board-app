@@ -39,6 +39,7 @@ const { generateDraftRun } = require('./lib/aiMenuGenerate');
 const { loadCalorieCandidates, aiKeyIngredientDescriptions } = require('./lib/calorieScope');
 const aiMenuReview = require('./lib/aiMenuReview');
 const { approveRun, nationalDayThemesForBatch } = require('./lib/aiMenuApprove');
+const { normalizeCreatedByLabel, listCreatedByLabels } = require('./lib/catalogCreatedBy');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -495,7 +496,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id')
+    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id, created_by_label')
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
 
@@ -519,6 +520,9 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         // Set by the AI Menu Generator's Approve on the dishes it created (never on linked ones).
         is_ai_generated: !!mi.is_ai_generated,
         ai_menu_run_id: mi.ai_menu_run_id ?? null,
+        // Free-text attribution ("AI" / "OLD" / a chef's name), edited in the Dish Catalog. Separate
+        // from is_ai_generated on purpose: editing it never changes what counts as AI-generated.
+        created_by_label: mi.created_by_label ?? null,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };
@@ -563,14 +567,25 @@ async function resolveAmSnackStyle(categoryCode, name, explicitStyle) {
   }
 }
 
+// Dish Catalog "Created By" (menu_items.created_by_label): see lib/catalogCreatedBy.js.
+ipcMain.handle('list-created-by-labels', async () => listCreatedByLabels(await listRecipePeople()));
+
+ipcMain.handle('update-item-created-by', async (e, { id, createdByLabel }) => {
+  const label = await normalizeCreatedByLabel(createdByLabel, id);
+  const { error } = await supabase.from('menu_items').update({ created_by_label: label }).eq('id', id);
+  if (error) throw supaFail('update-item-created-by', error);
+  return { success: true, createdByLabel: label };
+});
+
 // menu_items has UNIQUE(name, category_id) in Postgres too -- adding/renaming/re-categorizing
 // an item so it collides with another item of the same name already in that category throws
 // a unique_violation (Postgres code 23505). Caught here (same pattern as delete-ingredient
 // below) and reported back as { success: false, duplicate: true } instead of throwing, since
 // the same dish name legitimately recurs across many categories in this catalog and the
 // renderer needs to tell the user why the save didn't go through rather than have it silently fail.
-ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode }) => {
+ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode, createdByLabel }) => {
   const category = getCategoryByCode(categoryCode);
+  const createdBy = await normalizeCreatedByLabel(createdByLabel);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
   const resolvedAmSnackStyle = await resolveAmSnackStyle(categoryCode, name, amSnackStyle);
 
@@ -583,6 +598,8 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       is_daily_repeating: isDailyRepeating ? 1 : 0,
       calories_per_100g: caloriesPer100g ?? null,
       am_snack_style: resolvedAmSnackStyle,
+      // Blank unless she typed one: "OLD" means "existed before Created By was added".
+      created_by_label: createdBy,
       // Both pre-existing bugs, unrelated to item_portions.quantity retirement -- found while
       // smoke-testing Add Item afterward, neither previously set here:
       // - is_active: violates NOT NULL in Postgres (update-item always sets it; add-item never
@@ -684,14 +701,18 @@ ipcMain.handle('check-category-change-impact', async (e, { itemId, newCategoryCo
 // sections/how-many rows would go stale (via check-category-change-impact above) and she's
 // explicitly confirmed -- never inferred or defaulted true, so a category save never deletes
 // portion data the chef hasn't seen and approved in the moment.
-ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions }) => {
+ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions, createdByLabel }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
   const resolvedAmSnackStyle = await resolveAmSnackStyle(categoryCode, name, amSnackStyle);
+  // Only written when the caller sends it (the Edit Item form always does); a caller that doesn't
+  // know about Created By leaves it as it is. Never touches is_ai_generated.
+  const createdByPatch = createdByLabel === undefined ? {} : { created_by_label: await normalizeCreatedByLabel(createdByLabel, id) };
 
   const { error } = await supabase
     .from('menu_items')
     .update({
+      ...createdByPatch,
       name,
       category_id: category.id,
       protein_type_id: protein ? protein.id : null,
@@ -2634,7 +2655,7 @@ ipcMain.handle('delete-ingredient', async (e, id) => {
 // as first seen. The boxes stay free text -- this only feeds their suggestion list. Read in pages because PostgREST caps a single
 // response at 1000 rows.
 const STANDING_RECIPE_PEOPLE = ['Tetiana'];
-ipcMain.handle('list-recipe-people', async () => {
+async function listRecipePeople() {
   const seen = new Map(); // lowercased, single-spaced name -> display name
   const add = (raw) => {
     const name = String(raw || '').trim().replace(/\s+/g, ' ');
@@ -2650,7 +2671,8 @@ ipcMain.handle('list-recipe-people', async () => {
     }
   }
   return [...seen.values()].sort((a, b) => a.localeCompare(b));
-});
+}
+ipcMain.handle('list-recipe-people', () => listRecipePeople());
 
 ipcMain.handle('list-waste-types', async () => {
   const { data, error } = await supabase.from('waste_types').select('*').order('sort_order');

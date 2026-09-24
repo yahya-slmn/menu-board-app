@@ -250,15 +250,16 @@ table.items-table col.col-category, table.items-table th:nth-child(1), table.ite
 table.items-table th:nth-child(3), table.items-table td:nth-child(3) { width: 180px; }
 table.items-table th:nth-child(4), table.items-table td:nth-child(4) { width: 130px; }
 table.items-table th:nth-child(5), table.items-table td:nth-child(5) { width: 110px; }
-/* Dish Catalog's own column layout (Category/Name/Calories/Tags/RC/actions) -- one column wider
+/* Dish Catalog's own column layout (Category/Name/Calories/Tags/Created By/RC/actions) -- one column wider
    than the base .items-table rules above (shared with Ingredients/Waste Types, which have their
    own, different column meanings at positions 3-5), so its Calories/Tags/RC/actions widths are
    scoped to this extra class instead of renumbering the shared nth-child rules. Higher specificity
    (two classes) than the base rules, so these simply win for this one table. */
 table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 110px; }
 table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 125px; }
-table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 130px; }
-table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 110px; }
+table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 120px; }
+table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 130px; }
+table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 110px; }
 table.items-table td, table.items-table th {
   padding: 12px 14px;
   text-align: left;
@@ -1090,12 +1091,13 @@ button:disabled { box-shadow: none; }
 .materials-table th:nth-child(7), .materials-table td:nth-child(7) { width: 150px; }
 .materials-table td:nth-child(3) { overflow-wrap: break-word; }
 
-table.items-table.dish-catalog-table { min-width: 820px; }
+table.items-table.dish-catalog-table { min-width: 940px; }
 table.items-table.dish-catalog-table th:nth-child(1), table.items-table.dish-catalog-table td:nth-child(1) { width: 120px; }
 table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 120px; }
 table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 130px; }
-table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 100px; }
-table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 150px; }
+table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 120px; }
+table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 100px; }
+table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 150px; }
 /* Ingredients (Category / Product Code / Name / Default Unit / actions) and Extracted Ingredients
    (Product Code / Name / Default Unit / actions) each get their own widths -- the base
    .items-table rules assign column widths by position, which only ever matched Waste Types. */
