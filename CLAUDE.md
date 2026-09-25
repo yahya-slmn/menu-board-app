@@ -205,6 +205,17 @@ name, mirroring the logic originally used to import the seed Excel file. Pure
 function, no DB access — returns `{ category: null, ... }` when it can't
 guess, forcing manual selection in the UI.
 
+**CEO menu v2** (2026-09-25, the chef's "September week_04" reference layout): Breakfast = Main Dish, Juice, Yogurt;
+Lunch = Main Dish, Salad, Juice, Snack, Bread (`SECTION_SLOTS.CEO`, 8 picks). `CEO_RAW_VEG` retired forward-only (category and
+dishes untouched, never picked; old menus re-export their Raw Veg row). `CEO_FRUITS` IS the Snack category -- renamed by
+`20260925100000_ceo_structure_v2.sql`, code kept. The export's Lunch "Protein" row is only a second label: the Main Dish's two
+dish cells are merged down over it (`CEO_PROTEIN_ROW_OF`, `addCeoDay`, shared by the menu and blank-template builders); it is
+not a category, slot or pick, and the parser skips it. CEO sheet style: yellow weekday + date and green person names, all
+black bold; bold dish text; widths 14/14/56/56; no blank rows between days, only the blue separator after Thursday; row heights
+left to Excel. The parser also accepts a CEO day header with no date (weekday + both person names), as the reference has.
+`dropDanglingDropdowns` removes any dropdown whose `_Lists` range was never made (a retired category's row in an old menu, a
+category whose dishes were all deactivated), in every menu export. CEO Lunch Main has an editable protein type.
+
 **Export (`lib/export.js`):** builds `.xlsx` workbooks with `exceljs`. Since 2026-09-24 no menu export (Generate Menu,
 Build Menu and its blank template, Export All, AI Menu Generator, History re-exports) carries an RC or a quantity column --
 just meal period, category / item type and dish name(s); RC stays in-app catalog data. The hidden `_Lists` sheet holds only

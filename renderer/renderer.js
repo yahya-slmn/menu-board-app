@@ -404,14 +404,15 @@ const AM_SNACK_STYLE_COLOR = { PASTRY: 'pastry', COLD_KITCHEN: 'cold-kitchen' };
 // required by lib/generator.js's SECTION_SLOTS composition rules (1 vegetarian among Staff's
 // 6 breakfast picks; 1 meat protein + 1 vegetarian for the lunchbox); STAFF_LUNCHBOX_SALAD
 // isn't generator-enforced but is 100% consistently tagged in the existing catalog.
-// CEO_LUNCH_MAIN was deliberately left out despite the "lunch main" name -- 0% real usage.
+// CEO_LUNCH_MAIN added 2026-09-25 (CEO v2: its export row pair reads "Main Dish" / "Protein"); it
+// had 0% protein tagging before, so existing CEO mains start blank -- set them in Edit Item.
 // AM_SNACK / PM_SNACK added 2026-09-24: the AI Menu Generator already writes a protein onto snack
 // dishes, and a locked field wiped it on every save; the chef sets the real one (Turkey, Vegetarian,
 // ...). What a snack may NOT be is unchanged (lib/categoryRules.js: chicken / beef by protein type or
 // name keeps it off new menus; the form warns).
 const PROTEIN_ELIGIBLE_CATEGORIES = new Set([
   'LUNCH_MAIN', 'STAFF_MAIN', 'STAFF_BREAKFAST', 'STAFF_LUNCHBOX', 'STAFF_LUNCHBOX_SALAD',
-  'AM_SNACK', 'PM_SNACK',
+  'AM_SNACK', 'PM_SNACK', 'CEO_LUNCH_MAIN',
 ]);
 
 // AM_SNACK only -- backs lib/generator.js's Pastry/Cold-Kitchen weekly rotation
