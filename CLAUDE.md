@@ -172,16 +172,19 @@ terminal instead of `[object Object]`.
   a failure partway through is not rolled back automatically.
 
 **Dish Catalog "Created By"** (`menu_items.created_by_label`, `supabase/migrations/20260924140000_menu_items_created_by_label.sql`):
-free-text attribution ("AI", "OLD" = existed before the column was added, a chef's name), a read-only column between Tags and
+free-text attribution ("AI", "OLD" = existed before the column was added, a chef's name), a read-only column between Menu use and
 Code, edited only in Add / Edit Item (under Item name, beside Code). It is NOT provenance: `is_ai_generated` / `ai_menu_run_id` still
-drive the calorie scope (the Dish Catalog no longer shows them: no AI chip in Tags, no flag-based filter since 2026-09-24), and
+drive the calorie scope (the Dish Catalog no longer shows them: no AI chip, no flag-based filter since 2026-09-24), and
 editing the label never changes them. New manual items
 start blank; Approve writes "AI". `lib/catalogCreatedBy.js` tidies the value and snaps a case-only variant to the spelling
 already in use; suggestions are every label in use plus the recipe people. The Dish Catalog's source filter is one "Created
 By" dropdown (All / each stored label / Not set). The "Code" column (`menu_items.rc_code`: RC for older dishes, RG for
 program-made ones) is likewise read-only in the list and typed in Add / Edit Item -- never generated; a missing one shows a red
-"NEW". `update-item` only writes the label / code when they are sent. Tags shows protein, Pastry / Cold Kitchen, Daily and
-"Not served" chips.
+"NEW". `update-item` only writes the label / code when they are sent. The old Tags column is three
+(2026-09-25): Style (Pastry / Cold Kitchen), Protein, and Menu use (Daily, "Not served" -- how the engine treats the dish).
+Protein chips come from `proteinChip` / `PROTEIN_COLOR` in renderer.js (also the AI review screen's `aiAttrChips`); a code with
+no color gets the outlined `.protein-other` chip, since a bare `.chip` is white text on nothing. A new protein type needs a
+color there. Column widths are set by position (`dish-catalog-table` nth-child in styles.css) to fit 1280 x 800 unscrolled.
 
 **Pastry / Cold Kitchen style** (`menu_items.am_snack_style`, despite the name): AM Snack, and since 2026-09-24 PM Snack and
 Staff Breakfast too (`STYLED_CATEGORIES` in main.js / `STYLE_ELIGIBLE_CATEGORIES` in renderer.js). The `estimate-am-snack-style`

@@ -386,9 +386,14 @@ function createProgressPanel(container, { label } = {}) {
   return { update, done, destroy };
 }
 
-const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
+// Protein code -> chip color class. A code with no entry (a protein type added later) gets the
+// outlined .protein-other chip: a bare .chip is white text on no background, i.e. invisible.
+const PROTEIN_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb', TURKEY: 'turkey', FISH: 'fish', VEGETARIAN: 'vegetarian', VEGAN: 'vegan' };
+function proteinChip(code, label) {
+  return code ? `<span class="chip ${PROTEIN_COLOR[code] || 'protein-other'}">${aiEsc(label || code)}</span>` : '';
+}
 // AM_SNACK_STYLE_OPTIONS (defined below) already carries the display name for each style code --
-// this just maps that same code to its own chip color class, same pattern as CATEGORY_COLOR does
+// this just maps that same code to its own chip color class, same pattern as PROTEIN_COLOR does
 // for protein codes. Pastry gets a warm rose (bakery), Cold Kitchen a cool teal ("cold") --
 // distinct from every existing chip color (chicken/beef/lamb/daily).
 const AM_SNACK_STYLE_COLOR = { PASTRY: 'pastry', COLD_KITCHEN: 'cold-kitchen' };
@@ -1020,7 +1025,7 @@ async function renderItemsView(main) {
     }
 
     // One shared table for every category (not a table-per-category), with the category
-    // column merged via rowspan -- keeps Tags/RC in the same horizontal position for every
+    // column merged via rowspan -- keeps Style/Protein/Menu use/Code in the same horizontal position for every
     // row regardless of which category it belongs to, instead of each category's table
     // auto-sizing its own column widths independently.
     //
@@ -1045,11 +1050,11 @@ async function renderItemsView(main) {
               ${it.calories_per_100g != null ? it.calories_per_100g : '—'}
               ${it.calories_unverified ? `<span class="chip unverified" title="AI estimate -- flagged as implausible for this item's category/protein, no real recipe was available to ground it. Worth a manual check, or add a real recipe so re-estimating can use its actual ingredients.">unverified</span>` : ''}
             </td>
-            <td>
-              ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
-              ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
+            <td>${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}</td>
+            <td>${proteinChip(it.protein_code, it.protein_name)}</td>
+            <td class="menu-use-cell">
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
-              ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/beef in a snack</span>` : ''}
+              ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/<wbr>beef in a snack</span>` : ''}
             </td>
             <td class="created-by-cell" data-created-by="${it.id}">${it.created_by_label ? aiEsc(it.created_by_label) : '<span class="list-empty">—</span>'}</td>
             <td class="code-cell" data-code="${it.id}">${it.rc_code ? aiEsc(it.rc_code) : '<span class="code-missing">NEW</span>'}</td>
@@ -1064,7 +1069,7 @@ async function renderItemsView(main) {
 
     content.innerHTML = `
       <div class="table-scroll"><table class="items-table dish-catalog-table">
-        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Tags</th><th>Created By</th><th>Code</th><th></th></tr></thead>
+        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Style</th><th>Protein</th><th>Menu use</th><th>Created By</th><th>Code</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
       </table></div>
     `;
@@ -2577,9 +2582,7 @@ function aiAttrChips(a) {
   if (!a) return '';
   const out = [];
   const pc = (a.protein_code || '').toLowerCase();
-  if (['chicken', 'beef', 'lamb'].includes(pc)) out.push(`<span class="chip ${pc}">${aiEsc(a.protein_code)}</span>`);
-  else if (pc === 'vegetarian') out.push('<span class="chip ai-veg">VEG</span>');
-  else if (pc === 'fish') out.push('<span class="chip cold-kitchen">FISH</span>');
+  if (pc) out.push(proteinChip(a.protein_code, pc === 'vegetarian' ? 'VEG' : a.protein_code));
   if (a.am_snack_style) out.push(`<span class="chip ${a.am_snack_style === 'PASTRY' ? 'pastry' : 'cold-kitchen'}">${a.am_snack_style === 'PASTRY' ? 'Pastry' : 'Cold Kitchen'}</span>`);
   return out.join(' ');
 }

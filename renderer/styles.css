@@ -16,6 +16,9 @@
   --beef: #a2493d;
   --lamb: #72543c;
   --veg: #4b7450;
+  --vegan: #56701e;
+  --turkey: #6b4f8f;
+  --fish: #2f5d8c;
   --neutral: #687168;
   --danger: #a13932;
   --pastry: #93546b;
@@ -243,23 +246,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .rg-draft-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 
 /* ---------------- Items table ---------------- */
-/* Single table across all categories with fixed column widths -- keeps Tags/RC aligned in
+/* Single table across all categories with fixed column widths -- keeps the chip/Code columns aligned in
    the same place for every row, instead of each category having its own auto-sized table. */
 table.items-table { width: 100%; min-width: 740px; border-collapse: collapse; table-layout: fixed; background: var(--surface); }
 table.items-table col.col-category, table.items-table th:nth-child(1), table.items-table td:nth-child(1) { width: 125px; }
 table.items-table th:nth-child(3), table.items-table td:nth-child(3) { width: 180px; }
 table.items-table th:nth-child(4), table.items-table td:nth-child(4) { width: 130px; }
 table.items-table th:nth-child(5), table.items-table td:nth-child(5) { width: 110px; }
-/* Dish Catalog's own column layout (Category/Name/Calories/Tags/Created By/RC/actions) -- one column wider
-   than the base .items-table rules above (shared with Ingredients/Waste Types, which have their
-   own, different column meanings at positions 3-5), so its Calories/Tags/RC/actions widths are
-   scoped to this extra class instead of renumbering the shared nth-child rules. Higher specificity
-   (two classes) than the base rules, so these simply win for this one table. */
-table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 110px; }
-table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 125px; }
-table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 120px; }
-table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 130px; }
-table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 110px; }
 table.items-table td, table.items-table th {
   padding: 12px 14px;
   text-align: left;
@@ -302,6 +295,12 @@ table.items-table td.cat-cell {
 .chip.chicken { background: var(--chicken); }
 .chip.beef { background: var(--beef); }
 .chip.lamb { background: var(--lamb); }
+.chip.turkey { background: var(--turkey); }
+.chip.fish { background: var(--fish); }
+.chip.vegetarian { background: var(--veg); }
+.chip.vegan { background: var(--vegan); }
+/* A protein type with no color of its own yet: outlined, never white-on-nothing. */
+.chip.protein-other { background: var(--surface); color: var(--ink); border: 1px solid var(--line); }
 .chip.daily { background: var(--neutral); }
 .chip.pastry { background: var(--pastry); }
 .chip.cold-kitchen { background: var(--cold-kitchen); }
@@ -1115,13 +1114,23 @@ button:disabled { box-shadow: none; }
 .materials-table th:nth-child(7), .materials-table td:nth-child(7) { width: 150px; }
 .materials-table td:nth-child(3) { overflow-wrap: break-word; }
 
-table.items-table.dish-catalog-table { min-width: 940px; }
-table.items-table.dish-catalog-table th:nth-child(1), table.items-table.dish-catalog-table td:nth-child(1) { width: 120px; }
-table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 120px; }
-table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 130px; }
-table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 120px; }
+/* Dish Catalog: Category / Name / Calories / Style / Protein / Menu use / Created By / Code / actions.
+   Two classes, so these win over the base .items-table widths (shared with Ingredients / Waste Types,
+   whose columns mean something else). Name takes what is left. Style fits "Cold Kitchen", Protein
+   "Vegetarian", actions Edit + Delete; "Not served: ..." wraps inside Menu use. */
+table.items-table.dish-catalog-table { min-width: 960px; } /* fits the default 1280 x 800 window without scrolling */
+table.items-table.dish-catalog-table th:nth-child(1), table.items-table.dish-catalog-table td:nth-child(1) { width: 96px; }
+table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 92px; }
+table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 104px; }
+table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 94px; }
 table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 100px; }
-table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 150px; }
+table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 88px; }
+table.items-table.dish-catalog-table th:nth-child(8), table.items-table.dish-catalog-table td:nth-child(8) { width: 82px; }
+table.items-table.dish-catalog-table th:nth-child(9), table.items-table.dish-catalog-table td:nth-child(9) { width: 124px; }
+/* The table's overflow-wrap: anywhere splits chips and codes mid-word ("unverifi / ed", "RC- / 3004"); chips
+   wrap at spaces (and "Not served"'s <wbr>) only, and a code never wraps. Calories fits "unverified". */
+table.dish-catalog-table .chip { overflow-wrap: normal; }
+table.dish-catalog-table .code-cell { white-space: nowrap; }
 /* Ingredients (Category / Product Code / Name / Default Unit / actions) and Extracted Ingredients
    (Product Code / Name / Default Unit / actions) each get their own widths -- the base
    .items-table rules assign column widths by position, which only ever matched Waste Types. */
@@ -1256,7 +1265,6 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .ai-summary-hint { flex: 1 1 100%; font-size: 12px; color: var(--neutral); }
 .chip.ai-new { background: var(--sage); }
 .chip.ai-edited { background: var(--gold); color: var(--ink); }
-.chip.ai-veg { background: var(--veg); }
 .chip.ai-cuisine { background: var(--gold); color: var(--ink); }
 .ai-national-day {
   margin-left: 14px; font-family: var(--font-ui); font-size: 11.5px; font-weight: 600; background: var(--surface);
