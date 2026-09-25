@@ -1329,3 +1329,39 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .ai-confirm { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 10px 0 4px; }
 .ai-calorie-status { margin-top: 6px; }
 #calorie-estimate-status:empty { display: none; }
+
+/* ---------------- Dish Catalog: Import dishes from menus (renderCatalogImportView) ---------------- */
+.ci-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; }
+.ci-controls { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.ci-field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--neutral); }
+.ci-field input[type="text"] { min-width: 200px; }
+.ci-chosen { font-size: 12.5px; color: var(--neutral); padding-bottom: 8px; }
+.ci-unresolved { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.ci-summary { font-size: 13px; margin: 0 0 12px; line-height: 1.6; }
+.ci-jump { background: none; border: none; padding: 0; font: inherit; color: var(--sage-dark); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.ci-jump.ci-top { font-size: 12px; font-weight: 400; color: var(--neutral); margin-left: auto; }
+.ci-h2 { scroll-margin-top: 16px; }
+.ci-details { font-size: 12.5px; color: var(--neutral); margin-bottom: 16px; }
+.ci-details ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.6; }
+.ci-h2 { font-size: 16px; margin: 22px 0 8px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ci-bulk { display: inline-flex; gap: 6px; }
+.ci-bulk button.small { padding: 4px 10px; font-size: 12px; }
+.ci-hint { font-size: 12.5px; color: var(--neutral); margin: 0 0 10px; max-width: 760px; line-height: 1.55; }
+.ci-empty { font-size: 13px; color: var(--neutral); }
+.ci-table td { vertical-align: middle; }
+.ci-table td:first-child, .ci-table th:first-child { width: 44px; text-align: center; }
+.ci-table .ci-name { width: 100%; min-width: 220px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+.ci-table select { max-width: 190px; padding: 4px 6px; font-size: 12.5px; margin: 2px 4px 2px 0; }
+.ci-table .ci-note { display: block; font-size: 11.5px; color: var(--neutral); margin-top: 4px; }
+.ci-table .ci-note-warn { color: var(--accent); }
+.ci-table .chip { margin: 4px 4px 0 0; overflow-wrap: normal; }
+.ci-table .ci-files { font-size: 12px; color: var(--neutral); min-width: 160px; }
+.ci-table tr.ci-off td:not(:first-child) { opacity: 0.55; }
+.ci-table tr.ci-section-row th, .ci-table tr.ci-category-row th { text-align: left; }
+.ci-table tr.ci-section-row th { background: var(--sage-fill); color: var(--sage-dark); font-size: 12px; text-transform: none; letter-spacing: 0; position: static; }
+.ci-table tr.ci-category-row th { background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; position: static; padding-top: 10px; }
+.ci-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 14px; padding: 12px 0; margin-top: 18px;
+  background: var(--paper); border-top: 1px solid var(--line); font-size: 13px; color: var(--neutral); }
+.ci-result ul { line-height: 1.8; font-size: 13.5px; }
+.ci-failed { color: var(--danger); }
+.ci-result-actions { display: flex; gap: 10px; margin-top: 8px; }

@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('api', {
   exportCalorieReview: () => ipcRenderer.invoke('export-calorie-review'),
   previewCalorieImport: (payload) => ipcRenderer.invoke('preview-calorie-import', payload),
   applyCalorieImport: (payload) => ipcRenderer.invoke('apply-calorie-import', payload),
+  previewCatalogImport: (payload) => ipcRenderer.invoke('preview-catalog-import', payload),
+  applyCatalogImport: (payload) => ipcRenderer.invoke('apply-catalog-import', payload),
   // Same one-way-progress-events pattern as onExportProgress above (main.js sends
   // 'calorie-estimate-progress' while working through batches, since a single invoke() call has
   // no way to report interim status on its own). Returns an unsubscribe function, same reason.

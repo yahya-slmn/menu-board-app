@@ -30,6 +30,10 @@ const state = {
   // "current"; a later export sends it back so main.js can refuse to export against a superseded
   // upload's in-memory workbooks (see main.js's own comment on menuIngredientsToken).
   menuIngredients: { files: [], uploadToken: null },
+  // Dish Catalog -> "Import dishes from menus" (renderCatalogImportView): shown in place of the catalog
+  // while open. files: [{ name, base64 }] kept so a section pick can re-read them; sel: key -> the
+  // chef's tick / name / category / protein per row; overrides: 'file::sheet' -> section code.
+  catalogImport: { open: false, files: [], plan: null, sel: {}, overrides: {}, createdBy: 'Tetiana', result: null, busy: false },
   // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
   // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
   // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
@@ -875,6 +879,7 @@ function currentSectionName() {
 // ITEM CATALOG VIEW
 // ============================================================
 async function renderItemsView(main) {
+  if (state.catalogImport.open) return renderCatalogImportView(main);
   const [items, proteinTypes] = await Promise.all([
     window.api.getItems(state.currentSection),
     window.api.getProteinTypes(),
@@ -893,6 +898,7 @@ async function renderItemsView(main) {
       <div class="action-toolbar">
         <button class="secondary" id="estimate-styles-btn" title="Tags every AM Snack / PM Snack (Daycare, KG-LP, MS-UP) and Staff Breakfast dish without a style as Pastry or Cold Kitchen. Only fills empty values; correct any of them in Edit Item.">Estimate missing styles</button>
         <button class="secondary" id="estimate-calories-btn" title="Estimates calories for every Daycare / KG-LP / MS-UP dish without a value, and every AI-generated dish in any section. Only fills empty values.">Estimate missing calories</button>
+        <button class="secondary" id="catalog-import-btn" title="Reads menu Excel files exported from this app and edited by hand, and lists every dish the catalog doesn't have yet. Nothing is added until you tick and confirm.">Import dishes from menus…</button>
         <button class="primary" id="add-item-btn">+ Add Item</button>
       </div>
     </div>
@@ -919,6 +925,10 @@ async function renderItemsView(main) {
     <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
+  document.getElementById('catalog-import-btn').addEventListener('click', () => {
+    Object.assign(state.catalogImport, { open: true, plan: null, result: null, sel: {}, overrides: {} });
+    renderItemsView(main);
+  });
   document.getElementById('estimate-styles-btn').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const statusEl = document.getElementById('calorie-estimate-status');
@@ -1105,6 +1115,309 @@ async function renderItemsView(main) {
 
 // The one-time calorie import's preview (main.js preview-calorie-import): what will change, what stays,
 // what is skipped and why. Nothing is written until Confirm, and then only this plan (by its token).
+// ============================================================
+// Dish Catalog -> "Import dishes from menus" (main.js preview-catalog-import / apply-catalog-import,
+// lib/catalogImport.js). Reads chef-edited menu exports, lists what the catalog lacks, and adds ONLY the
+// ticked rows: new dishes (ticked), "looks like an existing dish" (not ticked -- the 0.80 name match
+// also flags some different dishes, so each sits beside its catalog match), and dishes already in the
+// catalog but not on a section's menu (not ticked). Shown in place of the Dish Catalog while open.
+// ============================================================
+const CI_SCHOOL_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
+
+function ciSectionName(code) {
+  return state.sections.find(s => s.code === code)?.name || code;
+}
+
+// "SUNDAY 28-09-2026" -> "Sun 28-09"; "Sunday" (no date) -> "Sun".
+function ciShortDay(day) {
+  const [weekday, date] = String(day).split(' ');
+  const wd = weekday ? weekday[0].toUpperCase() + weekday.slice(1, 3).toLowerCase() : '';
+  return date ? `${wd} ${date.slice(0, 5)}` : wd;
+}
+
+// File names without the words every file shares ("September week_01" .. -> "week_01").
+function ciFileLabeler(plan) {
+  const names = [...new Set([...plan.newDishes, ...plan.similar, ...plan.notInSection].flatMap(e => Object.keys(e.files)))];
+  const words = names.map(n => n.split(' '));
+  let common = 0;
+  while (names.length > 1 && words.every(w => w.length > common + 1 && w[common] === words[0][common])) common++;
+  return (name) => name.split(' ').slice(common).join(' ') || name;
+}
+
+function ciFilesText(entry, label) {
+  return Object.entries(entry.files).map(([f, days]) => `${label(f)}${days.length ? `: ${days.map(ciShortDay).join(', ')}` : ''}`).join(' · ');
+}
+
+// Fresh selections for a new plan: new dishes ticked, the other two groups not.
+function ciInitSelections(plan) {
+  const sel = {};
+  for (const e of plan.newDishes) sel[e.key] = { include: true, name: e.name, categoryCode: e.categoryCode, proteinCode: e.proteinCode || '' };
+  for (const e of plan.similar) sel[e.key] = { include: false, name: e.name, categoryCode: e.categoryCode, proteinCode: e.proteinCode || '' };
+  for (const e of plan.notInSection) sel[e.key] = { include: false };
+  return sel;
+}
+
+async function ciReadFiles(fileList) {
+  return Promise.all([...fileList].map(file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, base64: reader.result.split(',')[1] });
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  })));
+}
+
+async function renderCatalogImportView(main) {
+  const ci = state.catalogImport;
+  fillCreatedByList();
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Import dishes from menus</h1><span class="page-description">Menu Excel files exported from this app and edited by hand: every dish the Dish Catalog doesn't have yet, for you to review before anything is added.</span></div>
+      <div class="action-toolbar"><button class="secondary" id="ci-back">← Dish Catalog</button></div>
+    </div>
+    <div class="ci-panel ci-controls">
+      <label class="ci-field">Menu files
+        <input type="file" id="ci-files" accept=".xlsx" multiple />
+      </label>
+      <label class="ci-field">Created By
+        <input type="text" id="ci-created-by" list="created-by-list" value="${aiEsc(ci.createdBy)}" autocomplete="off" />
+      </label>
+      <button class="primary" id="ci-read" ${ci.files.length ? '' : 'disabled'}>Read files</button>
+      <span class="ci-chosen">${ci.files.length ? `${ci.files.length} file(s): ${ci.files.map(f => aiEsc(f.name)).join(', ')}` : 'No files chosen'}</span>
+    </div>
+    <div id="ci-status" class="ai-progress" role="status" aria-live="polite"></div>
+    <div id="ci-body"></div>
+  `;
+  document.getElementById('ci-back').addEventListener('click', () => {
+    Object.assign(state.catalogImport, { open: false, plan: null, result: null, files: [], sel: {}, overrides: {} });
+    renderItemsView(main);
+  });
+  document.getElementById('ci-created-by').addEventListener('input', (e) => { ci.createdBy = e.target.value; ciUpdateFooter(); });
+  document.getElementById('ci-files').addEventListener('change', async (e) => {
+    try {
+      ci.files = await ciReadFiles(e.target.files);
+      Object.assign(ci, { plan: null, result: null, sel: {}, overrides: {} });
+      renderCatalogImportView(main);
+    } catch (err) { alert(`Couldn't read those files: ${err.message}`); }
+  });
+  document.getElementById('ci-read').addEventListener('click', () => ciPreview(main));
+  if (ci.result) ciRenderResult(main);
+  else if (ci.plan) ciRenderPlan(main);
+}
+
+async function ciPreview(main) {
+  const ci = state.catalogImport;
+  const status = document.getElementById('ci-status');
+  const btn = document.getElementById('ci-read');
+  btn.disabled = true;
+  status.textContent = 'Reading the files and the Dish Catalog…';
+  try {
+    ci.plan = await window.api.previewCatalogImport({ files: ci.files, sectionOverrides: ci.overrides });
+    ci.sel = ciInitSelections(ci.plan);
+    status.textContent = '';
+    ciRenderPlan(main);
+  } catch (err) {
+    status.textContent = `Couldn't read the files: ${err.message}`;
+  } finally { btn.disabled = false; }
+}
+
+function ciEntryRow(e, kind, label) {
+  const sel = state.catalogImport.sel[e.key];
+  const categorySelect = `<select class="ci-cat" aria-label="Category for ${aiEsc(e.name)}">${e.categoryOptions.map(c => `<option value="${c.code}" ${c.code === sel.categoryCode ? 'selected' : ''}>${aiEsc(c.name)}</option>`).join('')}</select>`;
+  const proteinSelect = `<select class="ci-protein" aria-label="Protein for ${aiEsc(e.name)}" ${PROTEIN_ELIGIBLE_CATEGORIES.has(sel.categoryCode) ? '' : 'hidden'}>
+      <option value="">— protein —</option>${state.proteinTypes.map(p => `<option value="${p.code}" ${p.code === sel.proteinCode ? 'selected' : ''}>${aiEsc(p.name)}</option>`).join('')}</select>`;
+  const notes = [
+    e.variants?.length ? `<span class="ci-note">Also spelled: ${e.variants.map(aiEsc).join(' / ')}</span>` : '',
+    e.alsoListedAs?.length ? `<span class="ci-note ci-note-warn">Also listed as ${e.alsoListedAs.map(aiEsc).join(', ')}: the menus used it in both rows. Untick one unless both are wanted.</span>` : '',
+    kind === 'similar' ? `<span class="ci-note">≈ <strong>${aiEsc(e.matchedName)}</strong> in the catalog (${e.matchedCategories.map(aiEsc).join(', ')})</span>` : '',
+    e.snackWarning ? `<span class="chip unverified" title="Chicken and beef are served at lunch only: this snack would never be put on a new menu.">Not served: chicken/<wbr>beef in a snack</span>` : '',
+  ].join('');
+  return `
+    <tr data-key="${aiEsc(e.key)}" class="${sel.include ? '' : 'ci-off'}">
+      <td><input type="checkbox" class="ci-include" ${sel.include ? 'checked' : ''} aria-label="Add ${aiEsc(e.name)}" /></td>
+      <td><input type="text" class="ci-name" value="${aiEsc(sel.name)}" aria-label="Name" />${notes}</td>
+      <td>${categorySelect}${proteinSelect}</td>
+      <td>${e.sections.map(s => `<span class="chip daily">${aiEsc(ciSectionName(s))}</span>`).join(' ')}</td>
+      <td class="ci-files">${aiEsc(ciFilesText(e, label))}</td>
+    </tr>`;
+}
+
+function ciNotInSectionRow(e, label) {
+  const sel = state.catalogImport.sel[e.key];
+  const action = e.kind === 'addSection'
+    ? `Add <strong>${aiEsc(ciSectionName(e.section))}</strong> to this ${aiEsc(e.categoryName)} dish (now in ${e.inSections.map(s => aiEsc(ciSectionName(s))).join(', ') || 'no section'})${e.isActive ? '' : ' — it is inactive'}`
+    : `Add as a <strong>${aiEsc(e.categoryName)}</strong> dish for ${aiEsc(ciSectionName(e.section))} (the catalog has it as ${e.existingCategories.map(aiEsc).join(', ')})`;
+  return `
+    <tr data-key="${aiEsc(e.key)}" class="${sel.include ? '' : 'ci-off'}">
+      <td><input type="checkbox" class="ci-include" ${sel.include ? 'checked' : ''} aria-label="${aiEsc(e.name)}" /></td>
+      <td>${aiEsc(e.name)}</td>
+      <td colspan="2">${action}</td>
+      <td class="ci-files">${aiEsc(ciFilesText(e, label))}</td>
+    </tr>`;
+}
+
+// Rows grouped by first section, then category (the plan is already sorted that way).
+function ciGroupedRows(list, rowFn) {
+  let html = '', section = null, category = null;
+  for (const e of list) {
+    const sec = e.sections?.[0] ?? e.section;
+    if (sec !== section) { html += `<tr class="ci-section-row"><th colspan="5">${aiEsc(ciSectionName(sec))}</th></tr>`; section = sec; category = null; }
+    if (e.categoryCode !== category) { html += `<tr class="ci-category-row"><th colspan="5">${aiEsc(e.categoryName)}</th></tr>`; category = e.categoryCode; }
+    html += rowFn(e);
+  }
+  return html;
+}
+
+function ciTable(id, list, rowFn, heads) {
+  return `<div class="cr-scroll"><table class="cr-table ci-table" id="${id}">
+    <thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+    <tbody>${ciGroupedRows(list, rowFn)}</tbody></table></div>`;
+}
+
+function ciRenderPlan(main) {
+  const ci = state.catalogImport;
+  const plan = ci.plan;
+  const label = ciFileLabeler(plan);
+  const body = document.getElementById('ci-body');
+  const heads = ['Add', 'Dish', 'Category', 'Sections', 'Seen in'];
+  const skippedReasons = {};
+  for (const s of plan.skipped) skippedReasons[s.reason] = (skippedReasons[s.reason] || 0) + 1;
+  body.innerHTML = `
+    <p class="ci-summary">${ci.files.length} file(s) · ${plan.rowsRead} dish rows ·
+      <button class="ci-jump" data-jump="ci-h-new"><strong>${plan.newDishes.length} new</strong></button> ·
+      <button class="ci-jump" data-jump="ci-h-similar">${plan.similar.length} look like an existing dish</button> ·
+      <button class="ci-jump" data-jump="ci-h-notin">${plan.notInSection.length} in the catalog but not on a section's menu</button> ·
+      ${plan.alreadyInCount} already in the catalog (${plan.catalogSize} catalog dishes checked)</p>
+    ${plan.unresolvedSheets.length ? `<div class="ci-panel ci-unresolved"><strong>Which section is each of these tabs?</strong> Their names don't say, so their dishes are left out until you choose.
+      ${plan.unresolvedSheets.map(u => { const key = `${u.fileName}::${u.sheetName}`; return `<label class="ci-field">${aiEsc(label(u.fileName))} — tab “${aiEsc(u.sheetName)}”
+        <select class="ci-override" data-key="${aiEsc(key)}"><option value="">Choose…</option>${CI_SCHOOL_SECTIONS.map(c => `<option value="${c}" ${ci.overrides[key] === c ? 'selected' : ''}>${aiEsc(ciSectionName(c))}</option>`).join('')}</select></label>`; }).join('')}</div>` : ''}
+    ${plan.warnings.length || plan.skipped.length ? `<details class="ci-details"><summary>Notes from reading the files (${plan.warnings.length + Object.keys(skippedReasons).length})</summary><ul>
+      ${Object.entries(skippedReasons).map(([r, n]) => `<li>Skipped ${n} row(s): ${aiEsc(r)}</li>`).join('')}
+      ${plan.warnings.map(w => `<li>${aiEsc(w)}</li>`).join('')}</ul></details>` : ''}
+
+    <h2 class="ci-h2" id="ci-h-new">New dishes (${plan.newDishes.length})
+      <span class="ci-bulk"><button class="secondary small" data-bulk="ci-new" data-on="1">Select all</button><button class="secondary small" data-bulk="ci-new" data-on="0">Select none</button></span></h2>
+    ${plan.newDishes.length ? ciTable('ci-new', plan.newDishes, e => ciEntryRow(e, 'new', label), heads) : '<p class="ci-empty">None: every dish in these files is already in the catalog or listed below.</p>'}
+
+    <h2 class="ci-h2" id="ci-h-similar">Look like an existing dish (${plan.similar.length}) <button class="ci-jump ci-top" data-jump="ci-body">Back to top</button></h2>
+    <p class="ci-hint">Named almost like a dish already in the catalog. Often the same dish typed differently (then leave it unticked), but sometimes a different dish with a similar name: tick those to add them.</p>
+    ${plan.similar.length ? ciTable('ci-similar', plan.similar, e => ciEntryRow(e, 'similar', label), heads) : '<p class="ci-empty">None.</p>'}
+
+    <h2 class="ci-h2" id="ci-h-notin">In the catalog, not on this section's menu (${plan.notInSection.length}) <button class="ci-jump ci-top" data-jump="ci-body">Back to top</button></h2>
+    <p class="ci-hint">The dish exists, but a menu used it in a section it isn't listed for. Tick to make it available there.</p>
+    ${plan.notInSection.length ? ciTable('ci-notin', plan.notInSection, e => ciNotInSectionRow(e, label), ['Add', 'Dish', 'What happens', '', 'Seen in']) : '<p class="ci-empty">None.</p>'}
+
+    <div class="ci-footer"><span id="ci-count"></span><button class="primary" id="ci-apply"></button></div>
+  `;
+
+  body.querySelectorAll('.ci-jump').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.jump).scrollIntoView({ block: 'start', behavior: 'smooth' })));
+  body.querySelectorAll('.ci-override').forEach(selEl => selEl.addEventListener('change', () => {
+    if (selEl.value) ci.overrides[selEl.dataset.key] = selEl.value; else delete ci.overrides[selEl.dataset.key];
+    ciPreview(main);
+  }));
+  body.querySelectorAll('[data-bulk]').forEach(btn => btn.addEventListener('click', () => {
+    const on = btn.dataset.on === '1';
+    document.querySelectorAll(`#${btn.dataset.bulk} tr[data-key]`).forEach(tr => {
+      ci.sel[tr.dataset.key].include = on;
+      tr.querySelector('.ci-include').checked = on;
+      tr.classList.toggle('ci-off', !on);
+    });
+    ciUpdateFooter();
+  }));
+  body.querySelectorAll('tr[data-key]').forEach(tr => {
+    const sel = ci.sel[tr.dataset.key];
+    tr.querySelector('.ci-include').addEventListener('change', (e) => { sel.include = e.target.checked; tr.classList.toggle('ci-off', !sel.include); ciUpdateFooter(); });
+    tr.querySelector('.ci-name')?.addEventListener('input', (e) => { sel.name = e.target.value; });
+    const proteinEl = tr.querySelector('.ci-protein');
+    proteinEl?.addEventListener('change', (e) => { sel.proteinCode = e.target.value; });
+    tr.querySelector('.ci-cat')?.addEventListener('change', (e) => {
+      sel.categoryCode = e.target.value;
+      proteinEl.hidden = !PROTEIN_ELIGIBLE_CATEGORIES.has(sel.categoryCode);
+    });
+  });
+  document.getElementById('ci-apply').addEventListener('click', () => ciApply(main));
+  ciUpdateFooter();
+}
+
+function ciSelectedKeys() {
+  const ci = state.catalogImport;
+  if (!ci.plan) return [];
+  return [...ci.plan.newDishes, ...ci.plan.similar, ...ci.plan.notInSection].filter(e => ci.sel[e.key]?.include).map(e => e.key);
+}
+
+function ciUpdateFooter() {
+  const ci = state.catalogImport;
+  const btn = document.getElementById('ci-apply');
+  if (!btn || !ci.plan) return;
+  const keys = ciSelectedKeys();
+  const who = ci.createdBy.trim();
+  document.getElementById('ci-count').textContent = `${keys.length} selected`;
+  btn.textContent = keys.length ? `Add ${keys.length} to the Dish Catalog${who ? ` as “${who}”` : ''}` : 'Nothing selected';
+  btn.disabled = !keys.length || ci.busy;
+}
+
+async function ciApply(main) {
+  const ci = state.catalogImport;
+  const keys = ciSelectedKeys();
+  const blank = keys.filter(k => ci.sel[k].name !== undefined && !String(ci.sel[k].name).trim());
+  if (blank.length) { alert('A ticked dish has an empty name. Type one or untick it.'); return; }
+  if (!ci.createdBy.trim() && !confirm('Created By is empty, so these dishes will have no Created By. Add them anyway?')) return;
+  const picks = keys.map(key => {
+    const s = ci.sel[key];
+    if (s.name === undefined) return { key };
+    return { key, name: s.name, categoryCode: s.categoryCode, proteinCode: PROTEIN_ELIGIBLE_CATEGORIES.has(s.categoryCode) ? (s.proteinCode || null) : null };
+  });
+  ci.busy = true;
+  ciUpdateFooter();
+  const status = document.getElementById('ci-status');
+  status.textContent = `Adding ${picks.length} to the Dish Catalog…`;
+  try {
+    ci.result = await window.api.applyCatalogImport({ token: ci.plan.token, createdBy: ci.createdBy, picks });
+    ci.plan = null;
+    status.textContent = '';
+    renderCatalogImportView(main);
+  } catch (err) {
+    status.textContent = `Couldn't add them: ${err.message}`;
+  } finally {
+    ci.busy = false;
+    ciUpdateFooter();
+  }
+}
+
+function ciRenderResult(main) {
+  const r = state.catalogImport.result;
+  const styled = r.created.filter(c => STYLE_ELIGIBLE_CATEGORIES.has(c.categoryCode)).length;
+  document.getElementById('ci-body').innerHTML = `
+    <div class="ci-panel ci-result">
+      <h2 class="ci-h2">Done</h2>
+      <ul>
+        <li><strong>${r.created.length}</strong> dish(es) added to the Dish Catalog${r.createdByLabel ? ` as “${aiEsc(r.createdByLabel)}”` : ''}.</li>
+        ${r.sectionsAdded.length ? `<li><strong>${r.sectionsAdded.length}</strong> existing dish(es) made available in another section.</li>` : ''}
+        ${r.failed.length ? `<li class="ci-failed">${r.failed.length} not added:<ul>${r.failed.map(f => `<li>${aiEsc(f.name)}: ${aiEsc(f.reason)}</li>`).join('')}</ul></li>` : ''}
+      </ul>
+      <p class="ci-hint">New dishes have no code, calories or Pastry / Cold Kitchen style yet, the same as a dish added with + Add Item.
+        ${styled ? `${styled} of them are snacks or Staff Breakfast dishes, which only enter the daily style rotation once they have a style.` : ''}</p>
+      <div class="ci-result-actions">
+        ${styled ? '<button class="secondary" id="ci-styles">Estimate missing styles</button>' : ''}
+        <button class="primary" id="ci-done">Back to the Dish Catalog</button>
+      </div>
+      <div id="ci-styles-status" class="ai-progress" role="status" aria-live="polite"></div>
+    </div>`;
+  document.getElementById('ci-done').addEventListener('click', () => document.getElementById('ci-back').click());
+  document.getElementById('ci-styles')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const statusEl = document.getElementById('ci-styles-status');
+    btn.disabled = true;
+    const unsubscribe = window.api.onAmSnackStyleEstimateProgress(({ message }) => { statusEl.textContent = message; });
+    try {
+      await window.api.estimateMissingAmSnackStyles();
+      statusEl.textContent = 'Styles estimated. Check or correct any of them in Edit Item.';
+    } catch (err) {
+      statusEl.textContent = `Style estimate failed: ${err.message}`;
+      btn.disabled = false;
+    } finally { unsubscribe(); }
+  });
+}
+
 function openCalorieImportPreview(plan, fileName, onDone) {
   const fmt = (v) => (v == null ? '—' : v);
   const overlay = document.createElement('div');

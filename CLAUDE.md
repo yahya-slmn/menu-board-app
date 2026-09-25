@@ -199,6 +199,20 @@ name, matches by ID AND name, only filled Reviewed values count (0-900), shows a
 writes only that plan (`apply-calorie-import` by token): calories_per_100g set, calories_unverified cleared. Notes aren't saved.
 Remove the strip once the review is done.
 
+**Dish Catalog import from menus** (2026-09-25; Dish Catalog -> "Import dishes from menus…", `renderCatalogImportView`; no AI):
+reads chef-edited menu exports (`parseWorkbookDishes`, which now also returns each row's `layout` and `period`) and plans, in
+`lib/catalogImport.js` (pure), which dishes the catalog lacks. Section: Staff / CEO by layout, School by tab name
+(`resolveSectionFromSheetName`) or the chef's pick. Category: School by label = category name, Staff / CEO by (period, label)
+through the export's `STAFF_ROW_MAP` / `CEO_ROW_MAP` reversed ("Option 1/2" = Lunch Box, "Option 3" = its salad; Beverages
+skipped). Matching is the Recipe Generator's dedup UNCHANGED (0.80 same-word-count Dice) against every catalog item, any category,
+inactive included; new spellings merge only within a category. Staff's Main Dish / Breakfast rows that name a school dish are
+the export's shared copies and add nothing. Three groups: new (ticked; one entry per dish per category, "Also listed as" when a
+name is under two), "look like an existing dish" (unticked, beside the match -- on the September files ~1 in 4 were really
+different dishes), and in the catalog but not on a section's menu (unticked: add the section, or add under the section's
+category). `apply-catalog-import` writes only ticked keys of the stored plan: Created By via `normalizeCreatedByLabel`, portions
+for each section's age groups like Add Item, no code / calories / style. A header date may carry a note ("29-09-2026 Arminian
+Day"); the parser reads the first 10 characters.
+
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its
 name, mirroring the logic originally used to import the seed Excel file. Pure

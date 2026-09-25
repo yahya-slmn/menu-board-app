@@ -42,6 +42,7 @@ const { approveRun, nationalDayThemesForBatch } = require('./lib/aiMenuApprove')
 const { normalizeCreatedByLabel, listCreatedByLabels } = require('./lib/catalogCreatedBy');
 const { snackLunchOnlyHit } = require('./lib/categoryRules');
 const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWorkbook, planCalorieImport, loadImportTargets, applyCalorieImport } = require('./lib/calorieReview');
+const { planCatalogImport } = require('./lib/catalogImport');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -1129,6 +1130,118 @@ ipcMain.handle('apply-calorie-import', async (e, { token }) => {
   const { updates } = calorieImportPlan;
   calorieImportPlan = null;
   return applyCalorieImport(updates);
+});
+
+// Dish Catalog import from chef-edited menu exports (lib/catalogImport.js): preview reads the files and
+// the live catalog and returns the plan with a token; apply creates ONLY what the chef ticked, looked
+// up in that stored plan by key (the renderer sends keys plus the chef's name / category / protein
+// edits, never sections). No code, calories or style are set -- the same as a new Add Item dish.
+let catalogImportPlan = null; // { token, plan }
+
+async function loadCatalogForImport() {
+  const fetchAll = async (buildQuery, context) => {
+    const all = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await buildQuery().range(from, from + 999);
+      if (error) throw supaFail(context, error);
+      all.push(...data);
+      if (data.length < 1000) return all;
+    }
+  };
+  const items = await fetchAll(() => supabase.from('menu_items').select('id, name, category_id, is_active').order('id'), 'catalog import: load menu_items');
+  const portions = await fetchAll(() => supabase.from('item_portions').select('item_id, age_group_id').order('item_id').order('age_group_id'), 'catalog import: load item_portions');
+  const sectionOfAgeGroup = new Map();
+  for (const section of getSections()) for (const ag of getAgeGroupsForSection(section.id)) sectionOfAgeGroup.set(ag.id, section.code);
+  const sectionsOf = new Map();
+  for (const p of portions) {
+    const code = sectionOfAgeGroup.get(p.age_group_id);
+    if (!code) continue;
+    if (!sectionsOf.has(p.item_id)) sectionsOf.set(p.item_id, new Set());
+    sectionsOf.get(p.item_id).add(code);
+  }
+  return items.map(it => ({ id: it.id, name: it.name, category_code: getCategoryById(it.category_id)?.code, is_active: it.is_active, sections: [...(sectionsOf.get(it.id) || [])] }));
+}
+
+ipcMain.handle('preview-catalog-import', async (e, { files, sectionOverrides = {} }) => {
+  const parsed = [];
+  const warnings = [];
+  for (const f of files) {
+    const fileName = String(f.name || '').replace(/\.xlsx$/i, '');
+    const { workbook, warnings: loadWarnings } = await loadWorkbookFromBuffer(Buffer.from(f.base64, 'base64'));
+    const { rows, warnings: parseWarnings } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+    [...loadWarnings, ...parseWarnings].forEach(w => warnings.push(`${fileName}: ${w}`));
+    parsed.push({ fileName, rows });
+  }
+  const catalog = await loadCatalogForImport();
+  const categories = getCategories().map(c => ({ code: c.code, name: c.name }));
+  const plan = planCatalogImport({ files: parsed, catalog, categories, sectionOverrides });
+  catalogImportPlan = { token: crypto.randomUUID(), plan };
+  return { token: catalogImportPlan.token, warnings, catalogSize: catalog.length, ...plan };
+});
+
+// picks: [{ key, name?, categoryCode?, proteinCode? }] -- keys from newDishes / similar / notInSection.
+ipcMain.handle('apply-catalog-import', async (e, { token, createdBy, picks }) => {
+  if (!catalogImportPlan || catalogImportPlan.token !== token) throw new Error('That preview is out of date -- read the files again.');
+  const { plan } = catalogImportPlan;
+  catalogImportPlan = null;
+  const byKey = new Map([...plan.newDishes, ...plan.similar, ...plan.notInSection].map(entry => [entry.key, entry]));
+  const createdByLabel = await normalizeCreatedByLabel(createdBy);
+  const created = [], sectionsAdded = [], failed = [];
+
+  const portionRows = (itemId, category, sectionCodes) => sectionCodes.flatMap(code => {
+    const section = getSectionByCode(code);
+    return getAgeGroupsForSection(section.id).map(ag => ({ item_id: itemId, age_group_id: ag.id, unit: getCategoryPortionDefault(category.id, section.id)?.unit || 'n/a', price: null }));
+  });
+
+  for (const pick of picks) {
+    const entry = byKey.get(pick.key);
+    if (!entry) { failed.push({ name: pick.name || pick.key, reason: 'not in this preview' }); continue; }
+    try {
+      if (entry.kind === 'addSection') {
+        const { data: item } = await supabase.from('menu_items').select('category_id').eq('id', entry.itemId).maybeSingle();
+        const category = item && getCategoryById(item.category_id);
+        if (!category) throw new Error('that dish is no longer in the catalog');
+        const { data: have, error: haveErr } = await supabase.from('item_portions').select('age_group_id').eq('item_id', entry.itemId);
+        if (haveErr) throw supaFail('apply-catalog-import: load item_portions', haveErr);
+        const existing = new Set(have.map(r => r.age_group_id));
+        const rows = portionRows(entry.itemId, category, [entry.section]).filter(r => !existing.has(r.age_group_id));
+        if (rows.length) {
+          const { error } = await supabase.from('item_portions').insert(rows);
+          if (error) throw supaFail('apply-catalog-import: add section', error);
+        }
+        sectionsAdded.push({ name: entry.name, section: entry.section });
+        continue;
+      }
+      // A new dish, a "looks like existing" dish added anyway, or a copy under another category.
+      const name = String(pick.name ?? entry.name).trim().replace(/\s+/g, ' ');
+      const sections = entry.kind === 'copy' ? [entry.section] : entry.sections;
+      const categoryCode = entry.kind === 'copy' ? entry.categoryCode : (pick.categoryCode || entry.categoryCode);
+      const category = getCategoryByCode(categoryCode);
+      if (!name) throw new Error('the name is empty');
+      if (!category) throw new Error(`unknown category ${categoryCode}`);
+      if (entry.kind !== 'copy' && !(entry.categoryOptions || []).some(c => c.code === categoryCode)) throw new Error(`${category.name} isn't on every one of its sections' menus`);
+      const protein = pick.proteinCode ? getProteinByCode(pick.proteinCode) : null;
+      const { data: inserted, error: insErr } = await supabase.from('menu_items').insert({
+        name, category_id: category.id, protein_type_id: protein ? protein.id : null, is_daily_repeating: 0,
+        calories_per_100g: null, am_snack_style: null, created_by_label: createdByLabel, rc_code: null,
+        is_active: 1, created_at: new Date().toISOString(),
+      }).select('id').single();
+      if (insErr) {
+        if (insErr.code === '23505') { failed.push({ name, reason: `already in the catalog as ${category.name} (added meanwhile?)` }); continue; }
+        throw supaFail('apply-catalog-import: insert menu_items', insErr);
+      }
+      const rows = portionRows(inserted.id, category, sections);
+      const { error: portErr } = await supabase.from('item_portions').insert(rows);
+      if (portErr) {
+        await supabase.from('menu_items').delete().eq('id', inserted.id); // same compensation as add-item
+        throw supaFail('apply-catalog-import: insert item_portions', portErr);
+      }
+      created.push({ id: inserted.id, name, categoryCode, sections });
+    } catch (err) {
+      failed.push({ name: pick.name || entry.name, reason: err.message });
+    }
+  }
+  return { created, sectionsAdded, failed, createdByLabel };
 });
 
 ipcMain.handle('estimate-missing-calories', async (e) => runCalorieBackfill({
