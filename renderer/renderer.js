@@ -1058,7 +1058,7 @@ async function renderItemsView(main) {
               ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/<wbr>beef in a snack</span>` : ''}
             </td>
             <td class="created-by-cell" data-created-by="${it.id}">${it.created_by_label ? aiEsc(it.created_by_label) : '<span class="list-empty">—</span>'}</td>
-            <td class="code-cell" data-code="${it.id}">${it.rc_code ? aiEsc(it.rc_code) : '<span class="code-missing">NEW</span>'}</td>
+            <td class="code-cell" data-code="${it.id}"${it.rc_code ? ` title="${aiEsc(it.rc_code)}"` : ''}>${it.rc_code ? aiEsc(it.rc_code) : '<span class="code-missing">NEW</span>'}</td>
             <td style="text-align:right">
               <button class="icon-btn" data-edit="${it.id}">Edit</button>
               <button class="icon-btn danger" data-delete="${it.id}">Delete</button>

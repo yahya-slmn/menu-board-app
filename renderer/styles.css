@@ -1117,20 +1117,26 @@ button:disabled { box-shadow: none; }
 /* Dish Catalog: Category / Name / Calories / Style / Protein / Menu use / Created By / Code / actions.
    Two classes, so these win over the base .items-table widths (shared with Ingredients / Waste Types,
    whose columns mean something else). Name takes what is left. Style fits "Cold Kitchen", Protein
-   "Vegetarian", actions Edit + Delete; "Not served: ..." wraps inside Menu use. */
+   "Vegetarian", Code "RC01-02777", actions Edit + Delete; "Not served: ..." wraps inside Menu use. */
 table.items-table.dish-catalog-table { min-width: 960px; } /* fits the default 1280 x 800 window without scrolling */
 table.items-table.dish-catalog-table th:nth-child(1), table.items-table.dish-catalog-table td:nth-child(1) { width: 96px; }
 table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 92px; }
 table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 104px; }
 table.items-table.dish-catalog-table th:nth-child(5), table.items-table.dish-catalog-table td:nth-child(5) { width: 94px; }
-table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 100px; }
-table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 88px; }
-table.items-table.dish-catalog-table th:nth-child(8), table.items-table.dish-catalog-table td:nth-child(8) { width: 82px; }
+table.items-table.dish-catalog-table th:nth-child(6), table.items-table.dish-catalog-table td:nth-child(6) { width: 92px; }
+table.items-table.dish-catalog-table th:nth-child(7), table.items-table.dish-catalog-table td:nth-child(7) { width: 84px; }
+table.items-table.dish-catalog-table th:nth-child(8), table.items-table.dish-catalog-table td:nth-child(8) { width: 104px; }
 table.items-table.dish-catalog-table th:nth-child(9), table.items-table.dish-catalog-table td:nth-child(9) { width: 124px; }
 /* The table's overflow-wrap: anywhere splits chips and codes mid-word ("unverifi / ed", "RC- / 3004"); chips
-   wrap at spaces (and "Not served"'s <wbr>) only, and a code never wraps. Calories fits "unverified". */
+   wrap at spaces (and "Not served"'s <wbr>) only, and a code never wraps. Calories fits "unverified"; Code fits
+   the widest real-format code ("RC88-88888", 82px text). A longer one ends in "..." inside its own column
+   (full code on hover) rather than spilling into the actions. */
 table.dish-catalog-table .chip { overflow-wrap: normal; }
-table.dish-catalog-table .code-cell { white-space: nowrap; }
+table.dish-catalog-table .code-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Column separators, the same 1px --line as the row lines. On every cell after the first in its row: in
+   the rows under a rowspan'd category cell, Name is the row's first child and gets none -- the category
+   cell's own border-right is that line. The outer edges are .table-scroll's frame. */
+table.dish-catalog-table :is(th, td) + :is(th, td) { border-left: 1px solid var(--line); }
 /* Ingredients (Category / Product Code / Name / Default Unit / actions) and Extracted Ingredients
    (Product Code / Name / Default Unit / actions) each get their own widths -- the base
    .items-table rules assign column widths by position, which only ever matched Waste Types. */
