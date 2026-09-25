@@ -151,6 +151,7 @@ contextBridge.exposeInMainWorld('api', {
   exportMenuToExcel: (payload) => ipcRenderer.invoke('export-menu-to-excel', payload),
   exportAllSectionsToExcel: (payload) => ipcRenderer.invoke('export-all-sections-to-excel', payload),
   generateAndExportAll: (payload) => ipcRenderer.invoke('generate-and-export-all', payload),
+  createdByMixPools: (payload) => ipcRenderer.invoke('created-by-mix-pools', payload),
 
   getSectionSlots: (sectionCode) => ipcRenderer.invoke('get-section-slots', sectionCode),
   getSchoolDays: (payload) => ipcRenderer.invoke('get-school-days', payload),

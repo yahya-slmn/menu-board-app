@@ -12,7 +12,9 @@ const state = {
   // mode 'generate' | 'build'; scope (Generate only) 'one' = Generate Menu, 'all' = Export All Sections.
   // busy: a generation run is in flight -- the switches stay disabled until it finishes.
   // fields: the Generate form's name / created by / dates, shared by both scopes for the session.
-  menuPlanner: { mode: 'generate', scope: 'one', busy: false, restored: false, fields: { label: '', createdBy: '', start: '', end: '' } },
+  menuPlanner: { mode: 'generate', scope: 'one', busy: false, restored: false, fields: { label: '', createdBy: '', start: '', end: '' },
+    // Created By mix: session only, never saved (see renderMixPanel). values: { label: percent }.
+    mix: { values: {}, open: false, check: null, checkKey: '', scope: null } },
   categories: [],
   proteinTypes: [],
   currentGeneratedMenuId: null,
@@ -1867,6 +1869,179 @@ function renderMenuPlannerView(main) {
   return Promise.resolve(rendered).then((r) => { wireMenuPlannerFields(mp); return r; });
 }
 
+// ============================================================
+// Created By mix (2026-09-25): Generate + One Section / All Sections only. Target percentages per
+// Created By value, a BEST-EFFORT bias the engine applies per section + category (lib/createdByMix.js):
+// every rule still wins, and a thin pool just lands short, reported. Off by default (no value above 0);
+// kept for the session in state.menuPlanner.mix, never saved, and always visible while on (the Generate
+// button reads "... with Created By mix").
+// ============================================================
+const MIX_SECTION_ORDER = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];
+const MIX_SHORT_POINTS = 10; // lib/createdByMix.js SHORT_POINTS
+const mixLabelText = (l) => (l ? l : 'Not set');
+
+function mixValues() { return state.menuPlanner.mix.values; }
+function mixTotal() { return Object.values(mixValues()).reduce((n, v) => n + (Number(v) || 0), 0); }
+function mixActive() { return Object.values(mixValues()).some(v => Number(v) > 0); }
+// { label: percent } for the engine, or null when off.
+function mixPayload() {
+  if (!mixActive()) return null;
+  return Object.fromEntries(Object.entries(mixValues()).filter(([, v]) => Number(v) > 0).map(([l, v]) => [l, Number(v)]));
+}
+function mixSummaryText() {
+  if (!mixActive()) return 'Off: picks as usual';
+  return Object.entries(mixValues()).filter(([, v]) => Number(v) > 0).sort((a, b) => b[1] - a[1])
+    .map(([l, v]) => `${mixLabelText(l)} ${v}%`).join(' · ');
+}
+// lib/createdByMix.js shareCeiling, mirrored (this is a classic script): the most a value could reach
+// from its dish count alone, each dish at most once per 28 calendar days of the run.
+function mixShareCeiling(dishes, picks, numWeekdays) {
+  if (!picks) return 100;
+  const uses = Math.max(1, Math.ceil((numWeekdays * 7) / 5 / 28));
+  return Math.min(100, Math.floor((100 * dishes * uses) / picks));
+}
+
+// host: where the panel goes. getScope(): { sectionCodes, numWeekdays, allSections, exactDays }.
+// onChange(): called whenever the mix changes, so the screen can relabel / disable its Generate button.
+// The mix panel's scope from a screen's own date fields (20 school days until dates are chosen).
+async function mixScope(startId, endId, sectionCodes, allSections) {
+  const startDate = document.getElementById(startId)?.value;
+  const endDate = document.getElementById(endId)?.value;
+  let numWeekdays = 20, exactDays = false;
+  if (startDate && endDate && endDate >= startDate) {
+    const n = await window.api.getSchoolDayCount({ startDate, endDate });
+    if (n > 0) { numWeekdays = n; exactDays = true; }
+  }
+  return { sectionCodes, numWeekdays, allSections, exactDays };
+}
+
+function renderMixPanel(host, getScope, onChange) {
+  const mix = state.menuPlanner.mix;
+  host.innerHTML = `
+    <details class="mix-panel" ${mix.open ? 'open' : ''}>
+      <summary><span class="mix-title">Created By mix</span> <span class="mix-optional">(optional)</span> <span class="mix-summary" id="mix-summary"></span></summary>
+      <div class="mix-body">
+        <p class="mix-hint">Nudges each category's picks toward these shares of Created By. Every menu rule still comes first, so a category
+          without enough of a value's dishes lands short (listed below before you generate, and in a report after). Off when everything is 0.</p>
+        <div id="mix-values" class="mix-values">Loading the dishes in scope…</div>
+        <div class="mix-total-row"><span id="mix-total"></span><button type="button" class="secondary small" id="mix-off">Turn off</button></div>
+        <div id="mix-check"></div>
+      </div>
+    </details>`;
+  const details = host.querySelector('.mix-panel');
+  details.addEventListener('toggle', () => { mix.open = details.open; if (details.open) mixRefresh(); });
+  host.querySelector('#mix-off').addEventListener('click', () => { mix.values = {}; mixRender(); onChange(); });
+
+  async function mixRefresh() {
+    const scope = await getScope();
+    const key = `${scope.sectionCodes.join(',')}|${scope.numWeekdays}|${scope.allSections}|${scope.exactDays}`;
+    mix.scope = scope;
+    if (mix.check && mix.checkKey === key) return mixRender();
+    mix.checkKey = key;
+    host.querySelector('#mix-values').textContent = 'Loading the dishes in scope…';
+    try {
+      const check = await window.api.createdByMixPools(scope);
+      if (mix.checkKey !== key) return; // a newer scope was asked for meanwhile
+      mix.check = check;
+    } catch (err) {
+      host.querySelector('#mix-values').textContent = `Couldn't load the dishes: ${err.message}`;
+      return;
+    }
+    mixRender();
+  }
+
+  function mixRender() {
+    host.querySelector('#mix-summary').textContent = mixSummaryText();
+    const total = mixTotal();
+    host.querySelector('#mix-total').innerHTML = !mixActive() ? 'Off'
+      : total === 100 ? 'Total 100% ✓' : `<span class="mix-bad">Total ${total}%: must be 100%</span>`;
+    const check = mix.check;
+    if (!check) return;
+    const choiceRows = check.rows.filter(r => r.picks > 0);
+    const dishes = (label) => choiceRows.reduce((n, r) => n + (r.byLabel[label] || 0), 0);
+    const labels = [...check.labels, ''];
+    for (const l of Object.keys(mix.values)) if (!labels.includes(l)) labels.push(l);
+    const valuesEl = host.querySelector('#mix-values');
+    valuesEl.innerHTML = labels.map(l => `
+      <label class="mix-value">
+        <span class="mix-value-name">${aiEsc(mixLabelText(l))}</span>
+        <input type="number" min="0" max="100" step="5" data-label="${aiEsc(l)}" value="${Number(mix.values[l]) || 0}" aria-label="${aiEsc(mixLabelText(l))} percent" />
+        <span class="mix-pct">%</span>
+        <span class="mix-count">${dishes(l)} dish${dishes(l) === 1 ? '' : 'es'} in scope</span>
+      </label>`).join('');
+    valuesEl.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(100, Math.round(Number(inp.value) || 0)));
+      if (v) mix.values[inp.dataset.label] = v; else delete mix.values[inp.dataset.label];
+      host.querySelector('#mix-summary').textContent = mixSummaryText();
+      const t = mixTotal();
+      host.querySelector('#mix-total').innerHTML = !mixActive() ? 'Off' : t === 100 ? 'Total 100% ✓' : `<span class="mix-bad">Total ${t}%: must be 100%</span>`;
+      renderCheck();
+      onChange();
+    }));
+    renderCheck();
+  }
+
+  function renderCheck() {
+    const check = mix.check;
+    const scope = mix.scope;
+    const el = host.querySelector('#mix-check');
+    if (!check || !scope) return;
+    const targets = Object.entries(mix.values).filter(([, v]) => Number(v) > 0);
+    const secName = (c) => state.sections.find(s => s.code === c)?.name || c;
+    const shortfalls = [];
+    for (const r of check.rows) {
+      if (!r.picks) continue;
+      for (const [l, t] of targets) {
+        const n = r.byLabel[l] || 0;
+        const ceiling = mixShareCeiling(n, r.picks, scope.numWeekdays);
+        if (ceiling < t - MIX_SHORT_POINTS) shortfalls.push({ r, l, n, t, ceiling });
+      }
+    }
+    const shownLabels = targets.length ? targets.map(([l]) => l) : [...check.labels, ''];
+    const note = (r) => r.fixedDaily ? 'Fixed daily dish: not affected'
+      : r.follows ? `Follows ${secName(r.follows)}'s pick` : r.sharedWith ? `Shared with ${secName(r.sharedWith)}: dishes both have` : '';
+    el.innerHTML = `
+      <h4 class="mix-h4">${targets.length ? (shortfalls.length ? `Can't reach this mix in ${new Set(shortfalls.map(s => s.r)).size} categor${new Set(shortfalls.map(s => s.r)).size === 1 ? 'y' : 'ies'}` : 'Every category has enough dishes for this mix') : 'Dishes per category'}
+        <span class="mix-h4-note">${scope.exactDays ? `${scope.numWeekdays} school days` : `${scope.numWeekdays} school days (choose dates for an exact check)`}</span></h4>
+      ${shortfalls.length ? `<ul class="mix-shortfalls">${shortfalls.map(s => `<li><strong>${aiEsc(secName(s.r.section))} · ${aiEsc(s.r.categoryName)}</strong>: ${aiEsc(mixLabelText(s.l))} has ${s.n === 0 ? 'no dishes' : `only ${s.n} dish${s.n === 1 ? '' : 'es'}`} for ${s.r.picks} picks, so at most ~${s.ceiling}% (asked ${s.t}%)</li>`).join('')}</ul>` : ''}
+      <details class="mix-all" ${targets.length ? '' : 'open'}><summary>All categories</summary>
+        <div class="cr-scroll"><table class="cr-table mix-table">
+          <thead><tr><th>Section</th><th>Category</th><th>Choices</th>${shownLabels.map(l => `<th>${aiEsc(mixLabelText(l))}</th>`).join('')}<th></th></tr></thead>
+          <tbody>${check.rows.map(r => `<tr class="${shortfalls.some(s => s.r === r) ? 'mix-short' : ''}">
+            <td>${aiEsc(secName(r.section))}</td><td>${aiEsc(r.categoryName)}</td><td>${r.picks || '—'}</td>
+            ${shownLabels.map(l => { const n = r.byLabel[l] || 0; return `<td class="${r.picks && n <= 1 ? 'mix-thin' : ''}">${r.picks ? n : ''}</td>`; }).join('')}
+            <td class="mix-note">${aiEsc(note(r))}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </details>`;
+  }
+
+  host.refreshMix = () => { if (mix.open) mixRefresh(); };
+  mixRender();
+  if (mix.open) mixRefresh();
+}
+
+// After generating: target vs achieved per category. reportBySection: { SECTION: rows | null }.
+function mixReportHtml(reportBySection) {
+  const sections = MIX_SECTION_ORDER.filter(s => reportBySection && reportBySection[s]);
+  if (!sections.length) return '';
+  const secName = (c) => state.sections.find(s => s.code === c)?.name || c;
+  const all = sections.flatMap(s => reportBySection[s]);
+  const shortCount = all.filter(r => r.short).length;
+  return `
+    <details class="mix-report" open>
+      <summary>Created By mix: how it landed <span class="mix-h4-note">${shortCount ? `${shortCount} categor${shortCount === 1 ? 'y' : 'ies'} short of the mix` : 'every category reached it'}</span></summary>
+      ${sections.map(s => `
+        <h4 class="mix-h4">${aiEsc(secName(s))}</h4>
+        <div class="cr-scroll"><table class="cr-table mix-table">
+          <thead><tr><th>Category</th><th>Choices</th><th>Target → achieved</th><th>Why short</th></tr></thead>
+          <tbody>${reportBySection[s].map(r => `<tr class="${r.short ? 'mix-short' : ''}">
+            <td>${aiEsc(r.categoryName)}</td><td>${r.picks}</td>
+            <td>${r.rows.filter(x => x.target || x.achieved).map(x => `<span class="mix-cell">${aiEsc(mixLabelText(x.label))} ${x.target}% → <strong>${x.achieved}%</strong></span>`).join(' ')}</td>
+            <td class="mix-note">${r.rows.filter(x => x.note).map(x => `${aiEsc(mixLabelText(x.label))}: ${aiEsc(x.note)}`).join('; ')}</td></tr>`).join('')}</tbody>
+        </table></div>`).join('')}
+    </details>`;
+}
+
 // A Generate / Export All run is in flight: lock the Menu Planner switches until it finishes.
 function setMenuPlannerBusy(busy) {
   state.menuPlanner.busy = busy;
@@ -1904,6 +2079,7 @@ function renderGenerateView(main) {
       <button class="primary" id="g-generate">Generate Menu</button>
     </div>
     <div id="g-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
+    <div id="g-mix"></div>
     <div id="g-result"></div>
   `;
 
@@ -1915,7 +2091,14 @@ function renderGenerateView(main) {
 
   wireDateRangeFields('g-start', 'g-end', 'g-day-count');
 
-  document.getElementById('g-generate').addEventListener('click', async () => {
+  const genBtn = document.getElementById('g-generate');
+  const updateGenBtn = () => { genBtn.textContent = mixActive() ? 'Generate with Created By mix' : 'Generate Menu'; };
+  const mixHost = document.getElementById('g-mix');
+  renderMixPanel(mixHost, () => mixScope('g-start', 'g-end', [sectionSelect.value], false), updateGenBtn);
+  updateGenBtn();
+  for (const id of ['g-section', 'g-start', 'g-end']) document.getElementById(id).addEventListener('change', () => mixHost.refreshMix());
+
+  genBtn.addEventListener('click', async () => {
     const label = document.getElementById('g-label').value.trim() || 'Untitled Menu';
     const createdBy = document.getElementById('g-created-by').value.trim() || null;
     const startDate = document.getElementById('g-start').value;
@@ -1925,18 +2108,21 @@ function renderGenerateView(main) {
 
     const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
     if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+    if (mixActive() && mixTotal() !== 100) return alert(`The Created By mix adds up to ${mixTotal()}%. Make it 100%, or turn it off.`);
 
     const resultEl = document.getElementById('g-result');
     resultEl.innerHTML = 'Generating…';
-    let menuId, resultDays, warnings;
+    let menuId, resultDays, warnings, mixReport;
+    const sectionCode = sectionSelect.value;
     setMenuPlannerBusy(true);
     try {
-      ({ menuId, resultDays, warnings } = await window.api.generateMenu({
-        sectionCode: sectionSelect.value, label, startDate, numWeekdays, createdBy,
+      ({ menuId, resultDays, warnings, mixReport } = await window.api.generateMenu({
+        sectionCode, label, startDate, numWeekdays, createdBy, createdByMix: mixPayload(),
       }));
     } finally { setMenuPlannerBusy(false); }
     state.currentGeneratedMenuId = menuId;
     renderMenuResult(resultEl, menuId, resultDays, warnings, createdBy);
+    if (mixReport) resultEl.insertAdjacentHTML('afterbegin', mixReportHtml({ [sectionCode]: mixReport }));
   });
 }
 
@@ -3347,12 +3533,20 @@ async function renderExportAllView(main) {
       <button class="primary" id="ea-generate-btn">Generate &amp; Export All Sections</button>
     </div>
     <div id="ea-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
+    <div id="ea-mix"></div>
     <div id="ea-result" style="margin-top:16px;"></div>
   `;
 
   wireDateRangeFields('ea-start', 'ea-end', 'ea-day-count');
 
-  document.getElementById('ea-generate-btn').addEventListener('click', async () => {
+  const eaBtn = document.getElementById('ea-generate-btn');
+  const updateEaBtn = () => { eaBtn.textContent = mixActive() ? 'Generate & Export All Sections with Created By mix' : 'Generate & Export All Sections'; };
+  const eaMixHost = document.getElementById('ea-mix');
+  renderMixPanel(eaMixHost, () => mixScope('ea-start', 'ea-end', MIX_SECTION_ORDER, true), updateEaBtn);
+  updateEaBtn();
+  for (const id of ['ea-start', 'ea-end']) document.getElementById(id).addEventListener('change', () => eaMixHost.refreshMix());
+
+  eaBtn.addEventListener('click', async () => {
     const label = document.getElementById('ea-label').value.trim() || 'Untitled Menu';
     const createdBy = document.getElementById('ea-created-by').value.trim() || null;
     const startDate = document.getElementById('ea-start').value;
@@ -3362,6 +3556,7 @@ async function renderExportAllView(main) {
 
     const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
     if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+    if (mixActive() && mixTotal() !== 100) return alert(`The Created By mix adds up to ${mixTotal()}%. Make it 100%, or turn it off.`);
 
     const resultEl = document.getElementById('ea-result');
     resultEl.textContent = 'Generating all 5 sections and exporting…';
@@ -3369,7 +3564,7 @@ async function renderExportAllView(main) {
     let result;
     setMenuPlannerBusy(true);
     try {
-      result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy });
+      result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy, createdByMix: mixPayload() });
     } finally { setMenuPlannerBusy(false); }
 
     if (!result.success) {
@@ -3392,6 +3587,7 @@ async function renderExportAllView(main) {
         <div style="color:var(--neutral); font-size:13px;">
           No repeat warnings -- every section had enough variety for the full period.
         </div>`}
+      ${mixReportHtml(result.mixReportBySection)}
     `;
   });
 }

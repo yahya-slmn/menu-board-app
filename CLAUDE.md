@@ -171,6 +171,17 @@ terminal instead of `[object Object]`.
   has no equivalent of `better-sqlite3`'s synchronous `db.transaction()`, so
   a failure partway through is not rolled back automatically.
 
+**Created By mix** (2026-09-25; Menu Planner Generate, One Section and All Sections only): optional target percentages per
+Created By value, passed as `createdByMix` to `generate-menu` / `generate-and-export-all` ONLY -- Build Menu's Auto-Fill and the AI
+Menu Generator never pass it. A best-effort ordering bias, per section + category (`lib/createdByMix.js`, pure): `_scoreAndSort`
+ranks as always, then (only with a mix and a `mixKey` from `_pickItems`) reorders the FRESH candidates (not served in
+NO_REPEAT_DAYS) by which value is furthest behind its target; not-fresh ones keep today's order after them, so the mix never brings
+a dish back sooner, and every rule still accepts / rejects in `_pickItems` unchanged. Only real choices count (forced shares and
+daily dishes don't). No mix = byte-identical picks (proven with a seeded old-vs-new run over a stand-in database). The panel's
+pool check (`createdByMixPoolCheck`) shows each category's dishes per value before generating, with a ceiling estimate (each dish
+once per 28 days); the report after is target vs achieved with the reason when short. Session only (`state.menuPlanner.mix`), never
+saved; the Generate button reads "... with Created By mix" while it is on.
+
 **Dish Catalog "Created By"** (`menu_items.created_by_label`, `supabase/migrations/20260924140000_menu_items_created_by_label.sql`):
 free-text attribution ("AI", "OLD" = existed before the column was added, a chef's name), a read-only column between Menu use and
 Code, edited only in Add / Edit Item (under Item name, beside Code). It is NOT provenance: `is_ai_generated` / `ai_menu_run_id` still

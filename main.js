@@ -13,7 +13,7 @@ const {
   getAgeGroups, getAgeGroupsForSection, getAgeGroupByCode, getAgeGroupById,
   getCategoryPortionDefault,
 } = require('./lib/referenceData');
-const { MenuGenerator, SECTION_SLOTS, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom, schoolDayCountBetween } = require('./lib/generator');
+const { MenuGenerator, SECTION_SLOTS, createdByMixPoolCheck, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom, schoolDayCountBetween } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
 const {
   exportSingleMenu, exportCombinedWorkbook, exportBlankTemplateWorkbook, exportRecipes, exportScaledRecipe,
@@ -43,6 +43,7 @@ const { normalizeCreatedByLabel, listCreatedByLabels } = require('./lib/catalogC
 const { snackLunchOnlyHit } = require('./lib/categoryRules');
 const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWorkbook, planCalorieImport, loadImportTargets, applyCalorieImport } = require('./lib/calorieReview');
 const { planCatalogImport } = require('./lib/catalogImport');
+const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
@@ -4158,414 +4159,41 @@ ipcMain.handle('extract-recipe-for-extractor', async (e, { files }) => {
 // history and the same generated-menu records; see conversation notes on why splitting them
 // across two databases would silently degrade duplicate-avoidance and fragment History)
 // ---------------------------------------------------------------
-ipcMain.handle('generate-menu', async (e, { sectionCode, label, startDate, numWeekdays, createdBy }) => {
-  const gen = new MenuGenerator();
+// Menu Planner's optional Created By mix (lib/createdByMix.js): only these two handlers pass it to the
+// engine -- Build Menu's Auto-Fill and the AI Menu Generator never do. mixReport: target vs achieved per
+// category, or null when no mix was set.
+function createdByMixReport(gen, mix) {
+  if (!mix) return null;
+  return summarizeMixReport(gen.createdByMixReport(), mix)
+    .map(r => ({ ...r, categoryName: getCategoryByCode(r.category)?.name || r.category }));
+}
+
+ipcMain.handle('generate-menu', async (e, { sectionCode, label, startDate, numWeekdays, createdBy, createdByMix }) => {
+  const mix = normalizeMix(createdByMix);
+  const gen = new MenuGenerator({ createdByMix: mix });
   const { menuId, resultDays } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays, null, createdBy);
-  return { menuId, resultDays, warnings: gen.warnings };
+  return { menuId, resultDays, warnings: gen.warnings, mixReport: createdByMixReport(gen, mix) };
 });
 
-ipcMain.handle('get-latest-generated-menu', async (e, sectionCode) => {
-  const section = getSectionByCode(sectionCode);
-  if (!section) return null;
-  const { data, error } = await supabase
-    .from('generated_menus').select('*').eq('section_id', section.id)
-    .order('created_at', { ascending: false }).limit(1);
-  if (error) throw supaFail('get-latest-generated-menu', error);
-  return data[0] || null;
-});
+// The Created By mix panel's pool check, before generating (lib/generator.js createdByMixPoolCheck).
+ipcMain.handle('created-by-mix-pools', async (e, { sectionCodes, numWeekdays, allSections }) =>
+  createdByMixPoolCheck({ sectionCodes, numWeekdays, allSections }));
 
-// History is unified (not filtered by section) -- rows sharing a batch_id (set by
-// generate-and-export-all / Build Menu's export, both of which save all 5 sections in one
-// user action) collapse into a single "All Sections" entry. menuIds always lists every real
-// generated_menus.id an entry represents, so the renderer can expand a selection back to raw
-// ids for delete-generated-menus (unchanged -- it just deletes whatever ids it's given)
-// without this handler needing any batch-aware delete logic of its own.
-ipcMain.handle('list-generated-menus', async () => {
-  const { data, error } = await supabase
-    .from('generated_menus').select('*').order('created_at', { ascending: false });
-  if (error) throw supaFail('list-generated-menus', error);
-
-  const entries = [];
-  const seenBatches = new Set();
-  for (const row of data) {
-    if (row.batch_id) {
-      if (seenBatches.has(row.batch_id)) continue;
-      seenBatches.add(row.batch_id);
-      const batchRows = data.filter(r => r.batch_id === row.batch_id);
-      // menuIdsBySection lets the renderer call export-all-sections-to-excel directly on a
-      // batch entry (same handler Export All Sections/Build Menu's own export already use)
-      // without needing a combined detail view to drive it from.
-      const menuIdsBySection = {};
-      for (const r of batchRows) {
-        const code = getSectionById(r.section_id)?.code;
-        if (code) menuIdsBySection[code] = r.id;
-      }
-      entries.push({
-        id: String(row.batch_id),
-        isBatch: true,
-        label: row.label,
-        start_date: row.start_date,
-        status: row.status,
-        created_by: row.created_by,
-        tag: 'all_sections',
-        menuIds: batchRows.map(r => r.id),
-        menuIdsBySection,
-      });
-    } else {
-      const section = getSectionById(row.section_id);
-      entries.push({
-        id: String(row.id),
-        isBatch: false,
-        label: row.label,
-        start_date: row.start_date,
-        status: row.status,
-        created_by: row.created_by,
-        tag: section?.name || '—',
-        menuIds: [row.id],
-      });
-    }
-  }
-  return entries;
-});
-
-ipcMain.handle('get-generated-menu-detail', async (e, generatedMenuId) => {
-  const { data: menu, error: menuErr } = await supabase
-    .from('generated_menus').select('section_id').eq('id', generatedMenuId).single();
-  if (menuErr) throw supaFail('get-generated-menu-detail: load generated_menus', menuErr);
-
-  const { data: days, error: daysErr } = await supabase
-    .from('menu_days').select('*').eq('generated_menu_id', generatedMenuId).order('menu_date');
-  if (daysErr) throw supaFail('get-generated-menu-detail: load menu_days', daysErr);
-
-  const dayIds = days.map(d => d.id);
-  let dayItemRows = [];
-  if (dayIds.length) {
-    const { data, error } = await supabase
-      .from('menu_day_items').select('id, item_id, menu_day_id, slot_id').in('menu_day_id', dayIds);
-    if (error) throw supaFail('get-generated-menu-detail: load menu_day_items', error);
-    dayItemRows = data;
-  }
-
-  const itemIds = [...new Set(dayItemRows.map(r => r.item_id))];
-  let itemById = new Map();
-  if (itemIds.length) {
-    const { data: items, error: itemsErr } = await supabase
-      .from('menu_items').select('id, name, category_id').in('id', itemIds);
-    if (itemsErr) throw supaFail('get-generated-menu-detail: load menu_items', itemsErr);
-    itemById = new Map(items.map(i => [i.id, i]));
-  }
-
-  // Category for display MUST come from the slot the item was actually placed into for this
-  // menu, not the item's own catalog category_id -- see the matching note in
-  // fetchGeneratedMenuExportData for why (forced cross-category picks like Staff Main Dish's
-  // shared KG-LP/MS-UP Lunch Main items would otherwise resolve to the wrong category code).
-  const { data: slotRows, error: slotErr } = await supabase
-    .from('menu_slots').select('id, category_id').eq('section_id', menu.section_id);
-  if (slotErr) throw supaFail('get-generated-menu-detail: load menu_slots', slotErr);
-  const slotCategoryById = new Map(slotRows.map(s => [s.id, s.category_id]));
-
-  const itemsByDay = new Map();
-  for (const row of dayItemRows) {
-    const item = itemById.get(row.item_id);
-    if (!item) continue;
-    const catId = slotCategoryById.get(row.slot_id) ?? item.category_id;
-    const cat = getCategoryById(catId);
-    const enriched = {
-      menu_day_item_id: row.id, item_id: row.item_id, name: item.name,
-      category_code: cat?.code, category_name: cat?.name, _sort: cat?.sort_order ?? 0,
-    };
-    if (!itemsByDay.has(row.menu_day_id)) itemsByDay.set(row.menu_day_id, []);
-    itemsByDay.get(row.menu_day_id).push(enriched);
-  }
-
-  return days.map(d => ({
-    ...d,
-    items: (itemsByDay.get(d.id) || [])
-      .sort((a, b) => a._sort - b._sort)
-      .map(({ _sort, ...rest }) => rest),
-  }));
-});
-
-ipcMain.handle('delete-generated-menus', async (e, menuIds) => {
-  // Delete children explicitly rather than relying on an ON DELETE CASCADE existing on the
-  // Supabase side -- same reasoning as delete-item/delete-recipe in earlier stages.
-  const { data: days, error: daysErr } = await supabase
-    .from('menu_days').select('id').in('generated_menu_id', menuIds);
-  if (daysErr) throw supaFail('delete-generated-menus: load menu_days', daysErr);
-  const dayIds = days.map(d => d.id);
-  if (dayIds.length) {
-    const { error } = await supabase.from('menu_day_items').delete().in('menu_day_id', dayIds);
-    if (error) throw supaFail('delete-generated-menus: delete menu_day_items', error);
-  }
-  const { error: daysDelErr } = await supabase.from('menu_days').delete().in('generated_menu_id', menuIds);
-  if (daysDelErr) throw supaFail('delete-generated-menus: delete menu_days', daysDelErr);
-  const { error: menusDelErr } = await supabase.from('generated_menus').delete().in('id', menuIds);
-  if (menusDelErr) throw supaFail('delete-generated-menus: delete generated_menus', menusDelErr);
-  return { success: true };
-});
-
-// Not currently wired into any renderer view (no swap UI exists yet), but converted for
-// consistency since it operates on the same now-Supabase menu_day_items/menu_items tables.
-ipcMain.handle('swap-menu-item', async (e, { menuDayItemId, newItemId }) => {
-  const { error } = await supabase
-    .from('menu_day_items').update({ item_id: newItemId, is_manual_override: 1 }).eq('id', menuDayItemId);
-  if (error) throw supaFail('swap-menu-item', error);
-  return { success: true };
-});
-
-ipcMain.handle('get-eligible-swap-items', async (e, { sectionCode, categoryCode }) => {
-  const section = getSectionByCode(sectionCode);
-  const category = getCategoryByCode(categoryCode);
-  const items = await eligibleItemsSupabase(section.id, category.id);
-  return items.map(it => ({ id: it.id, name: it.name })).sort((a, b) => a.name.localeCompare(b.name));
-});
-
-// PostgREST caps a single response at 1000 rows by default; this pages through .range() until
-// a page comes back short, mirroring lib/generator.js's fetchAllRows (not shared/exported from
-// there, since these two modules otherwise have no runtime dependency on each other).
-// buildQuery() must return a *fresh* query builder each call.
-async function fetchAllRowsMain(buildQuery) {
-  const pageSize = 1000;
-  let from = 0;
-  const all = [];
-  for (;;) {
-    const { data, error } = await buildQuery().range(from, from + pageSize - 1);
-    if (error) throw error;
-    all.push(...data);
-    if (data.length < pageSize) break;
-    from += pageSize;
-  }
-  return all;
-}
-
-// ---------------------------------------------------------------
-// IPC: export to Excel
-// ---------------------------------------------------------------
-// Assembles everything lib/export.js's buildSchoolSheet/buildStaffSheet/buildCeoSheet need
-// for one generated menu: Supabase's generated_menus/menu_days/menu_day_items/menu_items/
-// item_portions, pre-joined with the cached sections/age_groups/categories/meal_periods
-// reference data from lib/referenceData.js.
-async function fetchGeneratedMenuExportData(generatedMenuId) {
-  const { data: menu, error: menuErr } = await supabase
-    .from('generated_menus').select('*').eq('id', generatedMenuId).single();
-  if (menuErr) throw supaFail('fetchGeneratedMenuExportData: load generated_menus', menuErr);
-
-  const section = getSectionById(menu.section_id);
-  const ageGroups = getAgeGroupsForSection(section.id);
-
-  const { data: days, error: daysErr } = await supabase
-    .from('menu_days').select('*').eq('generated_menu_id', generatedMenuId).order('menu_date');
-  if (daysErr) throw supaFail('fetchGeneratedMenuExportData: load menu_days', daysErr);
-
-  const dayIds = days.map(d => d.id);
-  let dayItemRows = [];
-  if (dayIds.length) {
-    const { data, error } = await supabase.from('menu_day_items').select('*').in('menu_day_id', dayIds);
-    if (error) throw supaFail('fetchGeneratedMenuExportData: load menu_day_items', error);
-    dayItemRows = data;
-  }
-
-  const itemIds = [...new Set(dayItemRows.map(r => r.item_id))];
-  const itemById = new Map();
-  if (itemIds.length) {
-    const { data: items, error: itemsErr } = await supabase
-      .from('menu_items').select('id, name, rc_code, is_daily_repeating, category_id').in('id', itemIds);
-    if (itemsErr) throw supaFail('fetchGeneratedMenuExportData: load menu_items', itemsErr);
-    items.forEach(i => itemById.set(i.id, i));
-  }
-
-  // Category for display MUST come from the slot the item was actually placed into for this
-  // menu (menu_day_items.slot_id -> menu_slots.category_id), not the item's own catalog
-  // category_id -- an item forced in from a different category (e.g. Staff Main Dish
-  // including that day's KG-LP/MS-UP Lunch Main picks, which are tagged LUNCH_MAIN in the
-  // catalog) would otherwise resolve to a category code the section's sheet builder never
-  // matches, silently dropping it from the export.
-  const { data: slotRows, error: slotErr } = await supabase
-    .from('menu_slots').select('id, category_id').eq('section_id', section.id);
-  if (slotErr) throw supaFail('fetchGeneratedMenuExportData: load menu_slots', slotErr);
-  const slotCategoryById = new Map(slotRows.map(s => [s.id, s.category_id]));
-
-  const dayItemsByDay = new Map();
-  const displayCategoryByItem = new Map(); // item_id -> category_id actually used for this menu
-  for (const row of dayItemRows) {
-    const item = itemById.get(row.item_id);
-    if (!item) continue;
-    const catId = slotCategoryById.get(row.slot_id) ?? item.category_id;
-    const cat = getCategoryById(catId);
-    displayCategoryByItem.set(item.id, catId);
-    const enriched = {
-      item_id: item.id, name: item.name, rc_code: item.rc_code, is_daily_repeating: item.is_daily_repeating,
-      category_name: cat?.name, category_code: cat?.code, meal_period_name: cat?.meal_period_name,
-      period_order: cat?.meal_period_sort_order ?? 0, cat_order: cat?.sort_order ?? 0,
-    };
-    if (!dayItemsByDay.has(row.menu_day_id)) dayItemsByDay.set(row.menu_day_id, []);
-    dayItemsByDay.get(row.menu_day_id).push(enriched);
-  }
-
-  // National Day label (AI Menu Generator menus only): a menu saved by an approved AI run shares
-  // that run's batch_id; its Tuesdays carry the cuisine they were generated for. Every other menu
-  // gets {} and exports exactly as before. CEO is generated by the regular engine and is never
-  // themed, so it never gets a label.
-  const themes = section.code === 'CEO' ? {} : await nationalDayThemesForBatch(menu.batch_id, days.map(d => d.menu_date));
-  const daysWithItems = days.map(d => ({
-    ...d, items: dayItemsByDay.get(d.id) || [], theme: themes[String(d.menu_date).slice(0, 10)] || null,
-  }));
-  // item_portions.quantity is retired -- category_portion_defaults (lib/referenceData.js) is now
-  // the ONLY source of portion size, no per-item override/exception path. Keyed off the same
-  // slot-resolved category used for display above -- not the item's raw catalog category_id --
-  // so a forced cross-category pick (e.g. Staff Main Dish's shared Lunch Main items) still gets
-  // Staff Main's portion size, not Lunch Main's.
-  const getPortion = (itemId, ageGroupId) => {
-    const catId = displayCategoryByItem.get(itemId);
-    const sectionId = getAgeGroupById(ageGroupId)?.section_id;
-    if (catId == null || sectionId == null) return null;
-    return getCategoryPortionDefault(catId, sectionId);
-  };
-
-  return { menu, section, ageGroups, days: daysWithItems, getPortion };
-}
-
-// Assembles the named-range/lookup data lib/export.js's buildListsSheetFromData needs for one
-// or more sections: each section's full eligible-item pool is loaded once (not once per
-// category) and filtered in memory, mirroring MenuGenerator's pool cache -- keeps this to a
-// couple of Supabase requests per section instead of one pair per (section, category).
-async function fetchListsSheetData(sectionCodes) {
-  const bySection = {};
-  const allItemIds = new Set();
-  const categoryByItem = new Map(); // item_id -> category_id, from the pool grouping below
-
-  for (const sectionCode of sectionCodes) {
-    const sectionId = getSectionByCode(sectionCode).id;
-    const ageGroups = getAgeGroupsForSection(sectionId);
-    const ageGroupIds = ageGroups.map(a => a.id);
-
-    let pool = [];
-    if (ageGroupIds.length) {
-      const { data: portionRows, error: portErr } = await supabase
-        .from('item_portions').select('item_id').in('age_group_id', ageGroupIds);
-      if (portErr) throw supaFail('fetchListsSheetData: load item_portions', portErr);
-      const itemIds = [...new Set(portionRows.map(r => r.item_id))];
-      if (itemIds.length) {
-        const { data: items, error: itemsErr } = await supabase
-          .from('menu_items')
-          .select('id, name, rc_code, is_daily_repeating, category_id')
-          .eq('is_active', 1)
-          .in('id', itemIds);
-        if (itemsErr) throw supaFail('fetchListsSheetData: load menu_items', itemsErr);
-        pool = items;
-      }
-    }
-
-    const categories = {};
-    for (const [categoryCode] of SECTION_SLOTS[sectionCode]) {
-      if (categories[categoryCode]) continue;
-      // meta (name/sort_order/meal period) is only needed by the Blank Menu template's
-      // buildSlotSpecsFromData, but it's cheap cached reference data, so it's always attached.
-      const meta = getCategoryByCode(categoryCode);
-      let items = pool.filter(it => it.category_id === meta.id);
-
-      // Staff's Main Dish slot force-includes that day's shared school dishes verbatim (see
-      // lib/generator.js's STAFF_MAIN_SOURCE_SECTIONS): KG-LP/MS-UP's Lunch Main and Lunch Starch
-      // and MS-UP's Lunch Vegetable. Daycare's Lunch Main is kept in the list too -- it was shared
-      // into Staff Main before 2026-09-23, and menus saved then must still export. Those items are
-      // catalogued under their own categories, not STAFF_MAIN, so the plain category_id filter above
-      // never finds them. Without this, they'd never enter STAFF's STAFF_MAIN bucket, so
-      // List_STAFF_STAFF_MAIN/Lookup_STAFF_STAFF_MAIN wouldn't contain them either -- the exported
-      // sheet's live INDEX/MATCH lookup formula would return blank via IFERROR no matter what
-      // item_portions data exists, since MATCH can't find a name that was never in the list.
-      if (sectionCode === 'STAFF' && categoryCode === 'STAFF_MAIN') {
-        const shares = [
-          ['LUNCH_MAIN', ['KG_LP', 'MS_UP', 'DAYCARE']],
-          ['LUNCH_STARCH', ['KG_LP', 'MS_UP']],
-          ['LUNCH_VEGETABLE', ['MS_UP']],
-        ];
-        const existingIds = new Set(items.map(i => i.id));
-        for (const [shareCode, sourceSections] of shares) {
-          const shareCat = getCategoryByCode(shareCode);
-          if (!shareCat) continue;
-          // Filter to the one category FIRST (bounded) rather than starting from item_portions
-          // filtered only by age_group_id -- that pulls in every portion row across the source
-          // sections' ENTIRE catalogs (LUNCH_MAIN alone is 700+ rows just for MS-UP), silently
-          // blowing past PostgREST's 1000-row cap with no .range() pagination, which is exactly what
-          // caused "Korean Fried Chicken" and "Chicken Emansei..." to drop out of an earlier version
-          // of this fix despite meeting every eligibility criterion.
-          const shareItems = await fetchAllRowsMain(() => supabase
-            .from('menu_items').select('id, name, rc_code, is_daily_repeating, category_id')
-            .eq('is_active', 1).eq('category_id', shareCat.id));
-          if (!shareItems.length) continue;
-          const sourceAgeGroupIds = sourceSections
-            .flatMap(code => getAgeGroupsForSection(getSectionByCode(code).id)).map(a => a.id);
-          const chunkSize = 300;
-          const eligibleIds = new Set();
-          const shareItemIds = shareItems.map(i => i.id);
-          for (let i = 0; i < shareItemIds.length; i += chunkSize) {
-            const chunk = shareItemIds.slice(i, i + chunkSize);
-            const rows = await fetchAllRowsMain(() => supabase
-              .from('item_portions').select('item_id').in('item_id', chunk).in('age_group_id', sourceAgeGroupIds));
-            rows.forEach(r => eligibleIds.add(r.item_id));
-          }
-          for (const it of shareItems) {
-            if (eligibleIds.has(it.id) && !existingIds.has(it.id)) { items.push(it); existingIds.add(it.id); }
-          }
-        }
-      }
-
-      items = items.sort((a, b) => a.name.localeCompare(b.name));
-      categories[categoryCode] = { items, meta };
-      // categoryByItem is keyed by section too (not just item id): the whole point of the
-      // block above is that the same item can legitimately sit under a DIFFERENT category
-      // bucket for Staff (STAFF_MAIN) than it does for its home section (LUNCH_MAIN for
-      // KG-LP/MS-UP/Daycare) -- meta.id (this bucket's category), not it.category_id (the
-      // item's own catalog category), is what the quantity default must key off here.
-      items.forEach(it => { allItemIds.add(it.id); categoryByItem.set(`${sectionId}:${it.id}`, meta.id); });
-    }
-    bySection[sectionCode] = { ageGroups, categories };
-  }
-
-  // item_portions.quantity is retired -- same pure category+section lookup as
-  // fetchGeneratedMenuExportData's getPortion, no per-item override/exception path. Note the
-  // FIRST item_portions query above (building `pool`/allItemIds via section membership) is
-  // untouched -- that's row-existence-only and still determines which items belong to which
-  // sections; only the second, now-removed quantity/unit fetch this comment used to sit above is
-  // gone.
-  const getPortion = (itemId, ageGroupId) => {
-    const sectionId = getAgeGroupById(ageGroupId)?.section_id;
-    const catId = sectionId != null ? categoryByItem.get(`${sectionId}:${itemId}`) : undefined;
-    if (catId == null || sectionId == null) return null;
-    return getCategoryPortionDefault(catId, sectionId);
-  };
-  return { bySection, getPortion };
-}
-
-ipcMain.handle('export-menu-to-excel', async (e, { generatedMenuId, savePath }) => {
-  if (!savePath) {
-    const { data: menu, error } = await supabase.from('generated_menus').select('label').eq('id', generatedMenuId).single();
-    if (error) throw supaFail('export-menu-to-excel: load label', error);
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Export Menu',
-      defaultPath: `${menu.label.replace(/\s+/g, '_')}.xlsx`,
-      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
-    });
-    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
-    savePath = result.filePath;
-  }
-
-  await exportSingleMenu(fetchGeneratedMenuExportData, fetchListsSheetData, generatedMenuId, savePath);
-  return { success: true, path: savePath };
-});
-
-ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekdays, savePath, createdBy }) => {
+ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekdays, savePath, createdBy, createdByMix }) => {
   const sectionOrder = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];
   const menuIdsBySection = {};
   const warningsBySection = {};
+  const mix = normalizeMix(createdByMix); // one mix for the whole run
+  const mixReportBySection = mix ? {} : null;
   // Same batch_id across all 5 sections so History can show/delete this run as one entry.
   const batchId = crypto.randomUUID();
 
   for (const sectionCode of sectionOrder) {
-    const gen = new MenuGenerator();
+    const gen = new MenuGenerator({ createdByMix: mix });
     const { menuId } = await gen.generate(sectionCode, label, new Date(startDate), numWeekdays, batchId, createdBy);
     menuIdsBySection[sectionCode] = menuId;
     warningsBySection[sectionCode] = gen.warnings;
+    if (mix) mixReportBySection[sectionCode] = createdByMixReport(gen, mix);
   }
 
   if (!savePath) {
@@ -4579,7 +4207,7 @@ ipcMain.handle('generate-and-export-all', async (e, { label, startDate, numWeekd
   }
 
   await exportCombinedWorkbook(fetchGeneratedMenuExportData, fetchListsSheetData, menuIdsBySection, savePath);
-  return { success: true, path: savePath, warningsBySection };
+  return { success: true, path: savePath, warningsBySection, mixReportBySection };
 });
 
 // `label` is the Workbook Name she typed in on whichever screen triggered this (Build Menu's own
