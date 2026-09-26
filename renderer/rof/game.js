@@ -12,6 +12,7 @@ import { createSheet } from './sheet.js';
 import { packCutters } from './packing.js';
 import { analyzeScrap } from './scrap.js';
 import { planKnifeGrid, buildKnifeLines } from './knifeGrid.js';
+import { createFillingMaterial } from './filling.js';
 import { createPortionModel, drawDims, project } from './portion.js';
 
 // Public entry point for the Recipe on Fire game view. renderer.js (a classic script) reaches this
@@ -47,6 +48,7 @@ export function createRofGame(container, opts = {}) {
   let oven = null;
   let sheet = null;        // Sheet & Trim: the dough as one mass in the tray
   let knife = null;        // Sheet & Trim, Trim by Knife: { plan, cuts, lines, solid } (see setKnifeGrid)
+  let fills = [];          // Layered tray: the layers stacked on the sheet, bottom first (see setFillLayers)
   let armed = null;        // { shapeType, dims, materialId } -- the cutter that follows the pointer
   let ghost = null;        // the see-through cutter shown at the pointer while one is armed
   const items = [];
@@ -352,6 +354,7 @@ export function createRofGame(container, opts = {}) {
     closePortion({ quiet: true });
     disarmCutter();
     dropKnife();
+    dropFills();
     clearItems();
     if (sheet) { stage.scene.remove(sheet.group); sheet.dispose(); sheet = null; }
     scrap = null; clearTimeout(scrapTimer);
@@ -510,6 +513,68 @@ export function createRofGame(container, opts = {}) {
     cuttersChanged();
     return plan;
   }
+  // ---- Layered tray: layers on top of the sheet --------------------------------------------------------
+  // The sheet is the bottom layer; each layer above it is its own sheet mesh (sheet.js with a filling material,
+  // filling.js), built once 1 cm thick and scaled to its height, so changing a height is instant and can "pour"
+  // (the shown height eases to the target). Each sits on the one below, and the whole stack follows the bottom
+  // sheet's top (its rise, or a measured height). `list`: [{ key, heightCm, look }], bottom first; a key already
+  // shown keeps its mesh, a missing one is removed.
+  function dropFills() {
+    fills.forEach(f => { f.group.parent?.remove(f.group); f.sheet.dispose(); });
+    fills = [];
+    fillTicker?.(); fillTicker = null;
+  }
+  let fillTicker = null;
+  function layoutFills() {
+    if (!sheet) return;
+    let y = sheet.topY();
+    for (const f of fills) {
+      f.group.position.y = y;
+      f.group.scale.y = Math.max(f.shownH, 0.001);
+      f.group.visible = f.shownH > 0.002;
+      y += f.shownH;
+    }
+    stage.requestRender();
+  }
+  function setFillLayers(list, { pour = true } = {}) {
+    if (!sheet || !tray || tray.region.kind === 'cups') return false;
+    const keep = new Map(fills.map(f => [f.key, f]));
+    const next = [];
+    (list || []).forEach((l, i) => {
+      let f = keep.get(l.key);
+      if (f) keep.delete(l.key);
+      else {
+        const s1 = createSheet({ region: tray.region, plan: tray.plan, thicknessCm: 1, seed: 17 + i * 13, makeMaterial: () => createFillingMaterial(l.look || {}, { seed: 5 + i }) });
+        s1.mesh.castShadow = true; s1.mesh.receiveShadow = true;
+        f = { key: l.key, sheet: s1, group: s1.group, shownH: 0, targetH: 0 };
+        sheet.group.add(s1.group);
+      }
+      f.targetH = Math.max(0, Number(l.heightCm) || 0);
+      if (!pour || reducedMotion()) f.shownH = f.targetH;
+      next.push(f);
+    });
+    keep.forEach(f => { f.group.parent?.remove(f.group); f.sheet.dispose(); });
+    fills = next;
+    layoutFills();
+    if (!fillTicker && fills.some(f => Math.abs(f.shownH - f.targetH) > 1e-4)) {
+      // Ease towards the target: about a second from empty, a quick glide for a small change.
+      fillTicker = stage.animate((dt) => {
+        let moving = false;
+        for (const f of fills) {
+          const d = f.targetH - f.shownH;
+          if (Math.abs(d) < 1e-4) { f.shownH = f.targetH; continue; }
+          f.shownH += d * Math.min(1, dt * 4.5);
+          moving = true;
+        }
+        layoutFills();
+        if (!moving) fillTicker = null;
+        return moving;
+      });
+    }
+    return true;
+  }
+  const getFills = () => fills.map(f => ({ key: f.key, heightCm: f.targetH, shownCm: f.shownH }));
+
   function setKnifeSolid(solid) {
     if (!knife || knife.solid === solid) return;
     closePortion({ quiet: true });
@@ -690,7 +755,7 @@ export function createRofGame(container, opts = {}) {
   }
   // How risen / baked every dough piece is (0..1).
   function setDoughState({ rise, bake } = {}, { onlyPlaced = false } = {}) {
-    if (sheet) { if (rise !== undefined) sheet.setRise(rise); if (bake !== undefined) sheet.setBake(bake); }
+    if (sheet) { if (rise !== undefined) sheet.setRise(rise); if (bake !== undefined) sheet.setBake(bake); if (fills.length) layoutFills(); }
     items.forEach(it => {
       if (!it.dough || (onlyPlaced && it.home !== 'tray')) return;
       if (rise !== undefined) it.dough.setRise(rise);
@@ -1047,7 +1112,7 @@ export function createRofGame(container, opts = {}) {
   const api = {
     setTray, clearTray, addCutter, addDough, setDoughState, showLookdev, removeItem, clearItems, on,
     beginPlacement, endPlacement, autoArrange, returnAllToBench, playBake, resetBake, setInteractive,
-    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, planCutters, clearCutters, setKnifeGrid, setKnifeSolid, setScrapHighlight, setSheetGrams,
+    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, planCutters, clearCutters, setKnifeGrid, setKnifeSolid, setFillLayers, getFills, setScrapHighlight, setSheetGrams,
     getScrap: scrapSummary,
     getCutters: () => allCuts().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },

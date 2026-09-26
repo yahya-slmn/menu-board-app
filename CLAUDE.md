@@ -336,7 +336,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the cells into rectangle "cuts" (`materialId: 'knife'`, not items: nothing to drag) that go through the SAME mask / scrap
   / portion / PDF code as cutter pieces (`allCuts`). Dotted lines = preview; Cut -> solid lines, inputs locked, One portion /
   Export PDF enabled (`cutsReady`); Edit cuts unlocks. Default size = the square giving `recipes.portion_weight_grams`, else 5 cm.
-- Layered tray (Phase 4, in progress; L1 plan + L2 pre-bake, 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
+- Layered tray (Phase 4, in progress; L1 plan + L2 pre-bake + L3 fill, 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
   choice (beside the process label; One dough = the unchanged mixed flow). In layers: an ordered stack (top drawn first),
   each layer its OWN wastage (session copy), density (1.05 dough / 1.0 no-flour filling, est., editable), "Pre-bake alone
   first" (bottom only), and above it "All of it" or "Up to a height" (ASSEMBLY height from the tray floor, ruler-checkable).
@@ -354,6 +354,15 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   L3; without a pre-bake Continue waits for Fill too. Layers-mode Setup fits 1280x800 unscrolled: the process checklist folds
   into the head line ("2 of 2 processes · Change"), layer cards are an accordion (one open; `layerOpenId`), the plan is a
   compact grid, and the Method field / Tray label step aside. (One-dough Setup with 2+ processes scrolled before this: 796 px.)
+  L3 (Fill): from the Pre-bake ("Fill ->") or straight from Setup (no pre-bake: the base goes in raw). Each layer above the
+  base: All of it / Up to a height (the SAME layerCfg as Setup's cards), grams per tray, not used / short, rim warning.
+  3D: `game.setFillLayers([{ key, heightCm, look }])` -- each layer a sheet mesh (sheet.js `makeMaterial`) with a
+  `rof/filling.js` material (`fillingLook`: base colour + flecks from ingredient-name keywords, pure), built 1 cm thick and
+  SCALED to its height (instant; it eases = "pours"), stacked on the bottom sheet's top and following it
+  (`setDoughState` -> `layoutFills`). A short filling still shows the target height; the red line says what it reaches.
+  The 3D side view can't show a stack (the tray wall hides it; sheets are surfaces, no body to section), so the Fill step
+  shows `rof/stack.js` `stackSvg` instead: a to-scale 2D cross-section (bands in each layer's colour, cm ruler, rim, dashed
+  after-bake estimate) in the stage's top-left under the view buttons. Bake -> waits for L4.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.

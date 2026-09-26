@@ -6,6 +6,8 @@ import { packCutters } from './packing.js';
 import { measurePortion, fmtCm } from './portion.js';
 import { parseBakeParams } from './bakeParams.js';
 import * as layers from './layers.js';
+import { fillingLook } from './filling.js';
+import { stackSvg } from './stack.js';
 
 // renderer.js is a classic script and can't `import`, so the game module registers itself on
 // window. Every instance is tracked so leaving the Recipe on Fire screen can tear its WebGL
@@ -19,6 +21,8 @@ window.RofGame = {
   packCutters,         // cutter packing (pure geometry)
   parseBakeParams,     // reads an oven temperature / bake time out of method text (best effort)
   layers,              // layered tray (Sheet & Trim, "In layers"): grams / heights / trays per layer (pure)
+  fillingLook,         // a filling layer's colours, from its ingredient names (pure)
+  stackSvg,            // a layered tray's cross-section, to scale, as an SVG string (pure)
   fmtCm,               // the centimetre format the portion view uses
   measurePortion,      // sizes of one baked portion (pure), for the detail view, the panel and the PDF
   shapePreview,        // outline + slash lines of a shape spec, for the Shapes modal preview

@@ -10889,16 +10889,15 @@ function renderRecipeOnFireView(main) {
     }
     return '';
   }
-  // Continue in layers mode: to the Pre-bake when the bottom layer is pre-baked. Without a pre-bake the next step
-  // is Fill, which isn't built yet (phase L3).
+  // Continue in layers mode: to the Pre-bake when the bottom layer is pre-baked, else straight to Fill.
   function syncLayerContinue() {
     const btn = document.getElementById('rof-continue-btn');
     if (!btn || !layersActive()) return;
     const bottom = layerOrder[0] && layerCfg.get(layerOrder[0]);
     const ok = !!(layerPlan && layerPlan.ok);
-    btn.disabled = !ok || !bottom?.prebake;
-    btn.textContent = bottom?.prebake ? 'Pre-bake →' : 'Continue →';
-    btn.title = !ok ? 'Fix the plan first.' : bottom?.prebake ? '' : 'Without a pre-bake the next step is Fill, which is not built yet.';
+    btn.disabled = !ok;
+    btn.textContent = bottom?.prebake ? 'Pre-bake →' : 'Fill →';
+    btn.title = ok ? '' : 'Fix the plan first.';
   }
 
   // Rebuilds the combined waste rows -- called on structural change only (initial summary render,
@@ -11151,6 +11150,8 @@ function renderRecipeOnFireView(main) {
       enterBakeStep(); // forward from 'place', Shape & Place -- same as "Bake ->"
       return;
     }
+    if (target === 'prebake') { backToPrebake(); return; }                   // backward from 'fill' -- same as "<- Pre-bake"
+    if (target === 'fill') { startFillFlow({ fromPrebake: true }); return; } // forward from 'prebake' -- same as "Fill ->"
     if (target === 'trim') { goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
   }
 
@@ -11164,7 +11165,9 @@ function renderRecipeOnFireView(main) {
     if (rofStep === 'setup') renderSetupPanel(panel);
     else if (rofStep === 'place') renderPlaceStepPanel(panel);
     else if (rofStep === 'bake' || rofStep === 'prebake') renderBakeStepPanel(panel);
+    else if (rofStep === 'fill') renderFillStepPanel(panel);
     else if (rofStep === 'trim') renderTrimStepPanel(panel);
+    if (rofStep !== 'fill') showLayerStack(null); // the layers' cross-section belongs to the Fill step only (for now)
     syncPreviewMode();
     syncRecipeBlock();
   }
@@ -11218,7 +11221,12 @@ function renderRecipeOnFireView(main) {
       lastMaterialId = e.target.value || null;
       updateSetupPreview();
     });
-    document.getElementById('rof-continue-btn').addEventListener('click', () => (rofMode === 'shape' ? startPlacementFlow() : layered ? startPrebakeFlow() : startSheetFlow()));
+    document.getElementById('rof-continue-btn').addEventListener('click', () => {
+      if (rofMode === 'shape') startPlacementFlow();
+      else if (!layered) startSheetFlow();
+      else if (layerCfg.get(layerOrder[0])?.prebake) startPrebakeFlow();
+      else startFillFlow({ fromPrebake: false });
+    });
     reloadMaterials();
     populateMaterialSelect();
   }
@@ -11925,7 +11933,7 @@ function renderRecipeOnFireView(main) {
         <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
         ${ready ? `<button type="button" class="primary" id="rof-start-bake-btn">${pre ? 'Start pre-bake' : 'Start baking'}</button>`
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
-                   ${pre ? '<button type="button" class="primary" id="rof-fill-btn" disabled title="The Fill step is the next part of this build.">Fill →</button>'
+                   ${pre ? '<button type="button" class="primary" id="rof-fill-btn">Fill →</button>'
                    : sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                                : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
@@ -11970,6 +11978,7 @@ function renderRecipeOnFireView(main) {
     });
     document.getElementById('rof-trim-btn')?.addEventListener('click', () => { goToRofStep('trim'); renderTrayStepPanel(); });
     if (pre && !ready) wirePrebakeMeasure();
+    document.getElementById('rof-fill-btn')?.addEventListener('click', () => startFillFlow({ fromPrebake: true }));
     if (!sheetMode) updatePlaceSummary();
   }
 
@@ -12064,6 +12073,139 @@ function renderRecipeOnFireView(main) {
   }
   // The bake just finished: a measurement she typed before stays and is shown.
   function onPrebakeDone() { showPrebakeHeight(); }
+
+  // ---- Layers: the Fill step -----------------------------------------------------------------------
+  // Each layer above the base is poured on the one below: all of it, or up to a height (from the tray floor, what a
+  // ruler shows). The screen shows the stack as it is assembled (raw fillings on the pre-baked -- or raw -- base) and
+  // the grams each tray takes; the layers glide to a new height as she types. Same choices as Setup's layer cards
+  // (one layerCfg), so the two always agree. The final bake is the next phase (L4), so Bake -> waits.
+  function startFillFlow({ fromPrebake }) {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return;
+    goToRofStep('fill');
+    renderTrayStepPanel();
+    ensureRofGame().then((game) => {
+      if (rofStep !== 'fill') return;
+      if (!fromPrebake || !game.getSheet()) {
+        // No pre-bake: the base goes in raw, drawn like any sheet (at least 3 mm so it reads, at most 70% of the rim).
+        const row = r.plan.layers[0], fp = bakeSnapshot.footprint;
+        game.beginSheet({ thicknessCm: Math.max(0.3, Math.min(row.rawHeightCm, fp.usableHeightCm * 0.7)) });
+        game.setSheetGrams(row.rawPerTray);
+      }
+      showFillLayers({ pour: true });
+    });
+  }
+  // The layers above the base, on screen at their assembly heights.
+  function showFillLayers({ pour }) {
+    const r = computeLayerPlan();
+    if (!rofGame || !r || !r.plan.ok) return;
+    const procOf = (key) => r.procs.find(p => String(p.localId) === key);
+    rofGame.setFillLayers(r.plan.layers.slice(1).map(row => ({
+      key: row.key, heightCm: row.assemblyHeightCm, look: window.RofGame.fillingLook(riseRowsOf(procOf(row.key))),
+    })), { pour });
+  }
+  function backToPrebake() {
+    if (rofGame) rofGame.setFillLayers([]);
+    goToRofStep('prebake');
+    bakeState = 'done';
+    renderTrayStepPanel();
+    showPrebakeHeight();
+  }
+  function renderFillStepPanel(panel) {
+    if (rofGame) rofGame.setInteractive(true);
+    const r = computeLayerPlan();
+    const pre = !!r?.baseCfg.prebake;
+    const uppers = r ? r.procs.slice(1) : [];
+    panel.innerHTML = `
+      <h3 style="margin-bottom:4px;">Fill</h3>
+      <div class="rof-fill-hint">Each layer goes on the one below. Heights are from the tray floor, as a ruler shows them.</div>
+      <div class="rof-fill-layers">
+        ${uppers.map((p) => {
+          const id = String(p.localId), c = layerCfg.get(id), name = escHtml(p.name || '(untitled process)');
+          return `
+          <div class="rof-fill-layer" data-fill-layer="${id}">
+            <div class="rof-fill-head">
+              <strong class="rof-fill-name" dir="auto" title="${name}">${name}</strong>
+              <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
+                <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? '' : 'active'}" data-fill-kind="all" aria-pressed="${c.fillKind !== 'height'}">All of it</button>
+                <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? 'active' : ''}" data-fill-kind="height" aria-pressed="${c.fillKind === 'height'}">Up to</button>
+              </span>
+              ${c.fillKind === 'height' ? `<input type="number" min="0.1" step="0.1" value="${escHtml(String(c.targetCm ?? ''))}" data-fill-target class="rof-layer-target" aria-label="${name}: height from the tray floor, cm" placeholder="cm" /> cm` : ''}
+            </div>
+            <div class="rof-fill-line" data-fill-line role="status" aria-live="polite"></div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="computed-value-box rof-fill-total" id="rof-fill-total" role="status" aria-live="polite"></div>
+      <div class="rof-actions">
+        <button type="button" class="secondary" id="rof-fill-back-btn">${pre ? '← Pre-bake' : '← Edit Setup'}</button>
+        <button type="button" class="primary" id="rof-fill-bake-btn" disabled title="The final bake is the next part of this build.">Bake →</button>
+      </div>`;
+    panel.querySelectorAll('[data-fill-layer]').forEach(box => {
+      const id = box.dataset.fillLayer, c = layerCfg.get(id);
+      box.querySelectorAll('[data-fill-kind]').forEach(b => b.addEventListener('click', () => {
+        if (c.fillKind === b.dataset.fillKind) return;
+        c.fillKind = b.dataset.fillKind;
+        renderFillStepPanel(panel);
+        panel.querySelector(`[data-fill-layer="${id}"] ${c.fillKind === 'height' ? '[data-fill-target]' : '[data-fill-kind="all"]'}`)?.focus();
+        showFillLayers({ pour: true });
+      }));
+      box.querySelector('[data-fill-target]')?.addEventListener('input', (e) => {
+        c.targetCm = e.target.value;
+        refreshFillNumbers();
+        showFillLayers({ pour: true });
+      });
+    });
+    document.getElementById('rof-fill-back-btn').addEventListener('click', () => (pre ? backToPrebake() : backToSetup()));
+    refreshFillNumbers();
+  }
+  // The cross-section (rof/stack.js) in the stage's top-left corner: each layer to scale in its colour, the rim, and
+  // the estimated height after the bake. `r` = computeLayerPlan() result; null hides it.
+  const BASE_COLOR = { raw: '#ecd7a3', baked: '#c9924e' };
+  function showLayerStack(r) {
+    let el = document.getElementById('rof-stack');
+    if (!r || !r.plan.ok) { if (el) el.hidden = true; return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'rof-stack';
+      el.className = 'rof-stack';
+      gameWrapEl.appendChild(el);
+    }
+    const procOf = (key) => r.procs.find(p => String(p.localId) === key);
+    el.innerHTML = window.RofGame.stackSvg({
+      rimCm: bakeSnapshot.footprint.usableHeightCm,
+      finalCm: r.plan.finalHeightEstCm,
+      layers: r.plan.layers.map((row, i) => ({
+        name: row.name, heightCm: row.assemblyHeightCm,
+        color: i === 0 ? (row.prebake ? BASE_COLOR.baked : BASE_COLOR.raw) : window.RofGame.fillingLook(riseRowsOf(procOf(row.key))).base,
+        note: i === 0 ? (row.prebake ? (row.measured ? 'measured' : 'pre-baked') : 'raw') : '',
+      })),
+    });
+    el.hidden = false;
+  }
+  // Each layer's line (grams per tray, where it sits, what's left or short) and the stack's total.
+  function refreshFillNumbers() {
+    const r = computeLayerPlan();
+    const totalEl = document.getElementById('rof-fill-total');
+    if (!r || !totalEl) return;
+    const plan = r.plan, P = window.RofGame.portions, g = (v) => `${P.fmtGrams(v)} g`;
+    if (!plan.ok) {
+      document.querySelectorAll('[data-fill-line]').forEach(el => { el.innerHTML = ''; });
+      totalEl.innerHTML = plan.errors.map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('');
+      return;
+    }
+    plan.layers.slice(1).forEach(row => {
+      const el = document.querySelector(`[data-fill-layer="${row.key}"] [data-fill-line]`);
+      if (el) el.innerHTML = `${g(row.rawPerTray)} per tray &middot; ${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}${layerUseHtml(row, plan.trays)}`;
+    });
+    const base = plan.layers[0];
+    showLayerStack(r);
+    totalEl.innerHTML = `
+      <div>Base: <span dir="auto">${escHtml(base.name)}</span> ${cmFmt(base.assemblyHeightCm)} ${base.prebake ? (base.measured ? 'pre-baked, measured' : 'pre-baked <span class="rof-layer-est">est.</span>') : 'raw'}</div>
+      <div>Assembled <strong>${cmFmt(plan.assembledHeightCm)}</strong> &middot; about ${cmFmt(plan.finalHeightEstCm)} after the bake <span class="rof-layer-est">est.</span></div>
+      <div>${plan.trays === 1 ? 'One tray' : `${plan.trays} trays`} &middot; ${g(plan.rawPerTrayGrams)} per tray</div>
+      ${plan.warnings.filter(w => !/short by/.test(w)).map(w => `<div class="rof-leftover">${escHtml(w)}</div>`).join('')}`;
+  }
 
   // ---- Sheet & Trim: the Trim step -----------------------------------------------------------------
   async function ensureCutterMaterials() {

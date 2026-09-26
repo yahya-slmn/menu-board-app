@@ -94,7 +94,9 @@ class CutterMask {
 // estimated baked thickness uses the same number.
 export const RISE_H = 0.95;
 
-export function createSheet({ region, plan, thicknessCm, seed = 7 }) {
+// `makeMaterial` (optional): a material to use instead of the dough shader -- a layered tray's filling (filling.js).
+// It gets a plain `uv` (cm / 10); no mask, browning or rise shading.
+export function createSheet({ region, plan, thicknessCm, seed = 7, makeMaterial = null }) {
   const H = thicknessCm;
   const sdf = sdfFor(region);
   const { verts, Ns, Nt } = gridFor(region, plan);
@@ -123,6 +125,7 @@ export function createSheet({ region, plan, thicknessCm, seed = 7 }) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('aRho', new THREE.BufferAttribute(rho, 1));
+  if (makeMaterial) geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(verts.flatMap(([x, y]) => [x / 10, y / 10])), 2));
   geo.setIndex(idx);
   geo.computeVertexNormals();
   // Make sure the surface faces up whatever way the grid happened to be wound.
@@ -139,13 +142,14 @@ export function createSheet({ region, plan, thicknessCm, seed = 7 }) {
   tGeo.dispose();
 
   const mask = new CutterMask(plan);
-  const material = createDoughMaterial({ seed, tint: 0, archetype: 'sheet', lengthCm: 10, widthCm: 10, heightCm: H, sheet: { mask: mask.texture, plan } });
+  const material = makeMaterial ? makeMaterial() : createDoughMaterial({ seed, tint: 0, archetype: 'sheet', lengthCm: 10, widthCm: 10, heightCm: H, sheet: { mask: mask.texture, plan } });
   const mesh = new THREE.Mesh(geo, material);
   mesh.castShadow = true; mesh.receiveShadow = true;
   mesh.morphTargetInfluences = [0, 0];
   const group = new THREE.Group();
   group.add(mesh);
-  const u = material.userData.uniforms;
+  // A custom material has no dough uniforms; the calls below that set them become no-ops.
+  const u = material.userData.uniforms || { uRise: {}, uBake: {}, uScrap: {}, uHasCuts: {} };
   let rise = 0;
   return {
     group, mesh, material, mask, thicknessCm: H,

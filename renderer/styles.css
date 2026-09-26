@@ -840,6 +840,14 @@ table.materials-table td.cat-cell {
 .rof-plan-t > span { border-top: 1px solid #cfdacb; padding-top: 3px; margin-top: 2px; font-weight: 600; }
 .rof-layer-note { font-size: 12px; line-height: 1.45; margin: 1px 0 3px; }
 .rof-layer-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+/* Fill step */
+.rof-fill-hint { font-size: 12.5px; color: var(--neutral); margin-bottom: 8px; }
+.rof-fill-layers { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.rof-fill-layer { border: 1px solid var(--line); border-left: 3px solid var(--sage); border-radius: 8px; padding: 6px 10px; background: var(--surface); }
+.rof-fill-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.rof-fill-name { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rof-fill-line { font-size: 12.5px; margin-top: 3px; line-height: 1.5; }
+.rof-fill-total { font-weight: normal; font-size: 12.5px; line-height: 1.55; margin-bottom: 8px; padding: 8px 12px; }
 /* Pre-bake step: the measured height */
 .rof-measure { margin-top: 8px; padding-top: 8px; border-top: 1px solid #cfdacb; }
 .rof-measure-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
@@ -954,6 +962,8 @@ table.items-table.shapes-table td:not(:first-child) { white-space: nowrap; }
 .rof-count-row button { width: 30px; height: 30px; padding: 0; }
 /* Recipe on Fire's WebGL game view fills the same preview frame; it sets its own cursor per hover/drag. */
 .rof-game-wrap { position: absolute; inset: 0; }
+.rof-stack { position: absolute; top: 62px; left: 12px; z-index: 3; padding: 6px 8px 4px; border-radius: 10px; background: rgba(20, 37, 30, .78); pointer-events: none; line-height: 0; }
+.rof-stack svg { display: block; font-family: inherit; }
 .rof-game-wrap canvas:focus-visible { outline: 3px solid #2d7dd2; outline-offset: -3px; }
 .material-preview-wrap .rof-game-wrap canvas { cursor: default; }
 .material-preview-wrap .rof-game-wrap canvas:active { cursor: default; }
