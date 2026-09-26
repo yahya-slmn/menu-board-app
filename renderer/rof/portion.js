@@ -98,6 +98,32 @@ export function createPortionModel({ surfaces, desc }) {
     group.add(piece.group);
     disposables.push(piece);
     top = baseY + m.heightCm;
+  } else if (Array.isArray(desc.layers) && desc.layers.length) {
+    // A layered tray's piece: one slab per layer, bottom first, each its own height (the estimated baked heights)
+    // and colours -- dough layers in crust / crumb colours, a filling in its own. Only the top slab is bevelled.
+    const { shape } = cutShape(desc.shapeType, desc.dims);
+    const bump = bumpTexture().clone();
+    bump.repeat.set(0.16, 0.16); bump.needsUpdate = true;
+    let y = baseY;
+    desc.layers.forEach((l, i) => {
+      const t = Math.max(Number(l.heightCm) || 0, 0.05), last = i === desc.layers.length - 1;
+      const bev = last ? Math.min(0.12, t * 0.16) : 0;
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: Math.max(t - 2 * bev, 0.03), bevelEnabled: bev > 0, bevelThickness: bev, bevelSize: bev, bevelOffset: -bev, bevelSegments: 3, curveSegments: 48 });
+      const topCol = l.kind === 'dough' ? crustColor(desc.bake) : new THREE.Color(l.topColor || l.color || '#e6d2a4');
+      // A dough layer's cut side reads as baked pastry (mostly crust colour), so it stands apart from a filling's.
+      const sideCol = l.kind === 'dough' ? new THREE.Color(BAKE_COLORS.scoreInterior).lerp(crustColor(desc.bake), 0.75) : new THREE.Color(l.color || '#e6d2a4');
+      const top_ = new THREE.MeshStandardMaterial({ color: topCol, roughness: 0.9, metalness: 0, bumpMap: bump, bumpScale: 1.2 });
+      const side = new THREE.MeshStandardMaterial({ color: sideCol, roughness: 1, metalness: 0, bumpMap: bump, bumpScale: 0.8 });
+      const mesh = new THREE.Mesh(geo, [top_, side]);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = y + bev;
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      group.add(mesh);
+      disposables.push({ dispose() { geo.dispose(); top_.dispose(); side.dispose(); } });
+      y += t;
+    });
+    disposables.push({ dispose() { bump.dispose(); } });
+    top = y;
   } else {
     const { shape } = cutShape(desc.shapeType, desc.dims);
     const t = Math.max(m.heightCm, 0.3), bev = Math.min(0.14, t * 0.16);

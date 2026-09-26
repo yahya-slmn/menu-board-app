@@ -245,6 +245,7 @@ export function createRofGame(container, opts = {}) {
     const cs = allCuts();
     sheet.mask.redraw(cs.map(c => ({ poly: c.poly, x: c.tx, y: c.ty, rot: c.rotT })));
     sheet.setHasCuts(cs.length);
+    fills.forEach(f => f.sheet.setHasCuts(cs.length));
     stage.requestRender();
     emit('cutters', cs.map(describeCutter));
     scheduleScrap();
@@ -314,7 +315,7 @@ export function createRofGame(container, opts = {}) {
   const _v = new THREE.Vector3();
   function positionFlags() {
     if (!flagEls.length || !tray) return;
-    const w = container.clientWidth, h = container.clientHeight, y = tray.floorTopY + (sheet ? sheet.topY() : 0);
+    const w = container.clientWidth, h = container.clientHeight, y = tray.floorTopY + stackTopY();
     for (const f of flagEls) {
       _v.set(f.x, y, -f.y).project(stage.camera);
       const off = _v.z > 1 || Math.abs(_v.x) > 1.05 || Math.abs(_v.y) > 1.05;
@@ -327,7 +328,7 @@ export function createRofGame(container, opts = {}) {
     if (!tipEl) return;
     if (!scrapOn || !scrap || ghost || interaction.isDragging() || sheetGrams <= 0) { tipEl.hidden = true; return; }
     if (interaction.pickAt(e)) { tipEl.hidden = true; return; }                       // over a cutter
-    const p = interaction.planePoint(e, tray.floorTopY + (sheet ? sheet.topY() : 0));
+    const p = interaction.planePoint(e, tray.floorTopY + stackTopY());
     const id = p ? scrap.regionAt(p.x, p.y) : -1;
     const r = id >= 0 ? scrap.regions.find(q => q.id === id) : null;
     if (!r) { tipEl.hidden = true; return; }
@@ -376,7 +377,7 @@ export function createRofGame(container, opts = {}) {
       Object.assign(o.material, { transparent: true, opacity: 0.55, depthWrite: false });
       o.castShadow = false;
     });
-    const hover = tray.floorTopY + (sheet ? sheet.topY() : 0) + 0.9 - tray.floorTopY;
+    const hover = tray.floorTopY + stackTopY() + 0.9 - tray.floorTopY;
     ghost = new PlacedItem({ id: -1, kind: 'ghost', group: built.group, poly: built.poly, baseY: tray.floorTopY + hover, height: built.height, collision: 'lifted' });
     ghost.selected = true;
     ghost.group.visible = false; ghost.outline.visible = false;
@@ -494,7 +495,7 @@ export function createRofGame(container, opts = {}) {
     if (!knife || !sheet) return;
     if (knife.lines) { knife.lines.parent?.remove(knife.lines); knife.lines.userData.dispose(); }
     // In the sheet's own space (it sits at the tray floor), just over its risen top.
-    knife.lines = buildKnifeLines(knife.plan.cuts, { y: sheet.topY() + 0.06, solid: knife.solid });
+    knife.lines = buildKnifeLines(knife.plan.cuts, { y: stackTopY() + 0.06, solid: knife.solid });
     sheet.group.add(knife.lines);
     stage.requestRender();
   }
@@ -525,6 +526,9 @@ export function createRofGame(container, opts = {}) {
     fillTicker?.(); fillTicker = null;
   }
   let fillTicker = null;
+  // The top surface in the tray (sheet-local): the sheet's, or -- with layers on it -- the top of the stack. Cut lines,
+  // scrap flags, the scrap hover and the cutter ghost all sit on it.
+  const stackTopY = () => (sheet ? sheet.topY() + fills.reduce((h, f) => h + f.shownH, 0) : 0);
   function layoutFills() {
     if (!sheet) return;
     let y = sheet.topY();
@@ -551,7 +555,9 @@ export function createRofGame(container, opts = {}) {
       let f = keep.get(l.key);
       if (f) keep.delete(l.key);
       else {
-        const s1 = createSheet({ region: tray.region, plan: tray.plan, thicknessCm: 1, seed: 17 + i * 13, makeMaterial: () => createFillingMaterial(l.look || {}, { seed: 5 + i }) });
+        const s1 = createSheet({ region: tray.region, plan: tray.plan, thicknessCm: 1, seed: 17 + i * 13,
+          makeMaterial: () => createFillingMaterial(l.look || {}, { seed: 5 + i, scrap: { mask: sheet.mask.texture, plan: tray.plan } }) });
+        s1.setScrapHighlight(scrapOn);
         s1.mesh.castShadow = true; s1.mesh.receiveShadow = true;
         f = { key: l.key, sheet: s1, group: s1.group, shownH: 0, targetH: 0 };
         sheet.group.add(s1.group);
@@ -590,7 +596,7 @@ export function createRofGame(container, opts = {}) {
     knife.solid = solid;
     drawKnifeLines();
   }
-  function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); stage.requestRender(); }
+  function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); fills.forEach(f => f.sheet.setScrapHighlight(on)); renderFlags(); stage.requestRender(); }
   function setSheetGrams(g) { sheetGrams = g; renderFlags(); }
 
   // ---- bake director -------------------------------------------------------------------------------

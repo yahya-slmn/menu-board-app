@@ -795,9 +795,10 @@ table.materials-table td.cat-cell {
 .rof-compact-text { display: flex; flex-direction: column; min-width: 0; }
 .rof-compact-text strong { font-size: 14px; overflow-wrap: anywhere; }
 .rof-compact-text span { font-size: 12px; color: var(--neutral); }
+.rof-compact-text .rof-compact-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rof-compact button { flex: 0 0 auto; padding: 6px 12px; font-size: 12px; }
 .rof-side .mode-toggle-btn { padding: 7px 9px; font-size: 12px; white-space: nowrap; }
-.rof-trim-mode { margin-bottom: 10px; }
+.rof-trim-mode { margin-bottom: 8px; }
 /* Layered tray (Setup, "In layers") */
 .rof-process-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; }
 .rof-process-head label { margin: 0; }
@@ -860,13 +861,13 @@ table.materials-table td.cat-cell {
 .rof-knife-row .field input { width: 100%; }
 .rof-knife-row button { flex: 0 0 auto; margin-left: auto; min-width: 96px; }
 #rof-knife-info { margin-bottom: 4px; }
-.rof-cutter-pick { margin-bottom: 10px; }
+.rof-cutter-pick { margin-bottom: 8px; }
 .rof-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .rof-cutter-row { display: flex; gap: 8px; align-items: center; }
 .rof-cutter-row select { flex: 1 1 auto; min-width: 0; }
 .rof-cutter-row button { flex: 0 0 auto; padding: 7px 10px; font-size: 12px; white-space: nowrap; }
 .rof-cutter-row button.active { border-color: var(--sage); background: var(--sage-fill); box-shadow: inset 0 0 0 1px var(--sage); }
-.rof-cutter-info { margin-top: 6px; padding: 6px 10px; border: 1px solid var(--line); border-left: 3px solid var(--sage); border-radius: 8px; background: var(--surface); }
+.rof-cutter-info { margin-top: 5px; padding: 5px 10px; border: 1px solid var(--line); border-left: 3px solid var(--sage); border-radius: 8px; background: var(--surface); }
 .rof-cutter-info-grams { font-size: 13px; margin-bottom: 1px; }
 .rof-cutter-info-grams strong { font-size: 15px; }
 .rof-cutter-info-line { font-size: 12px; color: var(--ink); line-height: 1.5; }

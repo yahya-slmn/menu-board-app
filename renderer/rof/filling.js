@@ -89,10 +89,45 @@ function fillingTexture(look, seed) {
 }
 
 // A material for a filling sheet. The sheet's geometry carries a `uv` in cm / 10 (sheet.js), so one texture
-// tile covers 10 cm.
-export function createFillingMaterial(look, { seed = 3 } = {}) {
+// tile covers 10 cm. `scrap` ({ mask, plan }: the bottom sheet's cutter mask texture and the tray's plan bounds) lets
+// the top of a layered stack show the Trim step's cut lines and red, hatched scrap exactly as the dough shader does
+// (dough.js, the SHEET block) -- same mask, same plan coordinates. Its uniforms sit in userData.uniforms, where
+// sheet.js's setHasCuts / setScrapHighlight reach them (uRise / uBake are there only so its setters have a target).
+export function createFillingMaterial(look, { seed = 3, scrap = null } = {}) {
   const map = fillingTexture(look, seed);
   const mat = new THREE.MeshStandardMaterial({ map, roughness: 0.82, metalness: 0 });
+  const uniforms = { uRise: { value: 0 }, uBake: { value: 0 }, uScrap: { value: 1 }, uHasCuts: { value: 0 } };
+  if (scrap) {
+    const p = scrap.plan;
+    uniforms.uMask = { value: scrap.mask };
+    uniforms.uMaskBox = { value: new THREE.Vector4(p.minX, p.minY, p.maxX - p.minX, p.maxY - p.minY) };
+    mat.customProgramCacheKey = () => 'rof-filling-v1-scrap';
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec2 vPlanF;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPlanF = position.xz;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          varying vec2 vPlanF;
+          uniform sampler2D uMask; uniform vec4 uMaskBox; uniform float uScrap, uHasCuts;
+          float fMaskAt(vec2 q) { return texture2D(uMask, (vec2(q.x, -q.y) - uMaskBox.xy) / uMaskBox.zw).r; }`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+          {
+            float m = fMaskAt(vPlanF), e = 0.3;
+            float edge = clamp(abs(fMaskAt(vPlanF + vec2(e, 0.0)) - m) + abs(fMaskAt(vPlanF - vec2(e, 0.0)) - m) + abs(fMaskAt(vPlanF + vec2(0.0, e)) - m) + abs(fMaskAt(vPlanF - vec2(0.0, e)) - m), 0.0, 1.0);
+            diffuseColor.rgb *= 1.0 - 0.4 * edge * uHasCuts;
+            float scrapK = (1.0 - m) * uScrap * uHasCuts;
+            float tri = abs(fract((vPlanF.x + vPlanF.y) * 0.45) - 0.5) * 2.0;
+            float hatch = smoothstep(0.42, 0.58, tri);
+            vec3 red = vec3(0.80, 0.16, 0.13);
+            vec3 tinted = mix(diffuseColor.rgb * 0.9, red, 0.6);
+            tinted = mix(tinted, red * 0.55, hatch * 0.5);
+            diffuseColor.rgb = mix(diffuseColor.rgb, tinted, scrapK);
+          }`);
+    };
+  }
+  mat.userData.uniforms = uniforms;
   const dispose = mat.dispose.bind(mat);
   mat.dispose = () => { map.dispose(); dispose(); };
   return mat;

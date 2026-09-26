@@ -336,7 +336,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the cells into rectangle "cuts" (`materialId: 'knife'`, not items: nothing to drag) that go through the SAME mask / scrap
   / portion / PDF code as cutter pieces (`allCuts`). Dotted lines = preview; Cut -> solid lines, inputs locked, One portion /
   Export PDF enabled (`cutsReady`); Edit cuts unlocks. Default size = the square giving `recipes.portion_weight_grams`, else 5 cm.
-- Layered tray (Phase 4, in progress; L1 plan, L2 pre-bake, L3 fill, L4 bake -- 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
+- Layered tray (Phase 4, done 2026-09-26: L1 plan, L2 pre-bake, L3 fill, L4 bake, L5 trim / portion / PDF): with 2+ processes ticked, Setup's "One dough | In layers"
   choice (beside the process label; One dough = the unchanged mixed flow). In layers: an ordered stack (top drawn first),
   each layer its OWN wastage (session copy), density (1.05 dough / 1.0 no-flour filling, est., editable), "Pre-bake alone
   first" (bottom only), and above it "All of it" or "Up to a height" (ASSEMBLY height from the tray floor, ruler-checkable).
@@ -371,7 +371,18 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   base back to `prebakeSheetState`. The pre-bake and the final bake each keep their own oven settings / doneness / rise
   correction (`useLayerBake` swaps `layerBakeSlots`); `layerFinalRise` feeds the plan's after-bake heights. The final
   bake's oven settings are pre-filled from the methods of the layers that bake in it, top first. After it the
-  cross-section shows "BAKED (EST.)" heights. Trim -> waits for L5.
+  cross-section shows "BAKED (EST.)" heights.
+  L5 (Trim, portion, PDF): `prepareLayerTrim` sets `sheetInfo` to describe the STACK (`layered: true`; sessionGrams = its
+  baked grams per tray, every layer through its own Baking Waste; rawGrams; assembled thicknessCm; `stackHMul` =
+  riseForHeight(assembled, baked est.), so measurePortion's cut height IS the stack's baked height; per-layer heights /
+  colours / kind), and everything in Trim (cutter / knife readouts, summary, scrap, portion view, PDF) reads it unchanged.
+  `bakingLoss` for a stack = baked / raw grams ("Raw before baking (all layers)"). In 3D the top of the stack (`stackTopY`)
+  carries the knife lines, scrap flags / hover and the cutter ghost; the filling material shares the base sheet's cutter
+  mask, so the red hatched scrap and cut lines show on the filling (`createFillingMaterial({ scrap })`). The portion view
+  draws one slab per layer (`desc.layers`; dough layers in crust colours, fillings in theirs). PDF: `buildLayerPdfData` --
+  Layers (raw -> baked per tray, wastage, "not used" / "short" as their own lines, never waste), Stack & cuts, One portion,
+  Waste (each layer's planned Baking Waste beside the measured scrap), Baking (pre-bake and final bake). Prints on one A4.
+  The layered tray is complete (L1-L5); Shape & Place and muffin trays stay single-dough only.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.

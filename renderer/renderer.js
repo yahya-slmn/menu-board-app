@@ -11149,7 +11149,7 @@ function renderRecipeOnFireView(main) {
       renderTrayStepPanel();
       return;
     }
-    if (target === 'bake' && layersActive()) { startLayerBakeFlow(); return; } // forward from 'fill' -- same as "Bake ->"
+    if (target === 'bake' && layersActive() && rofStep !== 'trim') { startLayerBakeFlow(); return; } // forward from 'fill' -- same as "Bake ->"
     if (target === 'bake') {
       if (rofStep === 'trim') { // backward, Sheet & Trim -- same as "<- Back to Bake"
         rofGame.disarmCutter(); rofGame.clearCutters();
@@ -11162,7 +11162,7 @@ function renderRecipeOnFireView(main) {
     }
     if (target === 'prebake') { backToPrebake(); return; }                   // backward from 'fill' -- same as "<- Pre-bake"
     if (target === 'fill') { if (rofStep === 'bake') backToFill(); else startFillFlow({ fromPrebake: true }); return; } // "<- Fill" / "Fill ->"
-    if (target === 'trim') { goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
+    if (target === 'trim') { if (layersActive() && !prepareLayerTrim()) return; goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
   }
 
   function renderTrayStepPanel() {
@@ -11280,7 +11280,7 @@ function renderRecipeOnFireView(main) {
         ? `In layers: ${layerOrder.map(id => procs.find(p => String(p.localId) === id)).filter(Boolean).map(p => escHtml(p.name || '(untitled process)')).join(', then ')}`
         : `${procs.map(p => p.name || '(untitled process)').join(' + ')} &middot; Net ${roundNice(bakeSnapshot.netWeight)} g`;
     recipeCompactEl.innerHTML = `
-      <div class="rof-compact-text"><strong>${selectedRecipe.name}</strong><span>${detail}</span></div>
+      <div class="rof-compact-text"><strong>${selectedRecipe.name}</strong><span class="rof-compact-detail" title="${escHtml(detail.replace(/<[^>]+>/g, '').replace(/&middot;/g, '·').replace(/&amp;/g, '&'))}">${detail}</span></div>
       <button type="button" class="secondary" id="rof-compact-change">Change</button>`;
     document.getElementById('rof-compact-change').addEventListener('click', () => {
       recipeEditing = true;
@@ -11650,6 +11650,12 @@ function renderRecipeOnFireView(main) {
   // raw dough it started from is that weight put back through the Baking Waste: portion / (1 - baking %). Every waste row named
   // like "baking" counts (they combine, each taking its % off what is left); a recipe without one has no baking loss to add back.
   function bakingLoss() {
+    // A layered tray: each layer's own Baking Waste is already in the stack's baked grams; the stack as a whole went
+    // in at rawGrams and came out at sessionGrams.
+    if (sheetInfo?.layered) {
+      const retention = sheetInfo.rawGrams > 0 ? sheetInfo.sessionGrams / sheetInfo.rawGrams : 1;
+      return { found: retention < 0.9999, retention, usable: retention > 0.001, layered: true };
+    }
     const rows = combinedWastes.filter(w => /baking/i.test(w.name || ''));
     if (rows.length === 0) return { found: false };
     const retention = rows.reduce((acc, w) => acc * (1 - Math.min(Math.max(parseFloat(w.percent) || 0, 0), 100) / 100), 1);
@@ -11661,7 +11667,7 @@ function renderRecipeOnFireView(main) {
     return [
       { key: 'weight', label: 'Portion weight (finished)', value: `${P.fmtGrams(finishedGrams)} g` },
       b.found && b.usable
-        ? { key: 'raw', label: 'Raw dough before baking', value: `${P.fmtGrams(finishedGrams / b.retention)} g`, est: true }
+        ? { key: 'raw', label: b.layered ? 'Raw before baking (all layers)' : 'Raw dough before baking', value: `${P.fmtGrams(finishedGrams / b.retention)} g`, est: true }
         : { key: 'raw', label: 'Before baking', value: 'no Baking Waste' },
     ];
   }
@@ -11707,8 +11713,12 @@ function renderRecipeOnFireView(main) {
   // view and by the Trim panel's readout for the chosen cutter, before any is placed.
   function cutPortionFor(shapeType, dims) {
     const model = effectiveRiseModel(), fp = bakeSnapshot.footprint;
-    const thicknessCm = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
-    const desc = { kind: 'cut', shapeType, dims, thicknessCm, hMul: model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
+    // A layered tray: the piece is the whole stack -- its assembled height rising to the estimated baked height (the
+    // `hMul` that does exactly that), drawn as one slab per layer; its grams are its share of the stack's baked grams.
+    const lay = !!sheetInfo.layered;
+    const thicknessCm = lay ? sheetInfo.thicknessCm : sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+    const desc = { kind: 'cut', shapeType, dims, thicknessCm, hMul: lay ? sheetInfo.stackHMul : model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
+    if (lay) desc.layers = sheetInfo.layers.map(l => ({ heightCm: l.finalH, kind: l.kind, color: l.color, topColor: l.topColor }));
     const m = window.RofGame.measurePortion(desc);
     return { desc, m, grams: (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams };
   }
@@ -11722,8 +11732,18 @@ function renderRecipeOnFireView(main) {
     if (g.data.shapeType === 'round') rows.push({ label: 'Diameter', value: cmText(m.diameterCm) });
     else if (g.data.shapeType === 'rectangular') rows.push({ label: 'Length', value: cmText(m.lengthCm) }, { label: 'Width', value: cmText(m.widthCm) });
     else rows.push({ label: 'Base', value: cmText(m.baseCm) }, { label: 'Height', value: cmText(m.triHeightCm) });
-    rows.push({ label: 'Thickness', value: cmText(m.heightCm, true), est: true });
-    rows.push({ label: 'Before rising', value: `${Math.round(m.rawHeightCm * 100) / 10} mm` });
+    if (sheetInfo.layered) {
+      // Each layer's height (estimated after the bake), the whole piece, and the stack as it was assembled.
+      // A pre-baked base she measured is exact (it doesn't rise again); every other layer's height is an estimate.
+      sheetInfo.layers.forEach(l => rows.push(l.prebake && l.measured
+        ? { label: l.name, value: cmText(l.finalH), note: 'measured' }
+        : { label: l.name, value: cmText(l.finalH, true), est: true }));
+      rows.push({ label: 'Total height', value: cmText(m.heightCm, true), est: true });
+      rows.push({ label: 'Assembled', value: cmText(m.rawHeightCm) });
+    } else {
+      rows.push({ label: 'Thickness', value: cmText(m.heightCm, true), est: true });
+      rows.push({ label: 'Before rising', value: `${Math.round(m.rawHeightCm * 100) / 10} mm` });
+    }
     rows.push({ label: 'Area', value: `${roundNice(m.areaCm2)} cm²` });
     const choices = groups.length > 1 ? groups.map(x => ({ key: x.key, label: cutName(x.key) })) : null;
     const name = cutName(g.key);
@@ -11771,6 +11791,7 @@ function renderRecipeOnFireView(main) {
     const fmtPct = (v) => `${Math.round(v * 10) / 10}%`;
     const desc = portionDesc();
     if (!desc) throw new Error(sheetMode ? `${notReadyText()}.` : 'Nothing to print yet.');
+    if (sheetMode && sheetInfo?.layered) return buildLayerPdfData(desc);
 
     // Dough and wastage: every waste on the recipe, each against the running total just before it.
     const dough = [{ label: 'Process', value: procs.map(p => p.name || '(untitled process)').join(' + ') }, { label: 'Total quantity', value: g(total) }];
@@ -11856,6 +11877,87 @@ function renderRecipeOnFireView(main) {
       footnotes: [
         'est. = estimated from the rise model, not measured.',
         'Portion weights are finished weights: the recipe’s Net Weight already has its wastes, Baking Waste included, taken off. Raw dough before baking is the portion weight put back through the Baking Waste.',
+        'Generated by Menu Board · Recipe on Fire.',
+      ],
+    };
+  }
+  // The PDF for a layered tray. Same page and footnotes as the single dough; the Dough section becomes Layers (each
+  // layer's grams per tray raw and baked, its own wastage, how much of it went in -- "not used" stays its own line,
+  // never waste), the stack's heights, the cut, one portion, the waste figures side by side, and both bakes.
+  function buildLayerPdfData(desc) {
+    const P = window.RofGame.portions, g = (n) => `${P.fmtGrams(n)} g`, cm = (v) => window.RofGame.fmtCm(v);
+    const est = (v) => window.RofGame.fmtCm(v, true);
+    const fmtPct = (v) => `${Math.round(v * 10) / 10}%`;
+    const info = sheetInfo, plan = info.plan, fp = bakeSnapshot.footprint, m = bakeSnapshot.material;
+    const n = plan.trays;
+    const layers = [];
+    [...info.layers].reverse().forEach((l, idx) => {
+      const row = plan.layers.find(x => x.key === l.key) || {};
+      const cfg = layerCfg.get(row.key) || {};
+      const where = row.index === 0 ? `bottom${row.prebake ? ', pre-baked alone first' : ''}` : row.fill?.kind === 'height' ? `up to ${cm(row.targetCm)}` : 'all of it';
+      layers.push({ label: `${l.name} (${where})`, value: `${g(l.rawPerTray)} raw → ${g(l.finishedPerTray)} baked`,
+        note: (cfg.wastes || []).length ? (cfg.wastes || []).map(w => `${w.name || 'Waste'} ${fmtPct(parseFloat(w.percent) || 0)}`).join(', ') : 'no wastage' });
+      if (row.notUsedTotal > 0) layers.push({ label: `${l.name}, not used`, value: g(row.notUsedTotal), emphasis: true, note: `of ${g(row.availableRawTotal)} in the recipe, for ${n} tray${n === 1 ? '' : 's'}; not waste` });
+      if (row.shortTotal > 0) layers.push({ label: `${l.name}, short`, value: g(row.shortTotal), emphasis: true, note: `the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed` });
+    });
+    layers.push({ label: 'Per tray', value: `${g(plan.rawPerTrayGrams)} raw → ${g(plan.finishedPerTrayGrams)} baked`, note: n > 1 ? `This batch fills ${n} trays; the figures are for one.` : '' });
+
+    const tray = [{ label: 'Tray', value: m.name }, { label: 'Size', value: formatMaterialDimensions(m) }];
+    if (fp.areaCm2) tray.push({ label: 'Interior area', value: `${Math.round(fp.areaCm2)} cm²` });
+    if (fp.usableHeightCm) tray.push({ label: 'Usable height', value: `${roundNice(fp.usableHeightCm)} cm` });
+
+    const groups = cutGroups();
+    const make = { title: trimMode === 'knife' ? 'Stack & knife cuts' : 'Stack & cutters', rows: [
+      { label: 'Assembled height', value: cm(plan.assembledHeightCm), note: info.layers.map(l => `${l.name} ${cm(l.rawH)}`).join(' · ') },
+      { label: 'After the final bake', value: est(plan.finalHeightEstCm), est: true },
+      ...groups.map(x => {
+        const area = cutterUnitAreaCm2(x.data.shapeType, x.data.dims);
+        return { label: `${x.n} × ${cutName(x.key)}`, value: `${g((area / fp.areaCm2) * info.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
+      }),
+      { label: 'Pieces cut', value: String(cutterList.length) },
+      { label: 'Tray used by pieces', value: `${Math.round((trimScrap().covered / fp.areaCm2) * 100)}%` },
+    ] };
+
+    const portionRows = desc.rows.map(r => (r.key === 'weight'
+      ? { label: 'Portion weight (baked, all layers)', value: r.value }
+      : r.key === 'raw' ? { ...r, note: 'the portion\u2019s share of the stack\u2019s raw grams' } : { ...r }));
+
+    // Waste: each layer's own Baking Waste (planned, recipe) and the scrap measured from the cut -- separate bases.
+    const waste = [];
+    info.layers.forEach((l) => {
+      const bw = ((layerCfg.get(l.key) || {}).wastes || []).filter(w => /baking/i.test(w.name || ''));
+      waste.push(bw.length
+        ? { label: `Baking Waste, ${l.name} (recipe)`, value: `${bw.map(w => fmtPct(parseFloat(w.percent) || 0)).join(' + ')} · ${g(l.rawPerTray - l.finishedPerTray)}`, note: `of its ${g(l.rawPerTray)} per tray` }
+        : { label: `Baking Waste, ${l.name}`, value: 'not in this process' });
+    });
+    const sc = trimScrap();
+    waste.push({ label: 'Scrap, measured (cut layout)', value: `${g(sc.grams)} · ${fmtPct(sc.pct)}`, emphasis: true, note: `of the ${g(info.sessionGrams)} baked stack on this tray` });
+
+    // Both bakes: the pre-bake's settings were set aside when she left it (layerBakeSlots.prebake); the final bake's are live.
+    const bakeRows = (label, params, doneness) => [
+      { label: `${label}: oven`, value: params?.temp ? `${params.temp} °${params.unit}` : 'not set' },
+      { label: `${label}: time`, value: params?.time ? `${params.time} min` : 'not set' },
+      { label: `${label}: doneness`, value: doneLabelOf(doneness || 'golden') },
+    ];
+    const pre = info.layers[0]?.prebake ? layerBakeSlots.prebake : null;
+    const baking = [...(pre ? bakeRows('Pre-bake', pre.params, pre.doneness) : []), ...bakeRows(pre ? 'Final bake' : 'Bake', bakeParams, bakeDoneness)];
+    const unconfirmed = [pre?.params, bakeParams].some(bp => bp && bp.source === 'method' && !bp.confirmed);
+
+    const cap = rofGame.capturePortion(desc);
+    return {
+      title: selectedRecipe.name, subtitle: `In layers: ${info.layers.map(l => l.name).join(', then ')} · Sheet & Trim`,
+      dateText: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      image: cap ? { dataUrl: cap.dataUrl } : null,
+      sections: [
+        { title: 'Layers', rows: layers }, { title: 'Tray', rows: tray },
+        make, { title: 'One portion', rows: portionRows },
+        { title: 'Waste', rows: waste, note: 'Planned (recipe) and measured are different figures with different bases; shown side by side, never combined. Filling not used is not waste.' },
+        { title: 'Baking', rows: baking, note: unconfirmed ? 'Oven and time were read from the recipe method and have not been confirmed.' : '' },
+      ],
+      footnotes: [
+        'est. = estimated from the rise model, not measured.',
+        'Weights are baked (finished) weights: each layer through its own Baking Waste. Raw is what goes into the tray, before baking.',
+        'Heights are from the tray floor, as a ruler shows them when the tray is assembled.',
         'Generated by Menu Board · Recipe on Fire.',
       ],
     };
@@ -11953,7 +12055,7 @@ function renderRecipeOnFireView(main) {
         ${ready ? `<button type="button" class="primary" id="rof-start-bake-btn">${pre ? 'Start pre-bake' : 'Start baking'}</button>`
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
                    ${pre ? '<button type="button" class="primary" id="rof-fill-btn">Fill →</button>'
-                   : lay ? '<button type="button" class="primary" id="rof-trim-btn" disabled title="Trimming a layered tray is the next part of this build.">Trim →</button>'
+                   : lay ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                    : sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                                : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
@@ -12000,7 +12102,10 @@ function renderRecipeOnFireView(main) {
       bakeState = 'ready';
       renderTrayStepPanel();
     });
-    document.getElementById('rof-trim-btn')?.addEventListener('click', () => { goToRofStep('trim'); renderTrayStepPanel(); });
+    document.getElementById('rof-trim-btn')?.addEventListener('click', () => {
+      if (lay && !prepareLayerTrim()) return;
+      goToRofStep('trim'); renderTrayStepPanel();
+    });
     if (pre && !ready) wirePrebakeMeasure();
     if (lay) refreshLayerBakeView();
     document.getElementById('rof-fill-btn')?.addEventListener('click', () => startFillFlow({ fromPrebake: true }));
@@ -12186,6 +12291,38 @@ function renderRecipeOnFireView(main) {
     useLayerBake(null);
     goToRofStep('fill');
     renderTrayStepPanel();
+  }
+
+  // ---- Layers: Trim -------------------------------------------------------------------------------------
+  // Trim cuts through the whole stack. The Trim step, the cutter / knife readouts, the portion view and the PDF all
+  // read sheetInfo; for a layered tray it describes the stack: its baked grams per tray (every layer through its own
+  // Baking Waste -- finished weights, like everywhere else), its raw grams, the assembled and estimated baked heights,
+  // and each layer's height and colours for the portion's slab.
+  const mixHex = (a, b, t) => `#${new window.THREE.Color(a).lerp(new window.THREE.Color(b), t).getHexString()}`;
+  function prepareLayerTrim() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok || !rofGame) return false;
+    const plan = r.plan, L = window.RofGame.layers;
+    const top = rofGame.getFills();
+    sheetInfo = {
+      layered: true,
+      sessionGrams: plan.finishedPerTrayGrams, rawGrams: plan.rawPerTrayGrams, sessions: plan.trays,
+      thicknessCm: plan.assembledHeightCm, finalCm: plan.finalHeightEstCm,
+      stackHMul: L.riseForHeight(plan.assembledHeightCm, plan.finalHeightEstCm),
+      layers: plan.layers.map((row, i) => {
+        const p = r.procs.find(x => String(x.localId) === row.key);
+        const look = window.RofGame.fillingLook(riseRowsOf(p));
+        const dough = i === 0 || hasFlour(p);
+        return {
+          key: row.key, name: row.name, finalH: row.finalHeightEstCm, rawH: row.assemblyHeightCm, kind: dough ? 'dough' : 'filling',
+          color: look.base, topColor: i === plan.layers.length - 1 && !dough ? mixHex(look.base, '#9a6534', 0.4) : look.base,
+          rawPerTray: row.rawPerTray, finishedPerTray: row.finishedPerTray, prebake: row.prebake, measured: row.measured,
+        };
+      }),
+      plan,
+    };
+    rofGame.setSheetGrams(plan.finishedPerTrayGrams);
+    return top.length > 0;
   }
 
   // ---- Layers: the Fill step -----------------------------------------------------------------------
@@ -12411,7 +12548,7 @@ function renderRecipeOnFireView(main) {
     const n = rofGame.planCutters({ shapeType: c.shape_type, dims, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
     const scrapPct = fp.areaCm2 > 0 ? Math.max(0, 1 - (n * m.areaCm2) / fp.areaCm2) * 100 : 0;
     el.innerHTML = `
-      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} raw dough (est.)` : 'no Baking Waste'}</div>
+      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} ${sheetInfo.layered ? 'raw, all layers' : 'raw dough'} (est.)` : 'no Baking Waste'}</div>
       <div class="rof-cutter-info-line">${cutterPieceSizeLabel(c.shape_type, dims)} &middot; about ${cmText(m.heightCm, true)} thick (est.)</div>
       <div class="rof-cutter-info-line">${n > 0
         ? `Auto-arrange would cut <strong>${n}</strong> on this tray &middot; scrap about ${P.fmtGrams(scrapPct)}%`
@@ -12464,10 +12601,10 @@ function renderRecipeOnFireView(main) {
     const util = footprint.areaCm2 > 0 ? Math.round((covered / footprint.areaCm2) * 100) : 0;
     const scrap = trimScrap();
     el.innerHTML = `
-      <div class="computed-value-box" style="margin:12px 0;">
+      <div class="computed-value-box" style="margin:6px 0; padding:8px 12px;">
         ${[...groups.values()].map(g => `<div style="font-size:13px; margin-bottom:2px;"><strong>${g.n}</strong> × ${cutterPieceSizeLabel(g.data.shapeType, g.data.dims)} &middot; ${roundNice((g.area / footprint.areaCm2) * grams)} g each</div>`).join('')}
-        <div style="margin-top:8px; padding-top:6px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);"><strong>${cutterList.length}</strong> pieces &nbsp;·&nbsp; <strong>${util}%</strong> utilization</div>
-        <div class="rof-leftover" style="margin-top:4px; font-size:12.5px;">Scrap: ${window.RofGame.portions.fmtGrams(scrap.grams)} g &middot; ${window.RofGame.portions.fmtGrams(scrap.pct)}% of the dough on this tray</div>
+        <div style="margin-top:5px; padding-top:4px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);"><strong>${cutterList.length}</strong> pieces &nbsp;·&nbsp; <strong>${util}%</strong> utilization</div>
+        <div class="rof-leftover" style="margin-top:4px; font-size:12.5px;">Scrap: ${window.RofGame.portions.fmtGrams(scrap.grams)} g &middot; ${window.RofGame.portions.fmtGrams(scrap.pct)}% of the ${sheetInfo.layered ? 'stack' : 'dough'} on this tray</div>
       </div>`;
   }
 
@@ -12531,7 +12668,7 @@ function renderRecipeOnFireView(main) {
       ? 'No trim: the pieces fill the tray exactly.'
       : `Trim: ${rect ? (sides.join(', ') || 'none') : 'the edges outside the whole pieces'} &middot; ${P.fmtGrams(sc.grams)} g (${P.fmtGrams(sc.pct)}%)`;
     el.innerHTML = `
-      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} raw dough (est.)` : 'no Baking Waste'}</div>
+      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} ${sheetInfo.layered ? 'raw, all layers' : 'raw dough'} (est.)` : 'no Baking Waste'}</div>
       <div class="rof-cutter-info-line">${cutterPieceSizeLabel('rectangular', dims)} &middot; about ${cmText(m.heightCm, true)} thick (est.)</div>
       <div class="rof-cutter-info-line"><strong>${plan.count}</strong> pieces${rect ? ` (${plan.cols} across × ${plan.rows} down) &middot; tray inside ${Math.round(W * 10) / 10} × ${Math.round(H * 10) / 10} cm` : ''}</div>
       <div class="rof-cutter-info-line${sc.grams < 0.05 ? '' : ' rof-leftover'}">${trimText}</div>`;
@@ -12599,7 +12736,7 @@ function renderRecipeOnFireView(main) {
         </div>
         <div class="rof-cutter-info" id="rof-cutter-info" role="status" hidden></div>
       </div>
-      <div style="display:flex; gap:8px; margin-bottom:6px;">
+      <div style="display:flex; gap:8px; margin-bottom:2px;">
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
       </div>`;
