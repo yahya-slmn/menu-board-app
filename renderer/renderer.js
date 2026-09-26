@@ -10358,6 +10358,8 @@ function renderRecipeOnFireView(main) {
   const layerCfg = new Map();      // localId -> { density, prebake, fillKind: 'all' | 'height', targetCm, wastes }
   let layerTraysManual = null;     // her tray count, or null = from the bottom layer's Fill Weight (else 1)
   let layerPlan = null;            // the last planLayers() result
+  let layerOpenId = null;          // the one open layer card (null = open one waiting for a height; '' = all folded)
+  let processListOpen = false;     // layers mode folds the process checklist to one line; "Change" opens it
   const layersActive = () => doughLayout === 'layers' && selectedProcesses().length >= 2;
 
   // ---- Step-wizard state -----------------------------------------------------------------------
@@ -10491,7 +10493,10 @@ function renderRecipeOnFireView(main) {
     workingProcesses = [];
     selectedProcessLocalIds = new Set();
     combinedWastes = [];
-    doughLayout = 'mixed'; layerOrder = []; layerCfg.clear(); layerTraysManual = null; layerPlan = null;
+    doughLayout = 'mixed'; layerOrder = []; layerCfg.clear(); layerTraysManual = null; layerPlan = null; layerOpenId = null; processListOpen = false;
+    document.getElementById('rof-process-collapsed')?.remove();
+    const procLabel = document.querySelector('#rof-process-field .rof-process-head label');
+    if (procLabel) procLabel.hidden = false;
     rofStep = 'setup';
     reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
@@ -10571,19 +10576,50 @@ function renderRecipeOnFireView(main) {
     slot.querySelectorAll('[data-rof-layout]').forEach(b => b.addEventListener('click', () => {
       if (doughLayout === b.dataset.rofLayout) return;
       doughLayout = b.dataset.rofLayout;
-      if (doughLayout === 'layers') rofMode = 'sheet'; // layers are Sheet & Trim only
+      if (doughLayout === 'layers') { rofMode = 'sheet'; processListOpen = false; } // layers are Sheet & Trim only
       renderProcessSummary();
       if (rofStep === 'setup') renderTrayStepPanel();
     }));
+    syncProcessListCollapse();
+  }
+  // In layers mode the process checklist folds into one line (the layer cards below name every process), so the
+  // stack and its plan fit on screen; "Change" opens it again.
+  function syncProcessListCollapse() {
+    let bar = document.getElementById('rof-process-collapsed');
+    const head = document.querySelector('#rof-process-field .rof-process-head');
+    const label = head?.querySelector('label');
+    const fold = layersActive() && !processListOpen;
+    processChecksEl.hidden = fold;
+    if (label) label.hidden = fold; // the folded line takes the label's place on the head row
+    if (!layersActive()) { bar?.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'rof-process-collapsed';
+      bar.className = 'rof-process-collapsed';
+      head.insertBefore(bar, document.getElementById('rof-layout-slot'));
+    }
+    const n = selectedProcesses().length;
+    bar.innerHTML = fold
+      ? `<span>${n} of ${workingProcesses.length} processes</span><button type="button" class="rof-link-btn" id="rof-process-toggle" aria-expanded="false" aria-controls="rof-process-checks">Change</button>`
+      : `<button type="button" class="rof-link-btn" id="rof-process-toggle" aria-expanded="true" aria-controls="rof-process-checks">Done</button>`;
+    bar.querySelector('#rof-process-toggle').addEventListener('click', () => {
+      processListOpen = !processListOpen;
+      syncProcessListCollapse();
+      document.getElementById('rof-process-toggle')?.focus();
+    });
   }
   // The rise estimate reads flour-based doughs; with no flour it falls back to a standard DOUGH rise, which is
   // wrong for a filling (egg / cheese / vegetables set and puff a little). So a flourless layer uses the
   // filling estimate from layers.js instead.
-  function layerHMul(p) {
-    const m = window.RofGame.estimateRise(p.ingredientRows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit })));
-    return m.identified ? m.hMul : window.RofGame.layers.FILLING_H_MUL;
+  const riseRowsOf = (p) => p.ingredientRows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit }));
+  function layerRiseModel(p) {
+    const m = window.RofGame.estimateRise(riseRowsOf(p));
+    if (m.identified) return m;
+    return { ...m, hMul: window.RofGame.layers.FILLING_H_MUL, wMul: 1, proofShare: 0.05,
+      notes: ['No flour: a filling -- it sets and puffs a little (about +10%) rather than rising like a dough.'] };
   }
-  const hasFlour = (p) => window.RofGame ? window.RofGame.estimateRise(p.ingredientRows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit }))).identified : true;
+  const layerHMul = (p) => layerRiseModel(p).hMul;
+  const hasFlour = (p) => window.RofGame ? window.RofGame.estimateRise(riseRowsOf(p)).identified : true;
   // Keeps layerOrder / layerCfg in step with the ticked processes: new ones go on top (in recipe order), each
   // with a fresh session copy of its own wastage and a density default (dough if flour is found, else filling).
   function syncLayers(procs) {
@@ -10597,35 +10633,53 @@ function renderRecipeOnFireView(main) {
         density: hasFlour(p) ? (L ? L.DENSITY_DOUGH : 1.05) : (L ? L.DENSITY_FILLING : 1.0),
         prebake: false, fillKind: 'all', targetCm: '',
         wastes: p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })),
+        riseScale: 1,          // the pre-bake's rise slider (bottom layer)
+        measuredCm: '',        // her measured height after the pre-bake (bottom layer)
+        measuredForGrams: null, // ...for this many grams per tray; a different amount makes it stale
       });
     });
     return layerOrder.map(id => procs.find(p => String(p.localId) === id));
   }
-  // One card per layer, bottom first: quantity, density (est., editable), its own wastage, and either
-  // "Pre-bake alone first" (bottom) or how much goes in (above): all of it, or up to a height.
+  // The short line a folded layer card shows.
+  function layerSummaryText(p, i) {
+    const c = layerCfg.get(String(p.localId));
+    const qty = `${roundNice(sumIngredientQuantities(p.ingredientRows))} g`;
+    if (i === 0) return `${qty}${c.prebake ? ' · pre-bake' : ''}`;
+    return `${qty} · ${c.fillKind === 'height' ? (parseFloat(c.targetCm) > 0 ? `up to ${parseFloat(c.targetCm)} cm` : 'up to … cm') : 'all of it'}`;
+  }
+  // One card per layer, top first (as they sit in the tray). Folded, a card is one line: its number, name, a short
+  // summary and the move buttons; opened (one at a time), it has the density (est., editable), its own wastage, and
+  // either "Pre-bake alone first" (bottom) or how much goes in (above): all of it, or up to a height.
   function renderLayerSummary(procs) {
     const ordered = syncLayers(procs), n = ordered.length;
+    // A layer waiting for a height opens by itself.
+    if (layerOpenId == null) {
+      const waiting = ordered.find((p, i) => { const c = layerCfg.get(String(p.localId)); return i > 0 && c.fillKind === 'height' && !(parseFloat(c.targetCm) > 0); });
+      if (waiting) layerOpenId = String(waiting.localId);
+    }
     summaryEl.innerHTML = `
       <div class="rof-layers" role="list" aria-label="Layers, top first, as they sit in the tray">
         ${ordered.map((p, i) => [p, i]).reverse().map(([p, i]) => {
-          const id = String(p.localId), c = layerCfg.get(id);
-          const pos = i === 0 ? 'bottom' : i === n - 1 ? 'top' : '';
+          const id = String(p.localId), c = layerCfg.get(id), open = layerOpenId === id;
+          const name = escHtml(p.name || '(untitled process)');
           return `
-          <div class="rof-layer" role="listitem" data-layer="${id}">
+          <div class="rof-layer ${open ? 'open' : ''}" role="listitem" data-layer="${id}">
             <div class="rof-layer-head">
-              <span class="rof-layer-num" aria-hidden="true">${i + 1}</span>
-              <strong dir="auto">${escHtml(p.name || '(untitled process)')}</strong>
-              ${pos ? `<span class="rof-layer-pos">${pos}</span>` : ''}
-              <span class="rof-layer-qty">${roundNice(sumIngredientQuantities(p.ingredientRows))} g</span>
-              <button type="button" class="icon-btn" data-layer-move="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${escHtml(p.name || 'layer')} down" title="Move down">↓</button>
-              <button type="button" class="icon-btn" data-layer-move="1" ${i === n - 1 ? 'disabled' : ''} aria-label="Move ${escHtml(p.name || 'layer')} up" title="Move up">↑</button>
+              <button type="button" class="rof-layer-toggle" data-layer-toggle aria-expanded="${open}" aria-controls="rof-layer-body-${id}">
+                <span class="rof-layer-num" aria-hidden="true">${i + 1}</span>
+                <span class="rof-layer-name" dir="auto" title="${name}">${name}</span>
+                <span class="rof-layer-sum">${escHtml(layerSummaryText(p, i))}</span>
+                ${i === 0 ? '<span class="rof-sr-only">, bottom layer</span>' : ''}
+              </button>
+              <button type="button" class="icon-btn" data-layer-move="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${name} down" title="Move down">↓</button>
+              <button type="button" class="icon-btn" data-layer-move="1" ${i === n - 1 ? 'disabled' : ''} aria-label="Move ${name} up" title="Move up">↑</button>
             </div>
-            <div class="rof-layer-line">
-              <label class="rof-layer-density">Density <input type="number" min="0.1" max="3" step="0.01" value="${c.density}" data-layer-density aria-label="Density of ${escHtml(p.name || 'this layer')}, g per cm³" /> g/cm³ <span class="rof-layer-est">est.</span></label>
+            <div class="rof-layer-line" id="rof-layer-body-${id}" ${open ? '' : 'hidden'}>
+              <label class="rof-layer-density">Density <input type="number" min="0.1" max="3" step="0.01" value="${c.density}" data-layer-density aria-label="Density of ${name}, g per cm³" /> g/cm³ <span class="rof-layer-est">est.</span></label>
               ${i === 0
                 ? `<label class="rof-layer-check"><input type="checkbox" data-layer-prebake ${c.prebake ? 'checked' : ''} /> Pre-bake alone first</label>`
                 : `<span class="rof-layer-fill">
-                     <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${escHtml(p.name || 'this layer')} goes in">
+                     <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
                        <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? '' : 'active'}" data-layer-fill="all" aria-pressed="${c.fillKind !== 'height'}">All of it</button>
                        <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? 'active' : ''}" data-layer-fill="height" aria-pressed="${c.fillKind === 'height'}">Up to a height</button>
                      </span>
@@ -10643,6 +10697,16 @@ function renderRecipeOnFireView(main) {
     wireLayoutToggle();
     summaryEl.querySelectorAll('.rof-layer').forEach(card => {
       const id = card.dataset.layer, c = layerCfg.get(id);
+      const refreshSum = () => {
+        const i = layerOrder.indexOf(id), p = selectedProcesses().find(x => String(x.localId) === id);
+        const el = card.querySelector('.rof-layer-sum');
+        if (el && p) el.textContent = layerSummaryText(p, i);
+      };
+      card.querySelector('[data-layer-toggle]').addEventListener('click', () => {
+        layerOpenId = layerOpenId === id ? '' : id; // '' = all folded on purpose (null would re-open a waiting layer)
+        renderLayerSummary(selectedProcesses());
+        summaryEl.querySelector(`[data-layer="${id}"] [data-layer-toggle]`)?.focus();
+      });
       card.querySelectorAll('[data-layer-move]').forEach(b => b.addEventListener('click', () => {
         const i = layerOrder.indexOf(id), j = i + Number(b.dataset.layerMove);
         if (j < 0 || j >= layerOrder.length) return;
@@ -10652,14 +10716,14 @@ function renderRecipeOnFireView(main) {
         (same && !same.disabled ? same : summaryEl.querySelector(`[data-layer="${id}"] [data-layer-move="${-Number(b.dataset.layerMove)}"]`))?.focus();
       }));
       card.querySelector('[data-layer-density]').addEventListener('input', (e) => { c.density = e.target.value; updateLayerPlan(); });
-      card.querySelector('[data-layer-prebake]')?.addEventListener('change', (e) => { c.prebake = e.target.checked; updateLayerPlan(); });
+      card.querySelector('[data-layer-prebake]')?.addEventListener('change', (e) => { c.prebake = e.target.checked; refreshSum(); renderStepHeader(); updateLayerPlan(); });
       card.querySelectorAll('[data-layer-fill]').forEach(b => b.addEventListener('click', () => {
         if (c.fillKind === b.dataset.layerFill) return;
         c.fillKind = b.dataset.layerFill;
         renderLayerSummary(selectedProcesses());
         summaryEl.querySelector(`[data-layer="${id}"] ${c.fillKind === 'height' ? '[data-layer-target]' : `[data-layer-fill="all"]`}`)?.focus();
       }));
-      card.querySelector('[data-layer-target]')?.addEventListener('input', (e) => { c.targetCm = e.target.value; updateLayerPlan(); });
+      card.querySelector('[data-layer-target]')?.addEventListener('input', (e) => { c.targetCm = e.target.value; refreshSum(); updateLayerPlan(); });
       renderLayerWasteRows(card, c);
     });
     updateSetupPreview();
@@ -10705,24 +10769,18 @@ function renderRecipeOnFireView(main) {
     });
   }
 
-  // The plan under the tray picker: trays in the batch, then per layer what goes in each tray and to what
-  // height, what's left unused (or short), the assembled height and the estimated height after baking.
-  function updateLayerPlan() {
-    const el = document.getElementById('rof-fill-summary');
-    if (!el || !layersActive()) return;
+  // The layer plan for the current choices and tray (layers.js planLayers), with what the screens around it need:
+  // the ordered processes and where the tray count came from. Null without a (sheet) tray. A measured pre-bake
+  // height counts only for the amount of base it was measured on.
+  function computeLayerPlan() {
     const material = bakeSnapshot?.material, fp = bakeSnapshot?.footprint;
-    if (!material || !fp) { el.innerHTML = ''; layerPlan = null; return; }
-    if (material.shape_type === 'muffin_tray') {
-      layerPlan = null;
-      el.innerHTML = '<div class="computed-value-box rof-layer-plan"><div class="rof-leftover">Layers need a sheet tray -- a muffin tray has a portion per cup already.</div></div>';
-      return;
-    }
+    if (!layersActive() || !material || !fp || material.shape_type === 'muffin_tray') return null;
     const procs = syncLayers(selectedProcesses());
-    const L = window.RofGame.layers, P = window.RofGame.portions;
-    const base = procs[0];
+    const L = window.RofGame.layers;
+    const base = procs[0], baseCfg = layerCfg.get(String(base.localId));
     const baseFillWeight = base.materialId != null && String(base.materialId) === String(material.id) ? Number(base.materialFillWeightGrams) || null : null;
     const baseFillElsewhere = !baseFillWeight && base.materialId != null && Number(base.materialFillWeightGrams) > 0;
-    layerPlan = L.planLayers({
+    const run = (measured) => L.planLayers({
       tray: { areaCm2: fp.areaCm2, usableHeightCm: fp.usableHeightCm },
       trays: { fillWeightGrams: baseFillWeight, manualCount: layerTraysManual },
       layers: procs.map((p, i) => {
@@ -10731,12 +10789,37 @@ function renderRecipeOnFireView(main) {
           key: String(p.localId), name: p.name || '(untitled process)',
           totalGrams: sumIngredientQuantities(p.ingredientRows), wastes: c.wastes, density: parseFloat(c.density),
           prebake: i === 0 && c.prebake,
+          measuredHeightCm: i === 0 ? measured : null,
           fill: i === 0 || c.fillKind !== 'height' ? { kind: 'all' } : { kind: 'height', targetCm: parseFloat(c.targetCm) },
-          hMul: layerHMul(p),
+          hMul: layerHMul(p) * (i === 0 ? (Number(c.riseScale) || 1) : 1),
         };
       }),
     });
-    const plan = layerPlan, g = (v) => `${P.fmtGrams(v)} g`, cm = (v) => `${Math.round(v * 100) / 100} cm`;
+    let plan = run(null);
+    const measured = parseFloat(baseCfg.measuredCm);
+    const baseRaw = plan.layers[0]?.rawPerTray;
+    const measuredStale = measured > 0 && baseCfg.measuredForGrams != null && baseRaw != null && Math.abs(baseRaw - baseCfg.measuredForGrams) > 0.5;
+    if (measured > 0 && !measuredStale) plan = run(measured);
+    return { plan, procs, base, baseCfg, baseFillWeight, baseFillElsewhere, measuredStale };
+  }
+
+  // The plan under the tray picker: trays in the batch, then per layer what goes in each tray and to what
+  // height, what's left unused (or short), the assembled height and the estimated height after baking.
+  function updateLayerPlan() {
+    const el = document.getElementById('rof-fill-summary');
+    if (!el || !layersActive()) return;
+    const material = bakeSnapshot?.material;
+    if (!material || !bakeSnapshot?.footprint) { el.innerHTML = ''; layerPlan = null; syncLayerContinue(); return; }
+    if (material.shape_type === 'muffin_tray') {
+      layerPlan = null;
+      el.innerHTML = '<div class="computed-value-box rof-layer-plan"><div class="rof-leftover">Layers need a sheet tray -- a muffin tray has a portion per cup already.</div></div>';
+      syncLayerContinue();
+      return;
+    }
+    const r = computeLayerPlan();
+    layerPlan = r.plan;
+    const L = window.RofGame.layers, P = window.RofGame.portions;
+    const plan = r.plan, g = (v) => `${P.fmtGrams(v)} g`, cm = (v) => `${Math.round(v * 100) / 100} cm`;
     if (!el.querySelector('#rof-layer-trays')) {
       el.innerHTML = `
         <div class="computed-value-box rof-layer-plan">
@@ -10752,47 +10835,70 @@ function renderRecipeOnFireView(main) {
       });
     }
     const traysIn = el.querySelector('#rof-layer-trays');
-    if (document.activeElement !== traysIn) traysIn.value = plan.ok || plan.trays ? plan.trays : '';
-    const auto = L.trayCount({ baseRawGrams: plan.layers[0]?.availableRawTotal || 0, fillWeightGrams: baseFillWeight });
-    el.querySelector('#rof-layer-trays-src').textContent = plan.traySource === 'manual'
-      ? (auto.source === 'fillWeight' ? `your count (Fill Weight gives ${auto.count}; clear to use it)` : 'your count')
-      : plan.traySource === 'fillWeight' ? `from ${escHtml(base.name || 'the bottom layer')}'s Fill Weight, ${g(baseFillWeight)} per tray`
-      : baseFillElsewhere ? `no Fill Weight for this tray (the recipe's is for another tray) -- type a count` : 'no Fill Weight saved -- type a count';
+    if (document.activeElement !== traysIn) traysIn.value = plan.trays || '';
+    const auto = L.trayCount({ baseRawGrams: plan.layers[0]?.availableRawTotal || 0, fillWeightGrams: r.baseFillWeight });
+    const src = el.querySelector('#rof-layer-trays-src');
+    src.textContent = plan.traySource === 'manual' ? 'your count'
+      : plan.traySource === 'fillWeight' ? `from Fill Weight (${g(r.baseFillWeight)})`
+      : r.baseFillElsewhere ? 'Fill Weight is for another tray' : 'no Fill Weight saved';
+    src.title = plan.traySource === 'manual'
+      ? (auto.source === 'fillWeight' ? `The bottom layer's Fill Weight gives ${auto.count}. Clear the box to use it.` : 'Clear the box to go back to 1.')
+      : plan.traySource === 'fillWeight' ? `${g(plan.layers[0].availableRawTotal)} of ${escHtml(r.base.name || 'the bottom layer')} at ${g(r.baseFillWeight)} per tray, split evenly.`
+      : 'Type how many trays this batch fills.';
     const body = el.querySelector('#rof-layer-plan-body');
     if (!plan.ok) {
       body.innerHTML = plan.errors.map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('');
       syncLayerContinue();
       return;
     }
-    const n = plan.trays;
+    // One line per layer, top first like the cards: name | raw grams per tray | where it sits. Then the whole tray.
     body.innerHTML = `
-      ${plan.layers.map(r => {
-        const heightTxt = r.prebake
-          ? `${cm(r.rawHeightCm)} raw, pre-baked to ${cm(r.assemblyHeightCm)} ${r.measured ? '(measured)' : '<span class="rof-layer-est">est.</span>'}`
-          : `${cm(r.bottomCm)} → ${cm(r.topCm)}`;
-        let use = '';
-        if (r.fill.kind === 'height' && r.index > 0) {
-          use = r.shortTotal > 0
-            ? `<div class="rof-leftover rof-layer-note">Short by ${g(r.shortTotal)}: the recipe has ${g(r.availableRawTotal)} for ${g(r.neededTotal)} needed. ${n === 1
-                ? `All of it reaches ${cm(r.heightIfAllUsedCm)}.`
-                : `It fills ${r.fullTraysAtTarget} of ${n} trays to ${cm(r.targetCm)}, or all ${n} to ${cm(r.heightIfAllUsedCm)}.`}</div>`
-            : r.notUsedTotal > 0
-              ? `<div class="rof-layer-note">Not used on ${n === 1 ? 'this tray' : `these ${n} trays`}: <strong>${g(r.notUsedTotal)}</strong> of ${g(r.availableRawTotal)} &middot; all of it would reach ${cm(r.heightIfAllUsedCm)}</div>`
-              : '';
-        }
-        return `<div class="rof-layer-row"><strong dir="auto">${escHtml(r.name)}</strong> ${g(r.rawPerTray)} per tray &middot; ${heightTxt}</div>${use}`;
-      }).join('')}
-      <div class="rof-layer-total">Assembled <strong>${cm(plan.assembledHeightCm)}</strong> &middot; after the final bake about ${cm(plan.finalHeightEstCm)} <span class="rof-layer-est">est.</span></div>
-      <div class="rof-layer-row">Per tray ${g(plan.rawPerTrayGrams)} raw → ${g(plan.finishedPerTrayGrams)} after Baking Waste</div>
+      <div class="rof-plan-grid" role="table" aria-label="Each layer per tray: raw grams and the height it sits at">
+        ${[...plan.layers].reverse().map(row => `
+          <div class="rof-plan-r" role="row"><span role="cell" class="rof-plan-name" dir="auto" title="${escHtml(row.name)}">${escHtml(row.name)}</span>
+            <span role="cell">${g(row.rawPerTray)}</span>
+            <span role="cell" title="${row.prebake ? `${cmFmt(row.rawHeightCm)} raw before the pre-bake` : ''}">${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}${row.prebake ? (row.measured ? ' measured' : ' <span class="rof-layer-est">est.</span>') : ''}</span></div>`).join('')}
+        <div class="rof-plan-r rof-plan-t" role="row"><span role="cell">Per tray (raw)</span><span role="cell" title="${g(plan.finishedPerTrayGrams)} after Baking Waste">${g(plan.rawPerTrayGrams)}</span>
+          <span role="cell">${cm(plan.assembledHeightCm)} <span class="rof-layer-est" title="Estimated height after the final bake">(≈${cm(plan.finalHeightEstCm)} baked)</span></span></div>
+      </div>
+      ${plan.layers.map(row => layerUseHtml(row, plan.trays)).join('')}
+      ${r.measuredStale ? '<div class="rof-leftover rof-layer-note">The measured pre-bake height was for a different amount of base -- using the estimate.</div>' : ''}
       ${plan.warnings.filter(w => !/short by/.test(w)).map(w => `<div class="rof-leftover rof-layer-note">${escHtml(w)}</div>`).join('')}`;
     syncLayerContinue();
   }
-  // Phase L1: the plan is all there is. Baking a layered tray (pre-bake, fill, bake, trim) is the next phases'.
+  const cmFmt = (v) => `${Math.round(v * 100) / 100} cm`;
+  // A layer's height in the plan: a pre-baked base shows its raw and pre-baked heights; the rest, where they sit.
+  function layerHeightText(row) {
+    return row.prebake
+      ? `${cmFmt(row.rawHeightCm)} raw, pre-baked to ${cmFmt(row.assemblyHeightCm)} ${row.measured ? '(measured)' : '<span class="rof-layer-est">est.</span>'}`
+      : `${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}`;
+  }
+  // For a layer filled up to a height: what's not used, or how short it is (and how far it does reach).
+  function layerUseHtml(row, n) {
+    if (!(row.fill.kind === 'height' && row.index > 0)) return '';
+    const g = (v) => `${window.RofGame.portions.fmtGrams(v)} g`;
+    if (row.shortTotal > 0) {
+      return `<div class="rof-leftover rof-layer-note">Short by ${g(row.shortTotal)}: the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed. ${n === 1
+        ? `All of it reaches ${cmFmt(row.heightIfAllUsedCm)}.`
+        : `It fills ${row.fullTraysAtTarget} of ${n} trays to ${cmFmt(row.targetCm)}, or all ${n} to ${cmFmt(row.heightIfAllUsedCm)}.`}</div>`;
+    }
+    if (row.notUsedTotal > 0) {
+      // Named only when more than one layer is filled to a height (else the plan's one such layer is clear).
+      const named = (layerPlan?.layers || []).filter(x => x.fill.kind === 'height' && x.index > 0).length > 1;
+      return `<div class="rof-layer-note">${named ? `<span dir="auto">${escHtml(row.name)}</span> not used` : 'Not used'}: <strong>${g(row.notUsedTotal)}</strong> of ${g(row.availableRawTotal)} <span class="rof-layer-est">· all of it: ${cmFmt(row.heightIfAllUsedCm)}</span></div>`;
+    }
+    return '';
+  }
+  // Continue in layers mode: to the Pre-bake when the bottom layer is pre-baked. Without a pre-bake the next step
+  // is Fill, which isn't built yet (phase L3).
   function syncLayerContinue() {
     const btn = document.getElementById('rof-continue-btn');
     if (!btn || !layersActive()) return;
-    btn.disabled = true;
-    btn.title = 'Baking a layered tray is not built yet -- this plan shows the numbers.';
+    const bottom = layerOrder[0] && layerCfg.get(layerOrder[0]);
+    const ok = !!(layerPlan && layerPlan.ok);
+    btn.disabled = !ok || !bottom?.prebake;
+    btn.textContent = bottom?.prebake ? 'Pre-bake →' : 'Continue →';
+    btn.title = !ok ? 'Fix the plan first.' : bottom?.prebake ? '' : 'Without a pre-bake the next step is Fill, which is not built yet.';
   }
 
   // Rebuilds the combined waste rows -- called on structural change only (initial summary render,
@@ -10991,7 +11097,14 @@ function renderRecipeOnFireView(main) {
     { key: 'place', label: '2. Shape & Place' },
     { key: 'bake', label: '3. Bake' },
   ];
-  const rofStepLabels = () => (rofMode === 'shape' ? ROF_STEP_LABELS_SHAPE : ROF_STEP_LABELS_SHEET);
+  // Layers (Sheet & Trim): Setup -> Pre-bake (when the bottom layer is pre-baked) -> Fill -> Bake -> Trim.
+  function layerStepLabels() {
+    const bottom = layerOrder[0] && layerCfg.get(layerOrder[0]);
+    const keys = ['setup', ...(bottom?.prebake ? ['prebake'] : []), 'fill', 'bake', 'trim'];
+    const NAME = { setup: 'Setup', prebake: 'Pre-bake', fill: 'Fill', bake: 'Bake', trim: 'Trim' };
+    return keys.map((key, i) => ({ key, label: `${i + 1}. ${NAME[key]}` }));
+  }
+  const rofStepLabels = () => (rofMode === 'shape' ? ROF_STEP_LABELS_SHAPE : layersActive() ? layerStepLabels() : ROF_STEP_LABELS_SHEET);
 
   function renderStepHeader() {
     const stepsEl = document.getElementById('rof-steps');
@@ -11050,7 +11163,7 @@ function renderRecipeOnFireView(main) {
     panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', stepLabel.replace(/^\d+\.\s*/, ''));
     if (rofStep === 'setup') renderSetupPanel(panel);
     else if (rofStep === 'place') renderPlaceStepPanel(panel);
-    else if (rofStep === 'bake') renderBakeStepPanel(panel);
+    else if (rofStep === 'bake' || rofStep === 'prebake') renderBakeStepPanel(panel);
     else if (rofStep === 'trim') renderTrimStepPanel(panel);
     syncPreviewMode();
     syncRecipeBlock();
@@ -11060,7 +11173,7 @@ function renderRecipeOnFireView(main) {
     panel.innerHTML = `
       <div class="generate-controls" style="margin-bottom:12px;">
         <div class="field" style="max-width:none;">
-          <label>Tray / Pan</label>
+          <label for="rof-material-select" id="rof-material-label">Tray / Pan</label>
           <select id="rof-material-select" class="builder-select">
             <option value="">— Select a tray —</option>
           </select>
@@ -11080,13 +11193,14 @@ function renderRecipeOnFireView(main) {
     const hintEl = document.getElementById('rof-mode-hint');
     const layered = layersActive();
     if (layered) {
-      // Layers are Sheet & Trim only (for now): the toggle has one answer, so it gives way to a line saying so.
+      // Layers are Sheet & Trim only (for now): the method has one answer, and the step pills already read
+      // Pre-bake / Fill / Bake / Trim, so the Method field steps aside.
       rofMode = 'sheet';
-      const toggle = document.getElementById('rof-mode-toggle');
-      toggle.hidden = true;
-      toggle.closest('.field').querySelector('label').textContent = 'Method: Sheet & Trim';
+      document.getElementById('rof-mode-toggle').closest('.field').hidden = true;
+      // ...and the tray picker's label is read out but not shown ("— Select a tray —" says what it is), so the stack
+      // and its plan fit beside the stage.
+      document.getElementById('rof-material-label').classList.add('rof-sr-only');
     }
-    if (layered) hintEl.hidden = true; // "Method: Sheet & Trim" says it
     const showModeHint = () => {
       hintEl.textContent = rofMode === 'shape'
           ? 'Pieces placed by hand, baked as placed.'
@@ -11104,7 +11218,7 @@ function renderRecipeOnFireView(main) {
       lastMaterialId = e.target.value || null;
       updateSetupPreview();
     });
-    document.getElementById('rof-continue-btn').addEventListener('click', () => (rofMode === 'shape' ? startPlacementFlow() : startSheetFlow()));
+    document.getElementById('rof-continue-btn').addEventListener('click', () => (rofMode === 'shape' ? startPlacementFlow() : layered ? startPrebakeFlow() : startSheetFlow()));
     reloadMaterials();
     populateMaterialSelect();
   }
@@ -11144,7 +11258,9 @@ function renderRecipeOnFireView(main) {
     const procs = selectedProcesses();
     const detail = inSetup || !bakeSnapshot
       ? RECIPE_SOURCE_LABELS[source]
-      : `${procs.map(p => p.name || '(untitled process)').join(' + ')} &middot; Net ${roundNice(bakeSnapshot.netWeight)} g`;
+      : layersActive()
+        ? `In layers: ${layerOrder.map(id => procs.find(p => String(p.localId) === id)).filter(Boolean).map(p => escHtml(p.name || '(untitled process)')).join(', then ')}`
+        : `${procs.map(p => p.name || '(untitled process)').join(' + ')} &middot; Net ${roundNice(bakeSnapshot.netWeight)} g`;
     recipeCompactEl.innerHTML = `
       <div class="rof-compact-text"><strong>${selectedRecipe.name}</strong><span>${detail}</span></div>
       <button type="button" class="secondary" id="rof-compact-change">Change</button>`;
@@ -11410,9 +11526,9 @@ function renderRecipeOnFireView(main) {
   // ---- Oven temperature and bake time (session-only; printed on the PDF) ------------------------------
   const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const methodTextOfSelected = () => selectedProcesses().map(p => collectTextListFieldValue(p, makeProcessMethodCfg(p))).filter(Boolean).join('\n');
-  function prefillBakeParams() {
+  function prefillBakeParams(methodText = methodTextOfSelected()) {
     if (bakeParams.touched) return; // the chef's own entry is never overwritten
-    const r = window.RofGame.parseBakeParams(methodTextOfSelected());
+    const r = window.RofGame.parseBakeParams(methodText);
     bakeParams = {
       temp: r.temp ? r.temp.value : '', unit: r.temp ? r.temp.unit : 'C', time: r.time ? r.time.value : '',
       source: r.temp || r.time ? 'method' : '', confirmed: !(r.temp || r.time), snippet: r.snippet || '', touched: false,
@@ -11485,7 +11601,8 @@ function renderRecipeOnFireView(main) {
     bakeState = 'done';
     lastAnnouncedPhase = null;
     rofGame.announce('Baked.');
-    if (rofStep === 'bake') renderTrayStepPanel();
+    if (rofStep === 'prebake') onPrebakeDone();
+    if (rofStep === 'bake' || rofStep === 'prebake') renderTrayStepPanel();
   }
   const BAKE_PHASE_LABEL = { proof: 'Proofing', oven: 'In the oven', out: 'Coming out' };
   let lastAnnouncedPhase = null;
@@ -11775,6 +11892,7 @@ function renderRecipeOnFireView(main) {
 
   function renderBakeStepPanel(panel) {
     const sheetMode = rofMode === 'sheet';
+    const pre = rofStep === 'prebake'; // Layers: the bottom layer baked alone first (same panel, its own dough)
     const doneLabel = { light: 'Light', golden: 'Golden', dark: 'Dark' }[bakeDoneness];
     if (bakeState === 'baking') {
       panel.innerHTML = `
@@ -11787,7 +11905,7 @@ function renderRecipeOnFireView(main) {
     }
     const ready = bakeState === 'ready';
     panel.innerHTML = `
-      ${ready ? '' : `<h3 style="margin-bottom:8px;">Baked · ${doneLabel}</h3>`}
+      ${ready ? (pre ? '<h3 style="margin-bottom:6px;">Pre-bake the base alone</h3>' : '') : `<h3 style="margin-bottom:8px;">${pre ? 'Pre-baked' : 'Baked'} · ${doneLabel}</h3>`}
       ${ready ? `<ul class="rof-rise-notes">${(riseModel?.notes || []).map(n => `<li>${n}</li>`).join('')}</ul>
       <div class="rof-row-field">
         <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label>
@@ -11801,13 +11919,14 @@ function renderRecipeOnFireView(main) {
         </div>
       </div>` : ''}
       ${bakeParamsHtml()}
-      <div id="rof-place-summary">${sheetMode ? sheetSummaryHtml() : ''}</div>
+      <div id="rof-place-summary">${pre ? prebakeSummaryHtml(ready) : sheetMode ? sheetSummaryHtml() : ''}</div>
       ${ready || sheetMode ? '' : '<div class="rof-export-status" id="rof-export-status" role="status"></div>'}
       <div class="rof-actions">
         <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
-        ${ready ? '<button type="button" class="primary" id="rof-start-bake-btn">Start baking</button>'
+        ${ready ? `<button type="button" class="primary" id="rof-start-bake-btn">${pre ? 'Start pre-bake' : 'Start baking'}</button>`
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
-                   ${sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
+                   ${pre ? '<button type="button" class="primary" id="rof-fill-btn" disabled title="The Fill step is the next part of this build.">Fill →</button>'
+                   : sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                                : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
     panel.querySelectorAll('[data-doneness]').forEach(btn => btn.addEventListener('click', () => {
@@ -11827,8 +11946,10 @@ function renderRecipeOnFireView(main) {
         hint.hidden = riseScale === 1;
       };
       refresh();
-      slider.addEventListener('input', () => { riseScale = slider.value / 100; refresh(); });
-      document.getElementById('rof-rise-reset').addEventListener('click', () => { riseScale = 1; slider.value = 100; refresh(); });
+      // The pre-bake's slider belongs to the bottom layer: it moves that layer's estimated height in the plan.
+      const keep = () => { if (pre) { const c = layerCfg.get(layerOrder[0]); if (c) c.riseScale = riseScale; } };
+      slider.addEventListener('input', () => { riseScale = slider.value / 100; keep(); refresh(); });
+      document.getElementById('rof-rise-reset').addEventListener('click', () => { riseScale = 1; slider.value = 100; keep(); refresh(); });
     }
     document.getElementById('rof-edit-place-btn').addEventListener('click', () => {
       if (sheetMode) { backToSetup(); return; }
@@ -11848,8 +11969,101 @@ function renderRecipeOnFireView(main) {
       renderTrayStepPanel();
     });
     document.getElementById('rof-trim-btn')?.addEventListener('click', () => { goToRofStep('trim'); renderTrayStepPanel(); });
+    if (pre && !ready) wirePrebakeMeasure();
     if (!sheetMode) updatePlaceSummary();
   }
+
+  // ---- Layers: the Pre-bake step -------------------------------------------------------------------
+  // The bottom layer alone, as one sheet: its own rise estimate, its own method's oven settings, the same bake.
+  // Afterwards her measured height (optional) replaces the estimate: the base on screen is set to it, and the
+  // plan for the layers on top (Setup, and Fill next) is worked out from it.
+  let prebakeInfo = null; // { name, gramsPerTray, rawHeightCm, trays } for the base being pre-baked
+  function startPrebakeFlow() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok || !r.baseCfg.prebake) return;
+    const row = r.plan.layers[0];
+    riseModel = layerRiseModel(r.base);
+    riseScale = Number(r.baseCfg.riseScale) || 1;
+    prefillBakeParams(collectTextListFieldValue(r.base, makeProcessMethodCfg(r.base)) || '');
+    prebakeInfo = { name: r.base.name || '(untitled process)', gramsPerTray: row.rawPerTray, rawHeightCm: row.rawHeightCm, trays: r.plan.trays };
+    sheetInfo = null;
+    bakeState = 'ready';
+    goToRofStep('prebake');
+    renderTrayStepPanel();
+    ensureRofGame().then((game) => {
+      if (rofStep !== 'prebake') return;
+      const fp = bakeSnapshot.footprint;
+      // Drawn like the single sheet: at least 3 mm so it reads, at most 70% of the rim.
+      game.beginSheet({ thicknessCm: Math.max(0.3, Math.min(row.rawHeightCm, fp.usableHeightCm * 0.7)) });
+      game.setSheetGrams(row.rawPerTray);
+    });
+  }
+  function prebakeSummaryHtml(ready) {
+    if (!prebakeInfo) return '';
+    const P = window.RofGame.portions, n = prebakeInfo.trays;
+    return `
+      <div class="computed-value-box" style="margin:10px 0; font-weight:normal; font-size:12.5px;">
+        <div><strong>${escHtml(prebakeInfo.name)}</strong> alone &middot; ${P.fmtGrams(prebakeInfo.gramsPerTray)} g per tray &middot; ${cmFmt(prebakeInfo.rawHeightCm)} raw</div>
+        ${ready ? `<div style="margin-top:3px; color:var(--neutral);">${n === 1 ? 'One tray' : `Each of ${n} trays`}; the other layers go on top once it's out.</div>` : ''}
+      </div>`;
+  }
+  // After the pre-bake: the estimate, her measurement, and what it means for the layer above.
+  function prebakeMeasureHtml() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return '';
+    const row = r.plan.layers[0], c = r.baseCfg;
+    const est = window.RofGame.layers.bakedHeight(row.rawHeightCm, layerHMul(r.base) * (Number(c.riseScale) || 1));
+    return `
+      <div class="rof-measure">
+        <div>Estimated after the pre-bake: <strong>${cmFmt(est)}</strong> <span class="rof-layer-est">est.</span></div>
+        <div class="rof-measure-row">
+          <label for="rof-measured-base">Measured height</label>
+          <input id="rof-measured-base" type="number" min="0.05" step="0.05" value="${r.measuredStale ? '' : escHtml(String(c.measuredCm ?? ''))}" placeholder="cm" aria-describedby="rof-measure-help" /> cm
+        </div>
+        <div id="rof-measure-help" class="rof-measure-help">Optional. Measure the baked base with a ruler; the layers on top are planned from it.</div>
+        <div id="rof-measure-effect" class="rof-measure-effect" role="status" aria-live="polite">${prebakeEffectHtml(r)}</div>
+      </div>`;
+  }
+  // What the base height means for the next layer up: how much of it each tray takes, and what's left or short.
+  function prebakeEffectHtml(r) {
+    const row = r.plan.layers[1];
+    if (!row) return '';
+    const g = (v) => `${window.RofGame.portions.fmtGrams(v)} g`;
+    const base = r.plan.layers[0];
+    const head = `On ${base.measured ? 'this measured' : 'the estimated'} ${cmFmt(base.assemblyHeightCm)} base: <strong dir="auto">${escHtml(row.name)}</strong> `;
+    return row.fill.kind === 'height'
+      ? `${head}${g(row.rawPerTray)} per tray to reach ${cmFmt(row.targetCm)}.${layerUseHtml(row, r.plan.trays)}`
+      : `${head}all of it, ${g(row.rawPerTray)} per tray, up to ${cmFmt(row.topCm)}.`;
+  }
+  function wirePrebakeMeasure() {
+    const box = document.getElementById('rof-place-summary');
+    if (!box) return;
+    box.insertAdjacentHTML('beforeend', prebakeMeasureHtml());
+    const input = document.getElementById('rof-measured-base');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      const c = layerCfg.get(layerOrder[0]);
+      const v = parseFloat(input.value);
+      c.measuredCm = v > 0 ? input.value : '';
+      c.measuredForGrams = v > 0 && prebakeInfo ? prebakeInfo.gramsPerTray : null;
+      const r = computeLayerPlan();
+      if (r && r.plan.ok) document.getElementById('rof-measure-effect').innerHTML = prebakeEffectHtml(r);
+      showPrebakeHeight();
+    });
+  }
+  // The base on screen at her measured height (or back to the estimate's rise when the field is cleared).
+  function showPrebakeHeight() {
+    if (!rofGame || !prebakeInfo) return;
+    const c = layerCfg.get(layerOrder[0]);
+    const measured = parseFloat(c?.measuredCm);
+    const L = window.RofGame.layers;
+    const rise = measured > 0
+      ? L.riseForHeight(prebakeInfo.rawHeightCm, measured)
+      : layerHMul(selectedProcesses().find(p => String(p.localId) === layerOrder[0])) * riseScale;
+    rofGame.setDoughState({ rise });
+  }
+  // The bake just finished: a measurement she typed before stays and is shown.
+  function onPrebakeDone() { showPrebakeHeight(); }
 
   // ---- Sheet & Trim: the Trim step -----------------------------------------------------------------
   async function ensureCutterMaterials() {

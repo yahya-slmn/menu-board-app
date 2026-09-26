@@ -43,6 +43,10 @@ export const heightFromGrams = (grams, areaCm2, density) => (areaCm2 > 0 && dens
 export const gramsFromHeight = (heightCm, areaCm2, density) => Math.max(0, heightCm) * areaCm2 * density;
 // Height after baking, from the rise estimate's height multiplier (the sheet's own formula, see sheet.js RISE_H).
 export const bakedHeight = (rawHeightCm, hMul) => rawHeightCm * (1 + RISE_H * (Number(hMul) > 0 ? Number(hMul) : 0));
+// The other way round: the rise that takes a raw sheet to a baked height (what the 3D sheet is set to when she
+// enters a measured height). A measurement below the raw height (docked or weighted pastry) gives a negative rise,
+// so the sheet is drawn thinner, down to a tenth of its raw height at most.
+export const riseForHeight = (rawHeightCm, bakedHeightCm) => (rawHeightCm > 0 && bakedHeightCm > 0 ? Math.max(-0.9 / RISE_H, (bakedHeightCm / rawHeightCm - 1) / RISE_H) : 0);
 
 // How many trays the batch takes.
 //   fillWeightGrams: the bottom layer's saved Fill Weight for this tray (or null); manualCount: her count (or null).

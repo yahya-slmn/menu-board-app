@@ -336,7 +336,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the cells into rectangle "cuts" (`materialId: 'knife'`, not items: nothing to drag) that go through the SAME mask / scrap
   / portion / PDF code as cutter pieces (`allCuts`). Dotted lines = preview; Cut -> solid lines, inputs locked, One portion /
   Export PDF enabled (`cutsReady`); Edit cuts unlocks. Default size = the square giving `recipes.portion_weight_grams`, else 5 cm.
-- Layered tray (Phase 4, in progress; L1 = plan only, 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
+- Layered tray (Phase 4, in progress; L1 plan + L2 pre-bake, 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
   choice (beside the process label; One dough = the unchanged mixed flow). In layers: an ordered stack (top drawn first),
   each layer its OWN wastage (session copy), density (1.05 dough / 1.0 no-flour filling, est., editable), "Pre-bake alone
   first" (bottom only), and above it "All of it" or "Up to a height" (ASSEMBLY height from the tray floor, ruler-checkable).
@@ -345,9 +345,15 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   estimate; trays = her count, else the bottom process's Fill Weight when it is saved for THIS tray, else 1; "up to a height"
   takes only what it needs, the rest is reported "Not used" (or "Short by", with how far it reaches) -- never waste or scrap.
   Est. final height: a pre-baked layer stays, others rise by their own estimate; a flourless layer uses `FILLING_H_MUL`
-  (the rise model's no-flour fallback is a standard DOUGH rise). Sheet & Trim only, no muffin trays. Continue is disabled in
-  layers mode until L2-L5 (pre-bake, fill, bake, trim) exist. Setup with 2+ processes already scrolled at 1280x800 before
-  this (796 px of 724); layers mode is taller still (~1020).
+  (the rise model's no-flour fallback is a standard DOUGH rise). Sheet & Trim only, no muffin trays.
+  L2 (Pre-bake): steps are Setup -> Pre-bake (only when the bottom layer is pre-baked) -> Fill -> Bake -> Trim
+  (`layerStepLabels`). The Pre-bake reuses the Bake panel (`rofStep === 'prebake'`): the base process's own rise model
+  (`layerRiseModel`), its own method's oven settings, a sheet of the base's raw height. After it: the estimate, an optional
+  "Measured height" (`measuredCm`, valid only for the grams per tray it was measured on -- `measuredForGrams`), which sets
+  the base on screen to that height (`riseForHeight`, can go below raw) and replans the layer above. Fill -> is disabled until
+  L3; without a pre-bake Continue waits for Fill too. Layers-mode Setup fits 1280x800 unscrolled: the process checklist folds
+  into the head line ("2 of 2 processes · Change"), layer cards are an accordion (one open; `layerOpenId`), the plan is a
+  compact grid, and the Method field / Tray label step aside. (One-dough Setup with 2+ processes scrolled before this: 796 px.)
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.

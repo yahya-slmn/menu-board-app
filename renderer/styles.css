@@ -802,17 +802,20 @@ table.materials-table td.cat-cell {
 .rof-process-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; }
 .rof-process-head label { margin: 0; }
 .rof-layout-row { display: flex; align-items: center; }
+.rof-process-collapsed { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--neutral); }
 .rof-process-head .mode-toggle { padding: 1px; }
 .rof-process-head .mode-toggle-btn { padding: 1px 8px; font-size: 11.5px; line-height: 1.5; }
-.rof-layers { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; } /* top layer first, as in the tray */
-.rof-layer { border: 1px solid var(--line); border-left: 3px solid var(--sage); border-radius: 8px; padding: 7px 10px; background: var(--surface); }
-.rof-layer-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.rof-layer-head strong { overflow-wrap: anywhere; }
+.rof-layers { display: flex; flex-direction: column; gap: 5px; margin: 0 0 8px; } /* top layer first, as in the tray */
+.rof-layer { border: 1px solid var(--line); border-left: 3px solid var(--sage); border-radius: 8px; padding: 5px 10px; background: var(--surface); }
+.rof-layer-head { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.rof-layer-toggle { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 2px 0; border: 0; background: none; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.rof-layer-toggle::after { content: ''; flex: 0 0 auto; width: 6px; height: 6px; margin: 0 4px 0 2px; border-right: 1.5px solid var(--neutral); border-bottom: 1.5px solid var(--neutral); transform: rotate(-45deg); }
+.rof-layer.open .rof-layer-toggle::after { transform: rotate(45deg); margin-top: -3px; }
+.rof-layer-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rof-layer-sum { margin-left: auto; flex: 0 0 auto; font-size: 12px; color: var(--neutral); white-space: nowrap; }
 .rof-layer-num { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; background: var(--sage-fill); color: var(--ink); font-size: 11.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
-.rof-layer-pos { font-size: 11px; color: var(--neutral); text-transform: uppercase; letter-spacing: .04em; }
-.rof-layer-qty { margin-left: auto; font-size: 12px; color: var(--neutral); white-space: nowrap; }
 .rof-layer-head .icon-btn { padding: 2px 7px; }
-.rof-layer-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 5px; font-size: 12.5px; }
+.rof-layer-line { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 14px; margin-top: 2px; font-size: 12.5px; }
 .rof-layer-line label { display: inline-flex; align-items: center; gap: 5px; margin: 0; font-size: 12.5px; font-weight: normal; }
 .rof-layer-density input { width: 62px; padding: 3px 6px; }
 .rof-layer-fill { display: inline-flex; align-items: center; gap: 6px; }
@@ -822,15 +825,28 @@ table.materials-table td.cat-cell {
 .rof-layer-wastes[open] { flex-basis: 100%; margin-left: 0; }
 .rof-layer-wastes summary { font-size: 12px; color: var(--neutral); cursor: pointer; }
 .rof-layer-est { font-size: 11px; color: var(--neutral); }
-.rof-layer-plan { margin: 0 0 12px; font-size: 12.5px; font-weight: normal; }
+.rof-layer-plan { margin: 0 0 8px; padding: 6px 12px; font-size: 12.5px; font-weight: normal; }
 .rof-layer-plan strong { font-weight: 600; }
-.rof-layer-trays { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12.5px; }
+.rof-layer-trays { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12.5px; white-space: nowrap; }
 .rof-layer-trays label { margin: 0; font-weight: 600; }
 .rof-layer-trays input { width: 64px; padding: 3px 6px; }
 .rof-layer-trays span { color: var(--neutral); font-size: 12px; }
 .rof-layer-row { line-height: 1.55; }
+.rof-plan-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 12px; font-variant-numeric: tabular-nums; }
+.rof-plan-r { display: contents; }
+.rof-plan-r > span { padding: 1px 0; white-space: nowrap; }
+.rof-plan-r > span:nth-child(2) { text-align: right; }
+.rof-plan-name { overflow: hidden; text-overflow: ellipsis; }
+.rof-plan-t > span { border-top: 1px solid #cfdacb; padding-top: 3px; margin-top: 2px; font-weight: 600; }
 .rof-layer-note { font-size: 12px; line-height: 1.45; margin: 1px 0 3px; }
 .rof-layer-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+/* Pre-bake step: the measured height */
+.rof-measure { margin-top: 8px; padding-top: 8px; border-top: 1px solid #cfdacb; }
+.rof-measure-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.rof-measure-row label { margin: 0; font-weight: 600; }
+.rof-measure-row input { width: 76px; padding: 4px 6px; }
+.rof-measure-help { font-size: 11.5px; color: var(--neutral); margin-top: 3px; }
+.rof-measure-effect { margin-top: 6px; line-height: 1.5; }
 .rof-knife-row { display: flex; gap: 8px; align-items: flex-end; }
 .rof-knife-row .field { margin: 0; flex: 0 1 110px; min-width: 0; }
 .rof-knife-row .field input { width: 100%; }
