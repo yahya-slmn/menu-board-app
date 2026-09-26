@@ -465,6 +465,11 @@ export function createRofGame(container, opts = {}) {
     const n = setCutters(res.placements.map(p => ({ shapeType, dims, x: p.x, y: p.y, rot: p.rot, materialId })));
     return { count: n, frameDeg: res.frameDeg, planned: res.placements.length };
   }
+  // How many of a cutter Auto-arrange WOULD place, without placing anything (the Trim panel's preview).
+  function planCutters({ shapeType, dims, marginCm = 0.3, gapCm = 0.2 }) {
+    if (!tray || tray.region.kind === 'cups') return 0;
+    return packCutters({ region: tray.region, shapeType, dims, marginCm, gapCm }).placements.length;
+  }
   function clearCutters() { closePortion({ quiet: true }); cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
   function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); stage.requestRender(); }
   function setSheetGrams(g) { sheetGrams = g; renderFlags(); }
@@ -997,7 +1002,7 @@ export function createRofGame(container, opts = {}) {
   const api = {
     setTray, clearTray, addCutter, addDough, setDoughState, showLookdev, removeItem, clearItems, on,
     beginPlacement, endPlacement, autoArrange, returnAllToBench, playBake, resetBake, setInteractive,
-    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, clearCutters, setScrapHighlight, setSheetGrams,
+    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, planCutters, clearCutters, setScrapHighlight, setSheetGrams,
     getScrap: scrapSummary,
     getCutters: () => cutterItems().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },

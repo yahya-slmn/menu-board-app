@@ -9458,6 +9458,29 @@ const MATERIAL_CATEGORIES = {
   cutter: { label: 'Cutter' },
 };
 
+// Which shape types each category offers in the Materials form, with the label that reads right for it
+// (a "Muffin cutter" or a "Rectangular / Tray" cutter made no sense). Same list is checked by main.js
+// save-material (MATERIAL_CATEGORY_SHAPES there) -- keep the two in step. An existing material saved
+// before this rule keeps its shape as an extra option (see materialShapeOptions).
+const MATERIAL_CATEGORY_SHAPES = {
+  tray_pan: { round: 'Round', rectangular: 'Rectangular / Square', muffin_tray: 'Muffin / Multi-Cavity Tray' },
+  cutter: { round: 'Round', rectangular: 'Square / Rectangle', triangle: 'Triangle' },
+};
+function materialShapeLabel(category, shapeType) {
+  return MATERIAL_CATEGORY_SHAPES[category]?.[shapeType] || MATERIAL_SHAPE_PRESETS[shapeType]?.label || shapeType;
+}
+// [key, label] pairs for the Shape Type dropdown. `keepShape` (the saved shape of the material being
+// edited) stays listed even when it isn't one of the category's shapes, so opening an older material
+// never silently changes it.
+function materialShapeOptions(category, keepShape) {
+  const allowed = MATERIAL_CATEGORY_SHAPES[category] || {};
+  const opts = Object.entries(allowed);
+  if (keepShape && !allowed[keepShape] && MATERIAL_SHAPE_PRESETS[keepShape]) {
+    opts.push([keepShape, `${MATERIAL_SHAPE_PRESETS[keepShape].label} (not a usual ${MATERIAL_CATEGORIES[category]?.label.toLowerCase() || ''} shape)`]);
+  }
+  return opts;
+}
+
 // Display-only grouping label for the Materials list -- see MATERIAL_CATEGORIES' own comment for
 // why this is derived here rather than stored as its own column. Cutters are one flat group
 // (matching how they were requested -- no shape breakdown), trays/pans split by shape_type so
@@ -10391,7 +10414,7 @@ function renderRecipeOnFireView(main) {
             rofGame.setSfx({ pickup: playPickupSound, place: playPlaceSound, refuse: playRefuseSound, arrange: playArrangeSound, bakeAmbience: startBakeAmbience, ding: playDingSound });
             rofGame.on('placement', (state) => { placeNote = ''; updatePlaceSummary(state); });
             rofGame.on('cutters', (list) => { cutterList = list; trimNote = ''; updateTrimSummary(); });
-            rofGame.on('armed', (spec) => { armedCutterId = spec ? spec.materialId : null; syncCutterCards(); });
+            rofGame.on('armed', (spec) => { armedCutterId = spec ? spec.materialId : null; if (spec) lastCutterId = spec.materialId; syncCutterPicker(); });
             rofGame.on('portion', ({ open }) => syncPortionBtn(open));
             resolve(rofGame);
           } catch (err) { reject(err); }
@@ -11229,15 +11252,22 @@ function renderRecipeOnFireView(main) {
     }
     return [...groups.values()];
   }
+  // One piece cut by a cutter of this shape from the current sheet: its measured sizes and finished grams
+  // (its share of the tray's area, of the grams in this tray -- the sheet is uniform). Used by the portion
+  // view and by the Trim panel's readout for the chosen cutter, before any is placed.
+  function cutPortionFor(shapeType, dims) {
+    const model = effectiveRiseModel(), fp = bakeSnapshot.footprint;
+    const thicknessCm = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+    const desc = { kind: 'cut', shapeType, dims, thicknessCm, hMul: model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
+    const m = window.RofGame.measurePortion(desc);
+    return { desc, m, grams: (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams };
+  }
   function portionDescSheet(key) {
     if (!bakeSnapshot || !sheetInfo || !rofGame || cutterList.length === 0) return null;
     const groups = cutGroups();
     const g = groups.find(x => x.key === String(key)) || groups.find(x => x.key === String(lastCutterId)) || groups.sort((a, b) => b.n - a.n)[0];
-    const model = effectiveRiseModel(), P = window.RofGame.portions, fp = bakeSnapshot.footprint;
-    const thicknessCm = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
-    const desc = { kind: 'cut', shapeType: g.data.shapeType, dims: g.data.dims, thicknessCm, hMul: model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
-    const m = window.RofGame.measurePortion(desc);
-    const grams = (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams;
+    const P = window.RofGame.portions;
+    const { desc, m, grams } = cutPortionFor(g.data.shapeType, g.data.dims);
     const mat = cutterMaterials.find(x => String(x.id) === g.key);
     const rows = portionWeightRows(grams);
     if (g.data.shapeType === 'round') rows.push({ label: 'Diameter', value: cmText(m.diameterCm) });
@@ -11521,18 +11551,61 @@ function renderRecipeOnFireView(main) {
     cutterMaterials = (await materialsPromise).filter(m => m.category === 'cutter');
     return cutterMaterials;
   }
-  function syncCutterCards() {
-    document.querySelectorAll('[data-cutter]').forEach(b => { const on = String(b.dataset.cutter) === String(armedCutterId); b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); });
+  // The chosen cutter is lastCutterId (kept after Escape puts it down, so the readout and Auto-arrange still
+  // use it); armedCutterId is whether it is in hand right now for stamping.
+  const chosenCutter = () => cutterMaterials.find(x => String(x.id) === String(lastCutterId)) || null;
+  function syncCutterPicker() {
+    const sel = document.getElementById('rof-cutter-select');
+    if (sel) sel.value = chosenCutter() ? String(lastCutterId) : '';
+    const hand = document.getElementById('rof-cutter-hand-btn');
+    if (hand) {
+      const on = armedCutterId != null;
+      hand.disabled = !chosenCutter();
+      hand.classList.toggle('active', on);
+      hand.setAttribute('aria-pressed', String(on));
+    }
+    updateCutterInfo();
   }
-  function armCutterById(id) {
-    const m = cutterMaterials.find(x => String(x.id) === String(id));
-    if (!m) return;
-    if (String(armedCutterId) === String(id)) { rofGame.disarmCutter(); return; } // click the armed card again to put it down
+  function armCutter(m, { focus = false } = {}) {
     lastCutterId = m.id;
     rofGame.armCutter({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id });
-    // Move focus to the stage so the arrow keys position the cutter and Enter stamps it.
-    rofGame.focusStage();
-    rofGame.announce(`${m.name} picked. Arrow keys move it, Enter stamps it, Escape puts it down.`);
+    // From the button, focus moves to the stage so the arrow keys position the cutter and Enter stamps it.
+    // Not from the dropdown: the arrow keys there are still choosing a cutter.
+    if (focus) rofGame.focusStage();
+    rofGame.announce(`${m.name} picked. Click the sheet to stamp it, or use Auto-arrange. Escape puts it down.`);
+  }
+  function onCutterSelect(id) {
+    const m = cutterMaterials.find(x => String(x.id) === String(id));
+    if (!m) { lastCutterId = null; rofGame.disarmCutter(); syncCutterPicker(); return; }
+    armCutter(m);
+  }
+  function toggleCutterInHand() {
+    const m = chosenCutter();
+    if (!m) return;
+    if (armedCutterId != null) rofGame.disarmCutter();
+    else armCutter(m, { focus: true });
+  }
+  // What ONE piece from the chosen cutter would weigh, and how many Auto-arrange would cut, before anything
+  // is placed -- so a cutter can be reconsidered before it goes across the tray. Same arithmetic as the
+  // portion view (cutPortionFor, portionWeightRows) and the same packer as Auto-arrange (planCutters).
+  function updateCutterInfo() {
+    const el = document.getElementById('rof-cutter-info');
+    if (!el || !bakeSnapshot || !sheetInfo) return;
+    const c = chosenCutter();
+    if (!c) { el.innerHTML = ''; el.hidden = true; return; }
+    el.hidden = false;
+    const P = window.RofGame.portions, dims = materialDimsFromRow(c), fp = bakeSnapshot.footprint;
+    const { m, grams } = cutPortionFor(c.shape_type, dims);
+    if (!(m.areaCm2 > 0)) { el.innerHTML = '<div class="rof-cutter-info-line">This cutter has no size set -- check it in Materials.</div>'; return; }
+    const [weight, raw] = portionWeightRows(grams);
+    const n = rofGame.planCutters({ shapeType: c.shape_type, dims, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
+    const scrapPct = fp.areaCm2 > 0 ? Math.max(0, 1 - (n * m.areaCm2) / fp.areaCm2) * 100 : 0;
+    el.innerHTML = `
+      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} raw dough (est.)` : 'no Baking Waste'}</div>
+      <div class="rof-cutter-info-line">${cutterPieceSizeLabel(c.shape_type, dims)} &middot; about ${cmText(m.heightCm, true)} thick (est.)</div>
+      <div class="rof-cutter-info-line">${n > 0
+        ? `Auto-arrange would cut <strong>${n}</strong> on this tray &middot; scrap about ${P.fmtGrams(scrapPct)}%`
+        : '<span class="rof-leftover">Too big for this tray -- Auto-arrange would cut none.</span>'}</div>`;
   }
 
   // Per-piece weight, count, utilization and waste -- the same area math as before, driven by however
@@ -11582,7 +11655,7 @@ function renderRecipeOnFireView(main) {
   const TRIM_MARGIN_CM = 0.3, TRIM_GAP_CM = 0.2;
   function autoArrangeCutters() {
     const m = cutterMaterials.find(x => String(x.id) === String(armedCutterId ?? lastCutterId));
-    if (!m) { trimNote = 'Pick a cutter first.'; updateTrimSummary(); return; }
+    if (!m) { trimNote = 'Choose a cutter first.'; updateTrimSummary(); return; }
     const res = rofGame.autoArrangeCutters({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
     playArrangeSound();
     rofGame.disarmCutter(); // arranging is a finished action; putting the cutter down also lets you hover the scrap
@@ -11593,8 +11666,15 @@ function renderRecipeOnFireView(main) {
   async function renderTrimStepPanel(panel) {
     if (rofGame) rofGame.setInteractive(true); // the bake switches input off; cutters need it back
     panel.innerHTML = `
-      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Pick a cutter, then click the sheet to stamp it. Drag to move one, scroll to turn it, Delete removes it. Right-drag turns the view.</div>
-      <div class="rof-shape-cards" id="rof-cutter-cards"><div style="font-size:12px; color:var(--neutral);">Loading cutters…</div></div>
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Choose a cutter, then click the sheet to stamp it or use Auto-arrange. Drag to move one, scroll to turn it, Delete removes it. Right-drag turns the view.</div>
+      <div class="rof-cutter-pick">
+        <label for="rof-cutter-select" class="rof-sr-only">Cutter</label>
+        <div class="rof-cutter-row">
+          <select id="rof-cutter-select" disabled><option value="">Loading cutters…</option></select>
+          <button type="button" class="secondary" id="rof-cutter-hand-btn" aria-pressed="false" disabled title="Take the cutter in hand to stamp it on the sheet">Place by hand</button>
+        </div>
+        <div class="rof-cutter-info" id="rof-cutter-info" role="status" hidden></div>
+      </div>
       <div style="display:flex; gap:8px; margin-bottom:6px;">
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
@@ -11613,17 +11693,18 @@ function renderRecipeOnFireView(main) {
       renderTrayStepPanel();
     });
     await ensureCutterMaterials();
-    const cards = document.getElementById('rof-cutter-cards');
-    if (!cards) return; // moved on while the list loaded
-    cards.innerHTML = cutterMaterials.length === 0
-      ? '<div style="font-size:12.5px; color:var(--neutral);">No cutters yet -- add one in Materials.</div>'
-      : cutterMaterials.map(m => `
-        <button type="button" class="rof-shape-card" data-cutter="${m.id}" aria-pressed="false">
-          <span class="rof-shape-name">${m.name}</span>
-          <span class="rof-shape-meta">${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))}</span>
-        </button>`).join('');
-    cards.querySelectorAll('[data-cutter]').forEach(b => b.addEventListener('click', () => armCutterById(b.dataset.cutter)));
-    syncCutterCards();
+    const sel = document.getElementById('rof-cutter-select');
+    if (!sel) return; // moved on while the list loaded
+    if (cutterMaterials.length === 0) {
+      sel.innerHTML = '<option value="">No cutters yet -- add one in Materials</option>';
+    } else {
+      sel.innerHTML = '<option value="">Choose a cutter…</option>' + cutterMaterials.map(m =>
+        `<option value="${m.id}">${escHtml(m.name)} (${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))})</option>`).join('');
+      sel.disabled = false;
+      sel.addEventListener('change', () => onCutterSelect(sel.value));
+      document.getElementById('rof-cutter-hand-btn').addEventListener('click', toggleCutterInHand);
+    }
+    syncCutterPicker();
     updateTrimSummary();
   }
 
@@ -11824,7 +11905,7 @@ async function renderMaterialsListView(main) {
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${label}</td>` : ''}
             <td>${m.code}</td>
             <td>${m.name}</td>
-            <td>${MATERIAL_SHAPE_PRESETS[m.shape_type]?.label || m.shape_type}</td>
+            <td>${materialShapeLabel(m.category, m.shape_type)}</td>
             <td>${formatMaterialDimensions(m)}</td>
             <td>${formatMaterialWeight(m)}</td>
             <td style="text-align:right">
@@ -11878,8 +11959,8 @@ async function renderMaterialFormView(main) {
   }
 
   const currentPhotoSrc = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-  const initialShape = material?.shape_type || 'round';
   const initialCategory = material?.category || 'tray_pan';
+  const initialShape = material?.shape_type || 'round';
 
   main.innerHTML = `
     <div class="topbar">
@@ -11899,9 +11980,7 @@ async function renderMaterialFormView(main) {
       </div>
       <div class="field" style="max-width:240px;">
         <label>Shape Type</label>
-        <select id="mf-shape">
-          ${Object.entries(MATERIAL_SHAPE_PRESETS).map(([key, p]) => `<option value="${key}" ${initialShape === key ? 'selected' : ''}>${p.label}</option>`).join('')}
-        </select>
+        <select id="mf-shape"></select>
       </div>
       <div class="field" style="max-width:200px;">
         <label id="mf-weight-label">Weight (g)</label>
@@ -12025,15 +12104,32 @@ async function renderMaterialFormView(main) {
 
   document.getElementById('mf-weight').addEventListener('input', updateWeightLabel);
 
-  renderDimensionsForShape(initialShape, materialDimsFromRow(material));
+  // Shape Type lists only the chosen Category's shapes (MATERIAL_CATEGORY_SHAPES). The saved shape of the
+  // material being edited is kept as an option while its own category is selected.
+  function fillShapeOptions(category, selected) {
+    const keep = editing && category === material.category ? material.shape_type : null;
+    const opts = materialShapeOptions(category, keep);
+    const pick = opts.some(([k]) => k === selected) ? selected : opts[0][0];
+    document.getElementById('mf-shape').innerHTML = opts.map(([key, label]) => `<option value="${key}" ${pick === key ? 'selected' : ''}>${label}</option>`).join('');
+    return pick;
+  }
+
+  const firstShape = fillShapeOptions(initialCategory, initialShape);
+  renderDimensionsForShape(firstShape, firstShape === initialShape ? materialDimsFromRow(material) : {});
 
   document.getElementById('mf-shape').addEventListener('change', () => {
     renderDimensionsForShape(currentShape(), {});
   });
 
-  // Category doesn't change which dimension fields show (only shape does) -- just re-derives the
-  // 3D preview's floor-or-not, so a plain updatePreview() is enough, no full dimension re-render.
-  document.getElementById('mf-category').addEventListener('change', updatePreview);
+  // A category change re-lists the shapes. If the current shape is still offered it stays, with its typed
+  // dimensions (only the 3D preview's floor-or-not changes); otherwise the first shape of the new list is
+  // chosen and its fields shown empty.
+  document.getElementById('mf-category').addEventListener('change', () => {
+    const before = currentShape();
+    const after = fillShapeOptions(currentCategory(), before);
+    if (after === before) updatePreview();
+    else renderDimensionsForShape(after, {});
+  });
 
   // The preview canvas has no pixel size of its own (CSS gives its wrapper height:300px, width
   // 100%) -- resize once layout has settled, and again if the window itself resizes while this

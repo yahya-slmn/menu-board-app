@@ -325,7 +325,13 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   pointer (red where it can't go), a click on empty sheet stamps one, clicking an existing cutter picks it
   up instead, and unplaceable cutters are dropped rather than overlapped. Per-piece weight / count /
   utilization / waste come from `updateTrimSummary` (share of tray area x grams in the tray);
-  Auto-arrange is `packing.js` (below). Not offered on muffin trays (a portion per cup already).
+  Auto-arrange is `packing.js` (below). Not offered on muffin trays (a portion per cup already). The cutter is ONE dropdown
+  (2026-09-26) plus a "Place by hand" toggle; choosing one shows, before anything is placed, one portion's finished / raw
+  weight, size, estimated thickness and how many Auto-arrange would cut (`updateCutterInfo`: `cutPortionFor`, the same
+  arithmetic as the portion view, and `game.planCutters`, the packer without placing).
+- Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
+  `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
+  muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
 - The old 2D tray canvas and photo-sprite dough flow are gone; the game view is the only tray view. The
   Bake panel (both methods) has a rise override slider (30-160%) scaling the model's height/width
   multipliers -- it applies at bake time only, so raising it above what placement reserved can make

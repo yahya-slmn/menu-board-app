@@ -2960,7 +2960,25 @@ ipcMain.handle('get-material', async (e, id) => {
   return data;
 });
 
+// Shapes each Materials category may use -- mirrors MATERIAL_CATEGORY_SHAPES in renderer.js. An existing
+// material keeps whatever shape it was saved with (the form still offers it), so only a CHANGE to a shape
+// outside the category is refused.
+const MATERIAL_CATEGORY_SHAPES = {
+  tray_pan: ['round', 'rectangular', 'muffin_tray'],
+  cutter: ['round', 'rectangular', 'triangle'],
+};
+
 ipcMain.handle('save-material', async (e, payload) => {
+  const allowedShapes = MATERIAL_CATEGORY_SHAPES[payload.category];
+  if (allowedShapes && !allowedShapes.includes(payload.shapeType)) {
+    let unchanged = false;
+    if (payload.id) {
+      const { data: cur, error: curErr } = await supabase.from('materials').select('category, shape_type').eq('id', payload.id).single();
+      if (curErr) throw supaFail('save-material (check shape)', curErr);
+      unchanged = cur.category === payload.category && cur.shape_type === payload.shapeType;
+    }
+    if (!unchanged) throw new Error(`A ${payload.category === 'cutter' ? 'cutter' : 'tray / pan'} can't have the shape "${payload.shapeType}".`);
+  }
   const fields = {
     name: payload.name,
     category: payload.category ?? null,
