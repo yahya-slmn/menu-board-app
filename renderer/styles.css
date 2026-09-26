@@ -852,6 +852,7 @@ table.materials-table td.cat-cell {
 .rof-plan-name { overflow: hidden; text-overflow: ellipsis; }
 .rof-plan-t > span { border-top: 1px solid #cfdacb; padding-top: 3px; margin-top: 2px; font-weight: 600; }
 .rof-layer-note { font-size: 12px; line-height: 1.45; margin: 1px 0 3px; }
+.rof-layer-note-1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rof-layer-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
 /* Fill step */
 .rof-fill-hint { font-size: 12.5px; color: var(--neutral); margin-bottom: 8px; }

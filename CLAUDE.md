@@ -356,7 +356,9 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   compact grid, and the Method field / Tray label step aside. One dough with 2+ processes (fixed 2026-09-26, was 805 px):
   its summary is a compact list (`.rof-mix-summary`: a row per process, then "Wastage (combined)" beside "total -> Net" on
   one row; the same span ids refreshComputedNumbers fills), and the One dough / In layers toggle sits in the gaps around
-  the process label line (negative margin) instead of making it taller. One process keeps the original box.
+  the process label line (negative margin) instead of making it taller. One process keeps the original box. A short filling
+  in Setup's layer plan is one line (`layerUseHtml(..., { compact: true })`, the full sentence as its tooltip); Pre-bake and
+  Fill show the full sentence. Every layers-mode state, the short-filling ones included, fits 1280x800.
   L3 (Fill): from the Pre-bake ("Fill ->") or straight from Setup (no pre-bake: the base goes in raw). Each layer above the
   base: All of it / Up to a height (the SAME layerCfg as Setup's cards), grams per tray, not used / short, rim warning.
   3D: `game.setFillLayers([{ key, heightCm, look }])` -- each layer a sheet mesh (sheet.js `makeMaterial`) with a

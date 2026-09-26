@@ -10894,7 +10894,7 @@ function renderRecipeOnFireView(main) {
         <div class="rof-plan-r rof-plan-t" role="row"><span role="cell">Per tray (raw)</span><span role="cell" title="${g(plan.finishedPerTrayGrams)} after Baking Waste">${g(plan.rawPerTrayGrams)}</span>
           <span role="cell">${cm(plan.assembledHeightCm)} <span class="rof-layer-est" title="Estimated height after the final bake">(≈${cm(plan.finalHeightEstCm)} baked)</span></span></div>
       </div>
-      ${plan.layers.map(row => layerUseHtml(row, plan.trays)).join('')}
+      ${plan.layers.map(row => layerUseHtml(row, plan.trays, { compact: true })).join('')}
       ${r.measuredStale ? '<div class="rof-leftover rof-layer-note">The measured pre-bake height was for a different amount of base -- using the estimate.</div>' : ''}
       ${plan.warnings.filter(w => !/short by/.test(w)).map(w => `<div class="rof-leftover rof-layer-note">${escHtml(w)}</div>`).join('')}`;
     syncLayerContinue();
@@ -10907,9 +10907,19 @@ function renderRecipeOnFireView(main) {
       : `${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}`;
   }
   // For a layer filled up to a height: what's not used, or how short it is (and how far it does reach).
-  function layerUseHtml(row, n) {
+  // `compact` (Setup's plan): a short filling in one line, the full sentence on hover -- the Fill step, where she sets
+  // the height, says it in full. Keeps Setup inside 1280x800.
+  function layerUseHtml(row, n, { compact = false } = {}) {
     if (!(row.fill.kind === 'height' && row.index > 0)) return '';
     const g = (v) => `${window.RofGame.portions.fmtGrams(v)} g`;
+    if (row.shortTotal > 0 && compact) {
+      const full = `Short by ${g(row.shortTotal)}: the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed. ${n === 1
+        ? `All of it reaches ${cmFmt(row.heightIfAllUsedCm)}.`
+        : `It fills ${row.fullTraysAtTarget} of ${n} trays to ${cmFmt(row.targetCm)}, or all ${n} to ${cmFmt(row.heightIfAllUsedCm)}.`}`;
+      return `<div class="rof-leftover rof-layer-note rof-layer-note-1" title="${escHtml(full)}">Short by ${g(row.shortTotal)} &middot; ${n === 1
+        ? `all of it reaches ${cmFmt(row.heightIfAllUsedCm)}`
+        : `${row.fullTraysAtTarget}/${n} trays full, or all at ${cmFmt(row.heightIfAllUsedCm)}`}</div>`;
+    }
     if (row.shortTotal > 0) {
       return `<div class="rof-leftover rof-layer-note">Short by ${g(row.shortTotal)}: the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed. ${n === 1
         ? `All of it reaches ${cmFmt(row.heightIfAllUsedCm)}.`
