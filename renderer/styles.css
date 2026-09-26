@@ -1304,6 +1304,14 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .ai-muted { color: var(--neutral); font-size: 12.5px; }
 .ai-ingredients { color: var(--neutral); font-size: 12px; }
 .modal.ai-modal-wide { width: 720px; }
+/* Recipe on Fire's "+ Create new cutter / tray…": the Materials form in a dialog. Save / Cancel stay in view
+   while the form scrolls (the modal itself scrolls). */
+.modal.material-create-modal { width: 900px; }
+.modal.material-create-modal h2 { margin-bottom: 6px; }
+.mcm-note { font-size: 12.5px; color: var(--neutral); margin: 0 0 16px; }
+.modal.material-create-modal .material-preview-wrap { height: 240px; }
+.modal.material-create-modal .actions { position: sticky; bottom: -28px; background: var(--surface); margin-bottom: -28px; padding-bottom: 20px; z-index: 1; align-items: center; }
+#mcm-status { margin-right: auto; font-size: 12.5px; color: var(--neutral); }
 /* Keep Save / Cancel reachable however tall the form gets (the modal itself scrolls). */
 .modal.ai-modal .actions { position: sticky; bottom: -28px; background: var(--surface); margin-bottom: -28px; padding-bottom: 20px; z-index: 1; }
 .ai-blocked {

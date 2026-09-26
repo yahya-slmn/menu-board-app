@@ -9551,17 +9551,17 @@ function renderMaterialDimensionFields(container, shapeType, existingValues) {
   const preset = MATERIAL_SHAPE_PRESETS[shapeType];
   container.innerHTML = preset.fields.map(f => `
     <div class="field" style="max-width:150px;">
-      <label>${f.label}</label>
+      <label for="mf-dim-${f.key}">${f.label}</label>
       <input id="mf-dim-${f.key}" type="number" min="0" step="${f.step}" value="${existingValues?.[f.key] ?? ''}" />
     </div>
   `).join('');
 }
 
-function readMaterialDims(shapeType) {
+function readMaterialDims(shapeType, root = document) {
   const preset = MATERIAL_SHAPE_PRESETS[shapeType];
   const dims = {};
   preset.fields.forEach(f => {
-    const el = document.getElementById(`mf-dim-${f.key}`);
+    const el = root.querySelector(`#mf-dim-${f.key}`);
     const raw = el ? el.value.trim() : '';
     dims[f.key] = raw === '' ? null : parseFloat(raw);
   });
@@ -9571,8 +9571,8 @@ function readMaterialDims(shapeType) {
 // Always sends every possible dimension column, nulling out whichever ones don't belong to the
 // CURRENT shape -- so switching a material from e.g. Muffin Tray to Round before saving doesn't
 // leave stale cup_* values behind in the row.
-function buildMaterialDimensionPayload(shapeType) {
-  const current = readMaterialDims(shapeType);
+function buildMaterialDimensionPayload(shapeType, root = document) {
+  const current = readMaterialDims(shapeType, root);
   const payload = {};
   Object.keys(MATERIAL_DIMENSION_DB_KEYS).forEach(key => { payload[key] = current[key] ?? null; });
   return payload;
@@ -10324,7 +10324,11 @@ function renderRecipeOnFireView(main) {
   const setupBlockEl = document.getElementById('rof-setup-block');
   const recipeCompactEl = document.getElementById('rof-recipe-compact');
 
-  const materialsPromise = window.api.listMaterials();
+  // Reloaded each time Setup or Trim opens (and taken from the dialog after "+ Create new …"), so a
+  // material added meanwhile -- by her in the dialog, or by a colleague in Materials -- is in the list.
+  let materialsPromise = window.api.listMaterials();
+  const reloadMaterials = () => { materialsPromise = window.api.listMaterials(); };
+  const NEW_MATERIAL = '__new'; // the "+ Create new …" option's value in the tray / cutter dropdowns
   const wasteTypesPromise = window.api.listWasteTypes();
 
   let source = 'book';
@@ -10684,6 +10688,7 @@ function renderRecipeOnFireView(main) {
     materialSelect.innerHTML = [
       `<option value="">— Select a tray —</option>`,
       ...trayMaterials.map(m => `<option value="${m.id}">${m.code} — ${m.name} (${formatMaterialDimensions(m)})</option>`),
+      `<option value="${NEW_MATERIAL}">+ Create new tray…</option>`,
     ].join('');
     // Restore the chef's own last pick for this session (surviving a checkbox toggle or an
     // "<- Edit Setup" round-trip) before falling back to a linked process's own tray/pan (its own
@@ -10810,12 +10815,25 @@ function renderRecipeOnFireView(main) {
       showModeHint();
       renderStepHeader();
     }));
-    document.getElementById('rof-material-select').addEventListener('change', () => {
-      lastMaterialId = document.getElementById('rof-material-select').value || null;
+    document.getElementById('rof-material-select').addEventListener('change', (e) => {
+      if (e.target.value === NEW_MATERIAL) { createTrayInline(e.target); return; }
+      lastMaterialId = e.target.value || null;
       updateSetupPreview();
     });
     document.getElementById('rof-continue-btn').addEventListener('click', () => (rofMode === 'shape' ? startPlacementFlow() : startSheetFlow()));
+    reloadMaterials();
     populateMaterialSelect();
+  }
+
+  // "+ Create new tray…": the dropdown goes back to what it showed (the option never stays picked), the
+  // Materials dialog opens with Category fixed to Tray / Pan, and a saved tray becomes the chosen one.
+  async function createTrayInline(select) {
+    select.value = lastMaterialId && trayMaterials.some(m => String(m.id) === String(lastMaterialId)) ? String(lastMaterialId) : '';
+    const res = await openMaterialCreateModal({ category: 'tray_pan' });
+    if (!res) return;
+    if (res.materials) materialsPromise = Promise.resolve(res.materials); else reloadMaterials();
+    lastMaterialId = String(res.id);
+    await populateMaterialSelect(); // selects lastMaterialId and redraws the tray preview
   }
 
   // Back to Setup from anywhere in a session (drops the pieces / sheet / cutters, keeps the tray).
@@ -11575,9 +11593,34 @@ function renderRecipeOnFireView(main) {
     rofGame.announce(`${m.name} picked. Click the sheet to stamp it, or use Auto-arrange. Escape puts it down.`);
   }
   function onCutterSelect(id) {
+    if (id === NEW_MATERIAL) { createCutterInline(); return; }
     const m = cutterMaterials.find(x => String(x.id) === String(id));
     if (!m) { lastCutterId = null; rofGame.disarmCutter(); syncCutterPicker(); return; }
     armCutter(m);
+  }
+  // The cutter dropdown's options: every cutter, then "+ Create new cutter…" (there even with no cutters yet).
+  function fillCutterSelect() {
+    const sel = document.getElementById('rof-cutter-select');
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${cutterMaterials.length ? 'Choose a cutter…' : 'No cutters yet'}</option>`
+      + cutterMaterials.map(m => `<option value="${m.id}">${escHtml(m.name)} (${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))})</option>`).join('')
+      + `<option value="${NEW_MATERIAL}">+ Create new cutter…</option>`;
+    sel.disabled = false;
+  }
+  // "+ Create new cutter…": the cutter in hand is put down, the dropdown goes back to the chosen cutter, and
+  // the Materials dialog opens with Category fixed to Cutter. A saved cutter is chosen and in hand at once,
+  // with its one-portion readout -- nothing to close or reopen.
+  async function createCutterInline() {
+    if (armedCutterId != null) rofGame.disarmCutter();
+    syncCutterPicker(); // puts the dropdown back on the chosen cutter (or the placeholder)
+    const res = await openMaterialCreateModal({ category: 'cutter' });
+    if (!res) return;
+    if (res.materials) materialsPromise = Promise.resolve(res.materials); else reloadMaterials();
+    await ensureCutterMaterials();
+    if (!document.getElementById('rof-cutter-select')) return; // left Trim meanwhile
+    fillCutterSelect();
+    const m = cutterMaterials.find(x => String(x.id) === String(res.id));
+    if (m) armCutter(m); else syncCutterPicker();
   }
   function toggleCutterInHand() {
     const m = chosenCutter();
@@ -11692,18 +11735,13 @@ function renderRecipeOnFireView(main) {
       goToRofStep('bake'); bakeState = 'done';
       renderTrayStepPanel();
     });
+    reloadMaterials();
     await ensureCutterMaterials();
     const sel = document.getElementById('rof-cutter-select');
     if (!sel) return; // moved on while the list loaded
-    if (cutterMaterials.length === 0) {
-      sel.innerHTML = '<option value="">No cutters yet -- add one in Materials</option>';
-    } else {
-      sel.innerHTML = '<option value="">Choose a cutter…</option>' + cutterMaterials.map(m =>
-        `<option value="${m.id}">${escHtml(m.name)} (${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))})</option>`).join('');
-      sel.disabled = false;
-      sel.addEventListener('change', () => onCutterSelect(sel.value));
-      document.getElementById('rof-cutter-hand-btn').addEventListener('click', toggleCutterInHand);
-    }
+    fillCutterSelect();
+    sel.addEventListener('change', () => onCutterSelect(sel.value));
+    document.getElementById('rof-cutter-hand-btn').addEventListener('click', toggleCutterInHand);
     syncCutterPicker();
     updateTrimSummary();
   }
@@ -11958,10 +11996,6 @@ async function renderMaterialFormView(main) {
     if (material.photo_path) existingPhotoDataUrl = await window.api.getMaterialPhoto(material.photo_path);
   }
 
-  const currentPhotoSrc = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-  const initialCategory = material?.category || 'tray_pan';
-  const initialShape = material?.shape_type || 'round';
-
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${editing ? 'Edit Material' : 'New Material'}</h1>
@@ -11969,21 +12003,66 @@ async function renderMaterialFormView(main) {
       </div>
       <button class="secondary" id="mf-back-btn">← Back to Materials</button>
     </div>
+    <div id="mf-form-root"></div>
+    <button class="primary" id="mf-save-btn">${editing ? 'Save Changes' : 'Save Material'}</button>
+    <span id="mf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
+  `;
 
+  // The photo being picked lives in state.materials (reset whenever the form is opened); the form itself
+  // is the shared one Recipe on Fire's "+ Create new …" dialog also uses.
+  const form = mountMaterialForm(document.getElementById('mf-form-root'), { material, existingPhotoDataUrl, photoState: s });
+
+  document.getElementById('mf-back-btn').addEventListener('click', () => {
+    form.dispose();
+    goBackToMaterialsList();
+  });
+
+  document.getElementById('mf-save-btn').addEventListener('click', async () => {
+    const statusEl = document.getElementById('mf-status');
+    const saveBtn = document.getElementById('mf-save-btn');
+    saveBtn.disabled = true;
+    statusEl.textContent = 'Saving…';
+    const saved = await form.save();
+    if (!saved) { statusEl.textContent = ''; saveBtn.disabled = false; return; }
+    form.dispose();
+    goBackToMaterialsList();
+  });
+}
+
+// The Materials Add / Edit form -- Name, Category, Shape Type (only the Category's shapes), Weight, the
+// shape's dimension fields, the live 3D preview and the optional photo -- drawn into `root`. ONE form for
+// every entry point: the Materials screen (renderMaterialFormView) and Recipe on Fire's "+ Create new
+// cutter / tray…" dialog (openMaterialCreateModal), so the two can never drift apart. The caller draws its
+// own Save / Cancel and calls:
+//   save()    -> validates, calls saveMaterial (a real materials row, MS code assigned by main.js); resolves
+//                { id } on success, or null after telling the chef what went wrong
+//   dispose() -> frees the 3D preview's WebGL context and the resize listener; call on every way out.
+// Options: material (the row being edited, or null for a new one), existingPhotoDataUrl, photoState (an
+// object holding pendingPhoto / removePhoto; a private one by default) and lockCategory (a category key:
+// the Category is fixed to it, so what gets made is usable where it was made).
+function mountMaterialForm(root, { material = null, existingPhotoDataUrl = null, photoState = null, lockCategory = null } = {}) {
+  const editing = !!material;
+  const ps = photoState || { pendingPhoto: null, removePhoto: false };
+  const $ = (id) => root.querySelector(`#${id}`);
+  const currentPhotoSrc = ps.pendingPhoto ? ps.pendingPhoto.dataUrl : (existingPhotoDataUrl && !ps.removePhoto ? existingPhotoDataUrl : null);
+  const initialCategory = lockCategory || material?.category || 'tray_pan';
+  const initialShape = material?.shape_type || 'round';
+
+  root.innerHTML = `
     <div class="generate-controls">
-      <div class="field"><label>Name</label><input id="mf-name" value="${material?.name || ''}" dir="auto" /></div>
+      <div class="field"><label for="mf-name">Name</label><input id="mf-name" dir="auto" /></div>
       <div class="field" style="max-width:200px;">
-        <label>Category</label>
-        <select id="mf-category">
-          ${Object.entries(MATERIAL_CATEGORIES).map(([key, c]) => `<option value="${key}" ${initialCategory === key ? 'selected' : ''}>${c.label}</option>`).join('')}
+        <label for="mf-category">Category</label>
+        <select id="mf-category" ${lockCategory ? 'disabled' : ''}>
+          ${Object.entries(MATERIAL_CATEGORIES).filter(([key]) => !lockCategory || key === lockCategory).map(([key, c]) => `<option value="${key}" ${initialCategory === key ? 'selected' : ''}>${c.label}</option>`).join('')}
         </select>
       </div>
       <div class="field" style="max-width:240px;">
-        <label>Shape Type</label>
+        <label for="mf-shape">Shape Type</label>
         <select id="mf-shape"></select>
       </div>
       <div class="field" style="max-width:200px;">
-        <label id="mf-weight-label">Weight (g)</label>
+        <label id="mf-weight-label" for="mf-weight">Weight (g)</label>
         <input id="mf-weight" type="number" min="0" step="1" value="${material?.weight_grams ?? ''}" />
         <span id="mf-weight-hint" style="font-size:11px; color:var(--neutral);"></span>
       </div>
@@ -12005,25 +12084,25 @@ async function renderMaterialFormView(main) {
     </div>
 
     <div class="field" style="margin:16px 0; max-width:320px;">
-      <label>Photo (optional)</label>
+      <label for="mf-photo-input">Photo (optional)</label>
       <input type="file" id="mf-photo-input" accept="image/jpeg,image/png" />
       <div id="mf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
-        <img id="mf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <img id="mf-photo-preview" src="${currentPhotoSrc || ''}" alt="" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
         <button type="button" class="secondary" id="mf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
       </div>
     </div>
-
-    <button class="primary" id="mf-save-btn">${editing ? 'Save Changes' : 'Save Material'}</button>
-    <span id="mf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
   `;
+
+  // Set as a property, not in the markup, so a name with a quote in it can't break the field.
+  $('mf-name').value = material?.name || '';
 
   // Photo -- single-photo model, same pattern as Recipe Book's own (see renderRecipeFormView).
   function updatePhotoPreview() {
-    const src = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-    document.getElementById('mf-photo-preview-wrap').style.display = src ? '' : 'none';
-    document.getElementById('mf-photo-preview').src = src || '';
+    const src = ps.pendingPhoto ? ps.pendingPhoto.dataUrl : (existingPhotoDataUrl && !ps.removePhoto ? existingPhotoDataUrl : null);
+    $('mf-photo-preview-wrap').style.display = src ? '' : 'none';
+    $('mf-photo-preview').src = src || '';
   }
-  document.getElementById('mf-photo-input').addEventListener('change', (e) => {
+  $('mf-photo-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
     if (!['image/jpeg', 'image/png'].includes(file.type)) {
@@ -12041,33 +12120,33 @@ async function renderMaterialFormView(main) {
       const dataUrl = reader.result;
       const base64 = dataUrl.split(',')[1];
       const ext = file.type === 'image/png' ? 'png' : 'jpeg';
-      s.pendingPhoto = { dataUrl, base64, ext };
-      s.removePhoto = false;
+      ps.pendingPhoto = { dataUrl, base64, ext };
+      ps.removePhoto = false;
       updatePhotoPreview();
     };
     reader.readAsDataURL(file);
   });
-  document.getElementById('mf-photo-remove-btn').addEventListener('click', () => {
-    s.pendingPhoto = null;
-    s.removePhoto = true;
-    document.getElementById('mf-photo-input').value = '';
+  $('mf-photo-remove-btn').addEventListener('click', () => {
+    ps.pendingPhoto = null;
+    ps.removePhoto = true;
+    $('mf-photo-input').value = '';
     updatePhotoPreview();
   });
 
   // Dimensions + live 3D preview -- rebuilt whenever the shape type changes (a different field
   // set entirely), refreshed on every dimension keystroke otherwise.
-  const preview3D = createMaterialPreview3D(document.getElementById('mf-preview-canvas'));
-  const dimensionFieldsEl = document.getElementById('mf-dimension-fields');
+  const preview3D = createMaterialPreview3D($('mf-preview-canvas'));
+  const dimensionFieldsEl = $('mf-dimension-fields');
 
-  function currentShape() { return document.getElementById('mf-shape').value; }
+  function currentShape() { return $('mf-shape').value; }
 
-  function currentCategory() { return document.getElementById('mf-category').value; }
+  function currentCategory() { return $('mf-category').value; }
 
   function updatePreview() {
     const shape = currentShape();
-    const dims = readMaterialDims(shape);
+    const dims = readMaterialDims(shape, root);
     const hasAllDims = MATERIAL_SHAPE_PRESETS[shape].fields.every(f => dims[f.key] > 0);
-    document.getElementById('mf-preview-empty').style.display = hasAllDims ? 'none' : '';
+    $('mf-preview-empty').style.display = hasAllDims ? 'none' : '';
     preview3D.setShape(shape, dims, currentCategory());
   }
 
@@ -12078,16 +12157,16 @@ async function renderMaterialFormView(main) {
   // just after saving.
   function updateWeightLabel() {
     const shape = currentShape();
-    const labelEl = document.getElementById('mf-weight-label');
-    const hintEl = document.getElementById('mf-weight-hint');
+    const labelEl = $('mf-weight-label');
+    const hintEl = $('mf-weight-hint');
     if (shape !== 'muffin_tray') {
       labelEl.textContent = 'Weight (g)';
       hintEl.textContent = '';
       return;
     }
     labelEl.textContent = 'Weight per Cup (g)';
-    const dims = readMaterialDims(shape);
-    const weightRaw = document.getElementById('mf-weight').value.trim();
+    const dims = readMaterialDims(shape, root);
+    const weightRaw = $('mf-weight').value.trim();
     const weight = weightRaw === '' ? null : parseFloat(weightRaw);
     const total = materialCapacityGrams({ shape_type: shape, weight_grams: weight, cup_rows: dims.cupRows, cup_columns: dims.cupColumns });
     hintEl.textContent = total != null ? `Tray total: ${total} g (${dims.cupRows}×${dims.cupColumns} cups)` : '';
@@ -12102,7 +12181,7 @@ async function renderMaterialFormView(main) {
     updateWeightLabel();
   }
 
-  document.getElementById('mf-weight').addEventListener('input', updateWeightLabel);
+  $('mf-weight').addEventListener('input', updateWeightLabel);
 
   // Shape Type lists only the chosen Category's shapes (MATERIAL_CATEGORY_SHAPES). The saved shape of the
   // material being edited is kept as an option while its own category is selected.
@@ -12110,21 +12189,21 @@ async function renderMaterialFormView(main) {
     const keep = editing && category === material.category ? material.shape_type : null;
     const opts = materialShapeOptions(category, keep);
     const pick = opts.some(([k]) => k === selected) ? selected : opts[0][0];
-    document.getElementById('mf-shape').innerHTML = opts.map(([key, label]) => `<option value="${key}" ${pick === key ? 'selected' : ''}>${label}</option>`).join('');
+    $('mf-shape').innerHTML = opts.map(([key, label]) => `<option value="${key}" ${pick === key ? 'selected' : ''}>${label}</option>`).join('');
     return pick;
   }
 
   const firstShape = fillShapeOptions(initialCategory, initialShape);
   renderDimensionsForShape(firstShape, firstShape === initialShape ? materialDimsFromRow(material) : {});
 
-  document.getElementById('mf-shape').addEventListener('change', () => {
+  $('mf-shape').addEventListener('change', () => {
     renderDimensionsForShape(currentShape(), {});
   });
 
   // A category change re-lists the shapes. If the current shape is still offered it stays, with its typed
   // dimensions (only the 3D preview's floor-or-not changes); otherwise the first shape of the new list is
   // chosen and its fields shown empty.
-  document.getElementById('mf-category').addEventListener('change', () => {
+  $('mf-category').addEventListener('change', () => {
     const before = currentShape();
     const after = fillShapeOptions(currentCategory(), before);
     if (after === before) updatePreview();
@@ -12138,57 +12217,104 @@ async function renderMaterialFormView(main) {
   const onWindowResize = () => preview3D.resize();
   window.addEventListener('resize', onWindowResize);
 
-  // This view is torn down and rebuilt fresh on every navigation (same as every other screen in
-  // this app), never re-rendered in place -- so the running WebGL context needs an explicit
-  // teardown, or every visit to this form leaks another one. Both ways out of this form (Back,
-  // successful Save) go through here.
-  function leaveForm() {
+  // Every screen in this app is torn down and rebuilt fresh on navigation, never re-rendered in place,
+  // so the running WebGL context needs an explicit teardown, or every visit to this form leaks another
+  // one. Every way out (Back, successful Save, the dialog's Cancel / Escape) goes through dispose().
+  let disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
     window.removeEventListener('resize', onWindowResize);
     preview3D.dispose();
   }
 
-  document.getElementById('mf-back-btn').addEventListener('click', () => {
-    leaveForm();
-    goBackToMaterialsList();
-  });
-
-  document.getElementById('mf-save-btn').addEventListener('click', async () => {
-    const name = document.getElementById('mf-name').value.trim();
-    if (!name) return alert('Please enter a material name.');
-
-    const statusEl = document.getElementById('mf-status');
-    const saveBtn = document.getElementById('mf-save-btn');
-    saveBtn.disabled = true;
-    statusEl.textContent = 'Saving…';
+  async function save() {
+    const name = $('mf-name').value.trim();
+    if (!name) { alert('Please enter a material name.'); $('mf-name').focus(); return null; }
 
     const shape = currentShape();
-    const weightRaw = document.getElementById('mf-weight').value.trim();
+    const weightRaw = $('mf-weight').value.trim();
 
     const payload = {
-      id: s.formId || undefined,
+      id: material?.id || undefined,
       name,
       category: currentCategory(),
       shapeType: shape,
-      ...buildMaterialDimensionPayload(shape),
+      ...buildMaterialDimensionPayload(shape, root),
       weightGrams: weightRaw === '' ? null : parseFloat(weightRaw),
-      removePhoto: s.removePhoto,
+      removePhoto: ps.removePhoto,
     };
-    if (s.pendingPhoto) {
-      payload.photoBase64 = s.pendingPhoto.base64;
-      payload.photoExt = s.pendingPhoto.ext;
+    if (ps.pendingPhoto) {
+      payload.photoBase64 = ps.pendingPhoto.base64;
+      payload.photoExt = ps.pendingPhoto.ext;
     }
 
     try {
-      await window.api.saveMaterial(payload);
-      leaveForm();
-      goBackToMaterialsList();
+      return await window.api.saveMaterial(payload);
     } catch (err) {
-      statusEl.textContent = '';
-      saveBtn.disabled = false;
       alert(`Save failed: ${err.message}`);
+      return null;
     }
-  });
+  }
+
+  return { save, dispose, focus: () => $('mf-name').focus() };
 }
 
+// "+ Create new cutter… / tray…" from Recipe on Fire: the Materials form (mountMaterialForm, the very same
+// one the Materials screen uses) in a dialog over the screen, so a new material never needs a trip to
+// Materials. The Category is fixed by where it was opened (a cutter from Trim, a tray / pan from Setup), so
+// what she makes is usable right there. Saving creates a REAL materials row. Resolves { id, materials }
+// (the freshly reloaded catalog, so the caller can select the new one straight away), or null on Cancel.
+function openMaterialCreateModal({ category }) {
+  return new Promise((resolve) => {
+    const noun = category === 'cutter' ? 'Cutter' : 'Tray / Pan';
+    const opener = document.activeElement; // focus goes back here when the dialog closes
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal material-create-modal" role="dialog" aria-modal="true" aria-labelledby="mcm-title">
+        <h2 id="mcm-title">New ${noun}</h2>
+        <p class="mcm-note">Saved to the Materials catalog (MS code assigned on save), exactly as if made there.</p>
+        <div id="mcm-form"></div>
+        <div class="actions">
+          <span id="mcm-status" role="status"></span>
+          <button type="button" class="secondary" id="mcm-cancel">Cancel</button>
+          <button type="button" class="primary" id="mcm-save">Save ${noun.toLowerCase()}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const form = mountMaterialForm(overlay.querySelector('#mcm-form'), { lockCategory: category });
+    let busy = false;
+    const close = (result) => {
+      document.removeEventListener('keydown', onKeydown, true);
+      form.dispose();
+      overlay.remove();
+      if (opener && opener.focus) opener.focus();
+      resolve(result);
+    };
+    // Escape cancels (not while saving); Tab stays inside the dialog -- same as the Dough Shapes dialog.
+    function onKeydown(e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (!busy) close(null); return; }
+      if (e.key !== 'Tab') return;
+      const focusable = [...overlay.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled && el.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
+    document.addEventListener('keydown', onKeydown, true);
+    overlay.querySelector('#mcm-cancel').addEventListener('click', () => { if (!busy) close(null); });
+    overlay.querySelector('#mcm-save').addEventListener('click', async () => {
+      const saveBtn = overlay.querySelector('#mcm-save'), cancelBtn = overlay.querySelector('#mcm-cancel'), status = overlay.querySelector('#mcm-status');
+      busy = true; saveBtn.disabled = true; cancelBtn.disabled = true; status.textContent = 'Saving…';
+      const saved = await form.save();
+      if (!saved) { busy = false; saveBtn.disabled = false; cancelBtn.disabled = false; status.textContent = ''; return; }
+      let materials = null;
+      try { materials = await window.api.listMaterials(); } catch (err) { console.error('[materials] reload after create failed:', err); }
+      close({ id: saved.id, materials });
+    });
+    form.focus();
+  });
+}
 
 init().catch(showViewError);

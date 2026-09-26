@@ -332,6 +332,10 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
+  The form is ONE component, `mountMaterialForm(root, …)` (save() / dispose()), used by the Materials screen and by
+  `openMaterialCreateModal`: Recipe on Fire's "+ Create new cutter…" (Trim) / "+ Create new tray…" (Setup) dropdown
+  options open it as a dialog with the Category FIXED to the entry point's, save a real `materials` row, and the new
+  one is chosen at once (a new cutter is also in hand). Setup and Trim reload the materials list each time they open.
 - The old 2D tray canvas and photo-sprite dough flow are gone; the game view is the only tray view. The
   Bake panel (both methods) has a rise override slider (30-160%) scaling the model's height/width
   multipliers -- it applies at bake time only, so raising it above what placement reserved can make
