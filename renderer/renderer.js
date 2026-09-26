@@ -10543,6 +10543,30 @@ function renderRecipeOnFireView(main) {
     // of each process's own (untouched) proc.wastes, which stays available to reseed from the
     // next time the checked SET changes.
     combinedWastes = procs.flatMap(p => p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })));
+    // Two or more processes mixed into one dough: the same figures as a compact two-column list, so Setup fits
+    // 1280x800 unscrolled (the large per-process lines and a two-line wastage label pushed it to 805 px). The span ids
+    // are the ones refreshComputedNumbers fills, so nothing about the numbers changes; one process keeps the box below.
+    if (procs.length > 1) {
+      summaryEl.innerHTML = `
+        <div class="computed-value-box rof-mix-summary">
+          ${procs.map(p => `<div class="rof-mix-row"><span dir="auto">${escHtml(p.name || '(untitled process)')}</span><span><span id="rof-total-${p.localId}"></span> g</span></div>`).join('')}
+          <div class="rof-mix-foot">
+            <details class="rof-waste-details">
+              <summary title="One dough, one wastage picture: the wastes of every ticked process, applied once to the combined total.">Wastage (combined) <span id="rof-waste-count"></span></summary>
+              <div id="rof-wastes-combined" style="margin-top:6px;"></div>
+              <select class="builder-select" data-rof-add-waste="combined" style="margin-top:6px; max-width:220px; font-size:12px;">
+                <option value="">+ Add Waste…</option>
+              </select>
+            </details>
+            <div class="rof-mix-net"><span class="rof-mix-total" title="Combined total quantity"><span id="rof-combined-total"></span> g →</span> Net <span id="rof-net-combined"></span> g</div>
+          </div>
+        </div>
+      `;
+      wireLayoutToggle();
+      renderWasteRowsFor();
+      refreshComputedNumbers();
+      return;
+    }
     summaryEl.innerHTML = `
       <div class="computed-value-box" style="max-width:640px; margin:4px 0 18px;">
         ${procs.map(p => `

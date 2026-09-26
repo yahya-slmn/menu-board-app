@@ -353,7 +353,10 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the base on screen to that height (`riseForHeight`, can go below raw) and replans the layer above. Fill -> is disabled until
   L3; without a pre-bake Continue waits for Fill too. Layers-mode Setup fits 1280x800 unscrolled: the process checklist folds
   into the head line ("2 of 2 processes · Change"), layer cards are an accordion (one open; `layerOpenId`), the plan is a
-  compact grid, and the Method field / Tray label step aside. (One-dough Setup with 2+ processes scrolled before this: 796 px.)
+  compact grid, and the Method field / Tray label step aside. One dough with 2+ processes (fixed 2026-09-26, was 805 px):
+  its summary is a compact list (`.rof-mix-summary`: a row per process, then "Wastage (combined)" beside "total -> Net" on
+  one row; the same span ids refreshComputedNumbers fills), and the One dough / In layers toggle sits in the gaps around
+  the process label line (negative margin) instead of making it taller. One process keeps the original box.
   L3 (Fill): from the Pre-bake ("Fill ->") or straight from Setup (no pre-bake: the base goes in raw). Each layer above the
   base: All of it / Up to a height (the SAME layerCfg as Setup's cards), grams per tray, not used / short, rim warning.
   3D: `game.setFillLayers([{ key, heightCm, look }])` -- each layer a sheet mesh (sheet.js `makeMaterial`) with a

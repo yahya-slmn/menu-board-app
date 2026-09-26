@@ -799,12 +799,24 @@ table.materials-table td.cat-cell {
 .rof-compact button { flex: 0 0 auto; padding: 6px 12px; font-size: 12px; }
 .rof-side .mode-toggle-btn { padding: 7px 9px; font-size: 12px; white-space: nowrap; }
 .rof-trim-mode { margin-bottom: 8px; }
+/* One dough, 2+ processes: the Setup summary as a compact list */
+.rof-mix-summary { max-width: 640px; margin: 2px 0 8px !important; padding: 7px 12px; font-weight: normal; font-size: 12.5px; }
+.rof-mix-row { display: flex; justify-content: space-between; gap: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.rof-mix-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rof-mix-row > span:last-child { flex: 0 0 auto; }
+/* Last row: the combined wastage (left) and total -> Net Weight (right); open, the wastage takes the full width. */
+.rof-mix-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; border-top: 1px solid #cfdacb; margin-top: 3px; padding-top: 3px; }
+.rof-mix-foot .rof-waste-details { margin: 0; }
+.rof-mix-foot .rof-waste-details[open] { flex-basis: 100%; }
+.rof-mix-foot .rof-waste-details summary { font-size: 12px; color: var(--neutral); cursor: pointer; white-space: nowrap; }
+.rof-mix-net { margin-left: auto; font-weight: 600; font-size: 13.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rof-mix-total { font-weight: normal; font-size: 12.5px; color: var(--neutral); }
 /* Layered tray (Setup, "In layers") */
 .rof-process-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; }
 .rof-process-head label { margin: 0; }
 .rof-layout-row { display: flex; align-items: center; }
 .rof-process-collapsed { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--neutral); }
-.rof-process-head .mode-toggle { padding: 1px; }
+.rof-process-head .mode-toggle { padding: 1px; margin: -5px 0; } /* sits in the gaps around the label line, not taller than it */
 .rof-process-head .mode-toggle-btn { padding: 1px 8px; font-size: 11.5px; line-height: 1.5; }
 .rof-layers { display: flex; flex-direction: column; gap: 5px; margin: 0 0 8px; } /* top layer first, as in the tray */
 .rof-layer { border: 1px solid var(--line); border-left: 3px solid var(--sage); border-radius: 8px; padding: 5px 10px; background: var(--surface); }
