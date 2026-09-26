@@ -336,7 +336,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the cells into rectangle "cuts" (`materialId: 'knife'`, not items: nothing to drag) that go through the SAME mask / scrap
   / portion / PDF code as cutter pieces (`allCuts`). Dotted lines = preview; Cut -> solid lines, inputs locked, One portion /
   Export PDF enabled (`cutsReady`); Edit cuts unlocks. Default size = the square giving `recipes.portion_weight_grams`, else 5 cm.
-- Layered tray (Phase 4, in progress; L1 plan + L2 pre-bake + L3 fill, 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
+- Layered tray (Phase 4, in progress; L1 plan, L2 pre-bake, L3 fill, L4 bake -- 2026-09-26): with 2+ processes ticked, Setup's "One dough | In layers"
   choice (beside the process label; One dough = the unchanged mixed flow). In layers: an ordered stack (top drawn first),
   each layer its OWN wastage (session copy), density (1.05 dough / 1.0 no-flour filling, est., editable), "Pre-bake alone
   first" (bottom only), and above it "All of it" or "Up to a height" (ASSEMBLY height from the tray floor, ruler-checkable).
@@ -362,7 +362,16 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   (`setDoughState` -> `layoutFills`). A short filling still shows the target height; the red line says what it reaches.
   The 3D side view can't show a stack (the tray wall hides it; sheets are surfaces, no body to section), so the Fill step
   shows `rof/stack.js` `stackSvg` instead: a to-scale 2D cross-section (bands in each layer's colour, cm ruler, rim, dashed
-  after-bake estimate) in the stage's top-left under the view buttons. Bake -> waits for L4.
+  after-bake estimate) in the stage's top-left under the view buttons.
+  L4 (final Bake, rofStep 'bake' in layers mode): the same Bake panel; one note per layer (a pre-baked base "stays at
+  X cm, browns a little more"; others their rise estimate's verdict and raw -> baked height, est.). `playBake({ layered:
+  { baseFixed, fills: [{ key, hMul, brownSpeed }] } })`: a pre-baked base keeps its rise and takes up to a third of the
+  remaining browning; each layer on top grows to raw x (1 + RISE_H x hMul) (its assembled height kept in `f.rawH`) and
+  browns towards amber (`setFillBrown`); `resetBake` puts layers back and `restoreAssembled` (renderer) puts a pre-baked
+  base back to `prebakeSheetState`. The pre-bake and the final bake each keep their own oven settings / doneness / rise
+  correction (`useLayerBake` swaps `layerBakeSlots`); `layerFinalRise` feeds the plan's after-bake heights. The final
+  bake's oven settings are pre-filled from the methods of the layers that bake in it, top first. After it the
+  cross-section shows "BAKED (EST.)" heights. Trim -> waits for L5.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.

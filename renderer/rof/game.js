@@ -8,7 +8,7 @@ import { createBench } from './bench.js';
 import { createDoughPiece } from './dough.js';
 import { createOven } from './oven.js';
 import { prefersReducedMotion } from './quality.js';
-import { createSheet } from './sheet.js';
+import { createSheet, RISE_H } from './sheet.js';
 import { packCutters } from './packing.js';
 import { analyzeScrap } from './scrap.js';
 import { planKnifeGrid, buildKnifeLines } from './knifeGrid.js';
@@ -536,6 +536,13 @@ export function createRofGame(container, opts = {}) {
     }
     stage.requestRender();
   }
+  // A filling browns on top: its colour eases from as-is towards a baked amber (at most 60% of the way).
+  const BROWN = new THREE.Color('#9a6534');
+  function setFillBrown(f, b) {
+    const mat = f.sheet.material;
+    if (!mat.userData.baseColor) mat.userData.baseColor = mat.color.clone();
+    mat.color.copy(mat.userData.baseColor).lerp(BROWN, clamp(b, 0, 1) * 0.6);
+  }
   function setFillLayers(list, { pour = true } = {}) {
     if (!sheet || !tray || tray.region.kind === 'cups') return false;
     const keep = new Map(fills.map(f => [f.key, f]));
@@ -550,6 +557,8 @@ export function createRofGame(container, opts = {}) {
         sheet.group.add(s1.group);
       }
       f.targetH = Math.max(0, Number(l.heightCm) || 0);
+      f.rawH = null;
+      setFillBrown(f, 0);
       if (!pour || reducedMotion()) f.shownH = f.targetH;
       next.push(f);
     });
@@ -596,9 +605,18 @@ export function createRofGame(container, opts = {}) {
   // wide the pieces grow, how much of the rise happens before the oven, how fast they brown. Only
   // pieces on the tray are baked. Returns { promise, skip() }; `onProgress({phase, progress})` fires
   // every frame for the UI.
-  function playBake({ doneness = 'golden', model = null, onProgress } = {}) {
+  // `layered` (a layered tray's final bake): { baseFixed, fills: [{ key, hMul, brownSpeed }] }. A pre-baked base
+  // (baseFixed) keeps its height and browns a little more; the sheet otherwise rises by `model` as usual; each layer
+  // on top rises by its own hMul (the sheet's formula, raw x (1 + RISE_H x hMul)) and browns at its own speed.
+  function playBake({ doneness = 'golden', model = null, onProgress, layered = null } = {}) {
     closePortion({ quiet: true });
     const m = { hMul: 1, wMul: 1, proofShare: 0.4, brownSpeed: 1, ...(model || {}) };
+    const baseStart = sheet ? { rise: sheet.rise, bake: sheet.bake } : null;
+    const fillBake = layered ? fills.map(f => {
+      if (f.rawH == null) f.rawH = f.targetH;            // the assembled height, kept for "Bake again"
+      const lm = (layered.fills || []).find(x => x.key === f.key) || {};
+      return { f, hMul: Number(lm.hMul) || 0, brown: Number(lm.brownSpeed) || 1 };
+    }) : [];
     setInteractive(false);
     interaction.select(null);
     insetForced = true; updateInset();                 // the oven scene has its own framing
@@ -631,10 +649,23 @@ export function createRofGame(container, opts = {}) {
         const base = phase === 'proof' ? proofFrac : inOven;
         const bump = phase === 'proof' ? 0 : rnd[i].over * Math.sin(Math.PI * clamp((q - 0.2) / 0.5, 0, 1));
         const f = base + bump;
-        it.dough.setRise(f * m.hMul, f * m.wMul);
         const k = SHAPE_K[it.data?.spec?.archetype] ?? 1;
+        if (layered && layered.baseFixed && it.dough === sheet) {
+          // Already baked: it keeps its height and takes up to a third of the remaining colour.
+          it.dough.setBake(baseStart.bake + (1 - baseStart.bake) * 0.34 * bakeCurve);
+          return;
+        }
+        it.dough.setRise(f * m.hMul, f * m.wMul);
         it.dough.setBake(clamp(target * k * m.brownSpeed * bakeCurve * rnd[i].bake, 0, 1));
       });
+      if (fillBake.length) {
+        const f = phase === 'proof' ? 0 : inOven;
+        for (const fb of fillBake) {
+          fb.f.targetH = fb.f.shownH = fb.f.rawH * (1 + RISE_H * fb.hMul * f);
+          setFillBrown(fb.f, clamp(target * fb.brown * bakeCurve, 0, 1));
+        }
+        layoutFills();
+      }
 
       // The oven "turns on" as the oven phase begins and off again in the last beat.
       const level = phase === 'proof' ? 0 : phase === 'oven' ? smooth(0, 0.14, q) : 1 - easeInOut(outP);
@@ -667,6 +698,8 @@ export function createRofGame(container, opts = {}) {
   }
   function resetBake() {
     closePortion({ quiet: true });
+    // Layers go back to their assembled height and colour (the caller puts a pre-baked base back, see renderer).
+    for (const f of fills) { if (f.rawH != null) { f.targetH = f.shownH = f.rawH; f.rawH = null; } setFillBrown(f, 0); }
     setDoughState({ rise: 0, bake: 0 });
     if (oven) { oven.setLevel(0); oven.setSteam(0); }
     stage.setOvenLook(0);
@@ -1115,7 +1148,7 @@ export function createRofGame(container, opts = {}) {
     beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, planCutters, clearCutters, setKnifeGrid, setKnifeSolid, setFillLayers, getFills, setScrapHighlight, setSheetGrams,
     getScrap: scrapSummary,
     getCutters: () => allCuts().map(describeCutter),
-    getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },
+    getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm, rise: sheet.rise, bake: sheet.bake },
     setSfx: (fns) => Object.assign(sfx, fns),
     showPortion: openPortion, hidePortion: closePortion, capturePortion, isPortionOpen: () => !!portion, getPortion: () => portion?.desc || null,
     getView: () => stage.getView(),

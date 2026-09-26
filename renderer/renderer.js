@@ -10360,6 +10360,12 @@ function renderRecipeOnFireView(main) {
   let layerPlan = null;            // the last planLayers() result
   let layerOpenId = null;          // the one open layer card (null = open one waiting for a height; '' = all folded)
   let processListOpen = false;     // layers mode folds the process checklist to one line; "Change" opens it
+  // The pre-bake and the final bake each keep their own oven settings, doneness and rise correction (see
+  // useLayerBake); layerFinalRise is the final bake's rise correction, which the plan's after-bake heights use.
+  let layerBakeSlots = { prebake: null, final: null };
+  let activeLayerBake = null;
+  let layerFinalRise = 1;
+  let prebakeSheetState = null;    // { rise, bake } of the base when the pre-bake came out (restored after "Bake again")
   const layersActive = () => doughLayout === 'layers' && selectedProcesses().length >= 2;
 
   // ---- Step-wizard state -----------------------------------------------------------------------
@@ -10484,6 +10490,7 @@ function renderRecipeOnFireView(main) {
     placeGrams = null; placeGramsUser = false;
     cutterList = []; armedCutterId = null; trimNote = ''; sheetInfo = null;
     if (knifeSpec) knifeSpec.cut = false;
+    layerBakeSlots = { prebake: null, final: null }; activeLayerBake = null; layerFinalRise = 1; prebakeSheetState = null;
     riseScale = 1;
     bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
   }
@@ -10494,6 +10501,7 @@ function renderRecipeOnFireView(main) {
     selectedProcessLocalIds = new Set();
     combinedWastes = [];
     doughLayout = 'mixed'; layerOrder = []; layerCfg.clear(); layerTraysManual = null; layerPlan = null; layerOpenId = null; processListOpen = false;
+    layerBakeSlots = { prebake: null, final: null }; activeLayerBake = null; layerFinalRise = 1; prebakeSheetState = null;
     document.getElementById('rof-process-collapsed')?.remove();
     const procLabel = document.querySelector('#rof-process-field .rof-process-head label');
     if (procLabel) procLabel.hidden = false;
@@ -10791,7 +10799,8 @@ function renderRecipeOnFireView(main) {
           prebake: i === 0 && c.prebake,
           measuredHeightCm: i === 0 ? measured : null,
           fill: i === 0 || c.fillKind !== 'height' ? { kind: 'all' } : { kind: 'height', targetCm: parseFloat(c.targetCm) },
-          hMul: layerHMul(p) * (i === 0 ? (Number(c.riseScale) || 1) : 1),
+          // The pre-bake's own correction for a pre-baked base; the final bake's for everything that rises in it.
+          hMul: layerHMul(p) * (i === 0 && c.prebake ? (Number(c.riseScale) || 1) : layerFinalRise),
         };
       }),
     });
@@ -11140,6 +11149,7 @@ function renderRecipeOnFireView(main) {
       renderTrayStepPanel();
       return;
     }
+    if (target === 'bake' && layersActive()) { startLayerBakeFlow(); return; } // forward from 'fill' -- same as "Bake ->"
     if (target === 'bake') {
       if (rofStep === 'trim') { // backward, Sheet & Trim -- same as "<- Back to Bake"
         rofGame.disarmCutter(); rofGame.clearCutters();
@@ -11151,7 +11161,7 @@ function renderRecipeOnFireView(main) {
       return;
     }
     if (target === 'prebake') { backToPrebake(); return; }                   // backward from 'fill' -- same as "<- Pre-bake"
-    if (target === 'fill') { startFillFlow({ fromPrebake: true }); return; } // forward from 'prebake' -- same as "Fill ->"
+    if (target === 'fill') { if (rofStep === 'bake') backToFill(); else startFillFlow({ fromPrebake: true }); return; } // "<- Fill" / "Fill ->"
     if (target === 'trim') { goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
   }
 
@@ -11167,7 +11177,7 @@ function renderRecipeOnFireView(main) {
     else if (rofStep === 'bake' || rofStep === 'prebake') renderBakeStepPanel(panel);
     else if (rofStep === 'fill') renderFillStepPanel(panel);
     else if (rofStep === 'trim') renderTrimStepPanel(panel);
-    if (rofStep !== 'fill') showLayerStack(null); // the layers' cross-section belongs to the Fill step only (for now)
+    if (rofStep !== 'fill' && !(rofStep === 'bake' && layersActive())) showLayerStack(null); // the layers' cross-section: Fill and the stack's bake
     syncPreviewMode();
     syncRecipeBlock();
   }
@@ -11603,7 +11613,15 @@ function renderRecipeOnFireView(main) {
     bakeState = 'baking';
     renderTrayStepPanel();
     playIgniteSound();
-    bakeCtl = rofGame.playBake({ doneness: bakeDoneness, model: effectiveRiseModel(), onProgress: updateBakeProgress });
+    let layered = null;
+    if (rofStep === 'bake' && layersActive()) {
+      const r = computeLayerPlan();
+      layered = r && {
+        baseFixed: !!r.baseCfg.prebake,
+        fills: r.procs.slice(1).map(p => ({ key: String(p.localId), hMul: layerHMul(p) * riseScale, brownSpeed: layerRiseModel(p).brownSpeed })),
+      };
+    }
+    bakeCtl = rofGame.playBake({ doneness: bakeDoneness, model: effectiveRiseModel(), onProgress: updateBakeProgress, layered });
     await bakeCtl.promise;
     bakeCtl = null;
     bakeState = 'done';
@@ -11901,6 +11919,7 @@ function renderRecipeOnFireView(main) {
   function renderBakeStepPanel(panel) {
     const sheetMode = rofMode === 'sheet';
     const pre = rofStep === 'prebake'; // Layers: the bottom layer baked alone first (same panel, its own dough)
+    const lay = rofStep === 'bake' && layersActive(); // Layers: the whole stack's final bake
     const doneLabel = { light: 'Light', golden: 'Golden', dark: 'Dark' }[bakeDoneness];
     if (bakeState === 'baking') {
       panel.innerHTML = `
@@ -11913,7 +11932,7 @@ function renderRecipeOnFireView(main) {
     }
     const ready = bakeState === 'ready';
     panel.innerHTML = `
-      ${ready ? (pre ? '<h3 style="margin-bottom:6px;">Pre-bake the base alone</h3>' : '') : `<h3 style="margin-bottom:8px;">${pre ? 'Pre-baked' : 'Baked'} · ${doneLabel}</h3>`}
+      ${ready ? (pre ? '<h3 style="margin-bottom:6px;">Pre-bake the base alone</h3>' : lay ? '<h3 style="margin-bottom:6px;">Bake the stack</h3>' : '') : `<h3 style="margin-bottom:8px;">${pre ? 'Pre-baked' : 'Baked'} · ${doneLabel}</h3>`}
       ${ready ? `<ul class="rof-rise-notes">${(riseModel?.notes || []).map(n => `<li>${n}</li>`).join('')}</ul>
       <div class="rof-row-field">
         <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label>
@@ -11927,13 +11946,14 @@ function renderRecipeOnFireView(main) {
         </div>
       </div>` : ''}
       ${bakeParamsHtml()}
-      <div id="rof-place-summary">${pre ? prebakeSummaryHtml(ready) : sheetMode ? sheetSummaryHtml() : ''}</div>
+      <div id="rof-place-summary">${pre ? prebakeSummaryHtml(ready) : lay ? layerBakeSummaryHtml(ready) : sheetMode ? sheetSummaryHtml() : ''}</div>
       ${ready || sheetMode ? '' : '<div class="rof-export-status" id="rof-export-status" role="status"></div>'}
       <div class="rof-actions">
-        <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
+        <button type="button" class="secondary" id="rof-edit-place-btn">${lay ? '← Fill' : sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
         ${ready ? `<button type="button" class="primary" id="rof-start-bake-btn">${pre ? 'Start pre-bake' : 'Start baking'}</button>`
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
                    ${pre ? '<button type="button" class="primary" id="rof-fill-btn">Fill →</button>'
+                   : lay ? '<button type="button" class="primary" id="rof-trim-btn" disabled title="Trimming a layered tray is the next part of this build.">Trim →</button>'
                    : sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                                : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
@@ -11955,11 +11975,15 @@ function renderRecipeOnFireView(main) {
       };
       refresh();
       // The pre-bake's slider belongs to the bottom layer: it moves that layer's estimated height in the plan.
-      const keep = () => { if (pre) { const c = layerCfg.get(layerOrder[0]); if (c) c.riseScale = riseScale; } };
+      const keep = () => {
+        if (pre) { const c = layerCfg.get(layerOrder[0]); if (c) c.riseScale = riseScale; }
+        if (lay) { layerFinalRise = riseScale; refreshLayerBakeView(); }
+      };
       slider.addEventListener('input', () => { riseScale = slider.value / 100; keep(); refresh(); });
       document.getElementById('rof-rise-reset').addEventListener('click', () => { riseScale = 1; slider.value = 100; keep(); refresh(); });
     }
     document.getElementById('rof-edit-place-btn').addEventListener('click', () => {
+      if (lay) { backToFill(); return; }
       if (sheetMode) { backToSetup(); return; }
       rofGame.resetBake();
       bakeState = 'ready';
@@ -11972,12 +11996,13 @@ function renderRecipeOnFireView(main) {
     document.getElementById('rof-export-pdf-btn')?.addEventListener('click', exportRofPdf);
     document.getElementById('rof-start-bake-btn')?.addEventListener('click', startBake);
     document.getElementById('rof-bake-again-btn')?.addEventListener('click', () => {
-      rofGame.resetBake();
+      if (lay) restoreAssembled(); else rofGame.resetBake();
       bakeState = 'ready';
       renderTrayStepPanel();
     });
     document.getElementById('rof-trim-btn')?.addEventListener('click', () => { goToRofStep('trim'); renderTrayStepPanel(); });
     if (pre && !ready) wirePrebakeMeasure();
+    if (lay) refreshLayerBakeView();
     document.getElementById('rof-fill-btn')?.addEventListener('click', () => startFillFlow({ fromPrebake: true }));
     if (!sheetMode) updatePlaceSummary();
   }
@@ -11992,8 +12017,10 @@ function renderRecipeOnFireView(main) {
     if (!r || !r.plan.ok || !r.baseCfg.prebake) return;
     const row = r.plan.layers[0];
     riseModel = layerRiseModel(r.base);
-    riseScale = Number(r.baseCfg.riseScale) || 1;
-    prefillBakeParams(collectTextListFieldValue(r.base, makeProcessMethodCfg(r.base)) || '');
+    useLayerBake('prebake', () => {
+      riseScale = Number(r.baseCfg.riseScale) || 1;
+      prefillBakeParams(collectTextListFieldValue(r.base, makeProcessMethodCfg(r.base)) || '');
+    });
     prebakeInfo = { name: r.base.name || '(untitled process)', gramsPerTray: row.rawPerTray, rawHeightCm: row.rawHeightCm, trays: r.plan.trays };
     sheetInfo = null;
     bakeState = 'ready';
@@ -12068,11 +12095,98 @@ function renderRecipeOnFireView(main) {
     const L = window.RofGame.layers;
     const rise = measured > 0
       ? L.riseForHeight(prebakeInfo.rawHeightCm, measured)
-      : layerHMul(selectedProcesses().find(p => String(p.localId) === layerOrder[0])) * riseScale;
-    rofGame.setDoughState({ rise });
+      : layerHMul(selectedProcesses().find(p => String(p.localId) === layerOrder[0])) * (Number(c?.riseScale) || 1);
+    rofGame.setDoughState(prebakeSheetState ? { rise, bake: prebakeSheetState.bake } : { rise });
   }
   // The bake just finished: a measurement she typed before stays and is shown.
-  function onPrebakeDone() { showPrebakeHeight(); }
+  function onPrebakeDone() {
+    const st = rofGame?.getSheet();
+    prebakeSheetState = st ? { rise: st.rise, bake: st.bake } : null;
+    showPrebakeHeight();
+  }
+  // Swaps the active bake's settings (oven, doneness, rise correction) out and `which` bake's in; a bake seen for
+  // the first time starts from defaults and `init` (which pre-fills them). Layers only.
+  function useLayerBake(which, init) {
+    if (activeLayerBake) layerBakeSlots[activeLayerBake] = { params: bakeParams, doneness: bakeDoneness, rise: riseScale };
+    activeLayerBake = which;
+    const slot = which && layerBakeSlots[which];
+    if (slot) { bakeParams = slot.params; bakeDoneness = slot.doneness; riseScale = slot.rise; return; }
+    bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
+    bakeDoneness = 'golden';
+    riseScale = 1;
+    init?.();
+  }
+  // The stack as it was assembled: layers back to their assembled heights and colour (game.resetBake), and a
+  // pre-baked base back to how it came out of the pre-bake.
+  function restoreAssembled() {
+    if (!rofGame) return;
+    rofGame.resetBake();
+    if (layerCfg.get(layerOrder[0])?.prebake) showPrebakeHeight();
+  }
+
+  // ---- Layers: the final bake --------------------------------------------------------------------------
+  // The whole stack in the oven, each layer on its own terms: a pre-baked base keeps its height and browns a little
+  // more; everything else rises by its own estimate (a filling sets and puffs a little; a raw dough base rises like a
+  // dough) and browns at its own speed. Same Bake panel; its own oven settings, doneness and rise correction.
+  function startLayerBakeFlow() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return;
+    useLayerBake('final', () => {
+      // The oven settings from the methods of the layers that bake now, top layer first (where they usually are).
+      const baking = r.procs.filter((p, i) => !(i === 0 && r.baseCfg.prebake)).reverse();
+      prefillBakeParams(baking.map(p => collectTextListFieldValue(p, makeProcessMethodCfg(p))).filter(Boolean).join('\n'));
+    });
+    layerFinalRise = riseScale;
+    riseModel = { ...layerRiseModel(r.base), notes: layerBakeNotes(r) };
+    bakeState = 'ready';
+    goToRofStep('bake');
+    renderTrayStepPanel();
+  }
+  // One line per layer: what it does in this bake and the height it ends at (est.).
+  function layerBakeNotes(r) {
+    return r.plan.layers.map((row) => {
+      const p = r.procs.find(x => String(x.localId) === row.key);
+      const name = `<strong dir="auto">${escHtml(row.name)}</strong>`;
+      if (row.prebake) return `${name}: already baked -- stays at ${cmFmt(row.assemblyHeightCm)}${row.measured ? ' (measured)' : ''}, browns a little more.`;
+      const m = layerRiseModel(p);
+      // The rise estimate's own verdict ("strong rise", "only a little steam spring"...), or a filling's.
+      const verdict = m.notes.find(n => n.startsWith('→'))?.slice(2) || (/steam spring/.test(m.notes[0] || '') ? 'only a little steam spring' : 'rises');
+      const what = m.identified ? verdict : 'sets and puffs a little (a filling)';
+      return `${name}: ${escHtml(what)} -- ${cmFmt(row.rawHeightCm)} → ${cmFmt(row.finalHeightEstCm)} <span class="rof-layer-est">est.</span>`;
+    });
+  }
+  // The rise correction moved: the notes' heights, the summary and the cross-section follow.
+  function refreshLayerBakeView() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return;
+    const notes = document.querySelector('#rof-step-panel .rof-rise-notes');
+    if (notes) notes.innerHTML = layerBakeNotes(r).map(n => `<li>${n}</li>`).join('');
+    const sum = document.getElementById('rof-place-summary');
+    if (sum) sum.innerHTML = layerBakeSummaryHtml(bakeState === 'ready');
+    showLayerStack(r, { baked: bakeState === 'done' });
+  }
+  function layerBakeSummaryHtml(ready) {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return '';
+    const plan = r.plan, P = window.RofGame.portions, g = (v) => `${P.fmtGrams(v)} g`;
+    const rim = bakeSnapshot.footprint.usableHeightCm;
+    return `
+      <div class="computed-value-box" style="margin:10px 0; font-weight:normal; font-size:12.5px; line-height:1.55;">
+        ${ready
+          ? `<div>Stack <strong>${cmFmt(plan.assembledHeightCm)}</strong> → about ${cmFmt(plan.finalHeightEstCm)} after the bake <span class="rof-layer-est">est.</span></div>
+             <div>${g(plan.rawPerTrayGrams)} per tray going in</div>`
+          : `<div>Baked stack about <strong>${cmFmt(plan.finalHeightEstCm)}</strong> <span class="rof-layer-est">est.</span></div>
+             <div>${g(plan.finishedPerTrayGrams)} per tray after Baking Waste</div>`}
+        ${plan.finalHeightEstCm > rim + 1e-9 ? `<div class="rof-leftover">About ${cmFmt(plan.finalHeightEstCm)} is above the tray's ${cmFmt(rim)} usable height.</div>` : ''}
+      </div>`;
+  }
+  // Leaving the final bake for Fill: the stack goes back to how it was assembled.
+  function backToFill() {
+    restoreAssembled();
+    useLayerBake(null);
+    goToRofStep('fill');
+    renderTrayStepPanel();
+  }
 
   // ---- Layers: the Fill step -----------------------------------------------------------------------
   // Each layer above the base is poured on the one below: all of it, or up to a height (from the tray floor, what a
@@ -12082,6 +12196,7 @@ function renderRecipeOnFireView(main) {
   function startFillFlow({ fromPrebake }) {
     const r = computeLayerPlan();
     if (!r || !r.plan.ok) return;
+    useLayerBake(null); // keeps the pre-bake's settings for when she comes back to it
     goToRofStep('fill');
     renderTrayStepPanel();
     ensureRofGame().then((game) => {
@@ -12105,7 +12220,9 @@ function renderRecipeOnFireView(main) {
     })), { pour });
   }
   function backToPrebake() {
+    if (rofStep === 'bake') restoreAssembled();
     if (rofGame) rofGame.setFillLayers([]);
+    useLayerBake('prebake');
     goToRofStep('prebake');
     bakeState = 'done';
     renderTrayStepPanel();
@@ -12139,7 +12256,7 @@ function renderRecipeOnFireView(main) {
       <div class="computed-value-box rof-fill-total" id="rof-fill-total" role="status" aria-live="polite"></div>
       <div class="rof-actions">
         <button type="button" class="secondary" id="rof-fill-back-btn">${pre ? '← Pre-bake' : '← Edit Setup'}</button>
-        <button type="button" class="primary" id="rof-fill-bake-btn" disabled title="The final bake is the next part of this build.">Bake →</button>
+        <button type="button" class="primary" id="rof-fill-bake-btn">Bake →</button>
       </div>`;
     panel.querySelectorAll('[data-fill-layer]').forEach(box => {
       const id = box.dataset.fillLayer, c = layerCfg.get(id);
@@ -12157,12 +12274,13 @@ function renderRecipeOnFireView(main) {
       });
     });
     document.getElementById('rof-fill-back-btn').addEventListener('click', () => (pre ? backToPrebake() : backToSetup()));
+    document.getElementById('rof-fill-bake-btn').addEventListener('click', startLayerBakeFlow);
     refreshFillNumbers();
   }
   // The cross-section (rof/stack.js) in the stage's top-left corner: each layer to scale in its colour, the rim, and
   // the estimated height after the bake. `r` = computeLayerPlan() result; null hides it.
   const BASE_COLOR = { raw: '#ecd7a3', baked: '#c9924e' };
-  function showLayerStack(r) {
+  function showLayerStack(r, { baked = false } = {}) {
     let el = document.getElementById('rof-stack');
     if (!r || !r.plan.ok) { if (el) el.hidden = true; return; }
     if (!el) {
@@ -12172,13 +12290,15 @@ function renderRecipeOnFireView(main) {
       gameWrapEl.appendChild(el);
     }
     const procOf = (key) => r.procs.find(p => String(p.localId) === key);
+    // Before the bake: the assembled stack, with the after-bake estimate dashed. After it: the estimated baked heights.
     el.innerHTML = window.RofGame.stackSvg({
+      title: baked ? 'BAKED (EST.)' : 'CROSS-SECTION',
       rimCm: bakeSnapshot.footprint.usableHeightCm,
-      finalCm: r.plan.finalHeightEstCm,
+      finalCm: baked ? null : r.plan.finalHeightEstCm,
       layers: r.plan.layers.map((row, i) => ({
-        name: row.name, heightCm: row.assemblyHeightCm,
-        color: i === 0 ? (row.prebake ? BASE_COLOR.baked : BASE_COLOR.raw) : window.RofGame.fillingLook(riseRowsOf(procOf(row.key))).base,
-        note: i === 0 ? (row.prebake ? (row.measured ? 'measured' : 'pre-baked') : 'raw') : '',
+        name: row.name, heightCm: baked ? row.finalHeightEstCm : row.assemblyHeightCm,
+        color: i === 0 ? (row.prebake || baked ? BASE_COLOR.baked : BASE_COLOR.raw) : window.RofGame.fillingLook(riseRowsOf(procOf(row.key))).base,
+        note: i === 0 ? (row.prebake ? (row.measured ? 'measured' : 'pre-baked') : baked ? 'est.' : 'raw') : baked ? 'est.' : '',
       })),
     });
     el.hidden = false;
@@ -12192,6 +12312,8 @@ function renderRecipeOnFireView(main) {
     if (!plan.ok) {
       document.querySelectorAll('[data-fill-line]').forEach(el => { el.innerHTML = ''; });
       totalEl.innerHTML = plan.errors.map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('');
+      const bb = document.getElementById('rof-fill-bake-btn');
+      if (bb) { bb.disabled = true; bb.title = 'Fix the heights first.'; }
       return;
     }
     plan.layers.slice(1).forEach(row => {
@@ -12199,6 +12321,8 @@ function renderRecipeOnFireView(main) {
       if (el) el.innerHTML = `${g(row.rawPerTray)} per tray &middot; ${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}${layerUseHtml(row, plan.trays)}`;
     });
     const base = plan.layers[0];
+    const bb = document.getElementById('rof-fill-bake-btn');
+    if (bb) { bb.disabled = false; bb.title = ''; }
     showLayerStack(r);
     totalEl.innerHTML = `
       <div>Base: <span dir="auto">${escHtml(base.name)}</span> ${cmFmt(base.assemblyHeightCm)} ${base.prebake ? (base.measured ? 'pre-baked, measured' : 'pre-baked <span class="rof-layer-est">est.</span>') : 'raw'}</div>

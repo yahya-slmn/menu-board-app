@@ -150,13 +150,14 @@ export function createSheet({ region, plan, thicknessCm, seed = 7, makeMaterial 
   group.add(mesh);
   // A custom material has no dough uniforms; the calls below that set them become no-ops.
   const u = material.userData.uniforms || { uRise: {}, uBake: {}, uScrap: {}, uHasCuts: {} };
-  let rise = 0;
+  let rise = 0, bake = 0;
   return {
     group, mesh, material, mask, thicknessCm: H,
     dough: null,
     setRise(h) { rise = h; mesh.morphTargetInfluences[0] = h; u.uRise.value = clamp(h, 0, 1.2); },
-    setBake(v) { u.uBake.value = clamp(v, 0, 1); },
+    setBake(v) { bake = clamp(v, 0, 1); u.uBake.value = bake; },
     get rise() { return rise; },
+    get bake() { return bake; },
     // Height of the top surface at its thickest, for the current rise (cutters and ghosts sit relative to it).
     topY() { return H * (1 + RISE_H * rise); },
     setScrapHighlight(on) { u.uScrap.value = on ? 1 : 0; },

@@ -4,13 +4,13 @@
 // Pure: returns an SVG string (renderer.js puts it on the stage).
 //
 // desc: { layers: [{ name, heightCm, color, note }] (bottom first; note e.g. "measured"), rimCm (the tray's usable
-//         height), finalCm (optional: estimated total after the bake) }
+//         height), finalCm (optional: estimated total after the bake), title (default CROSS-SECTION) }
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (v) => `${Math.round(v * 100) / 100}`;
 const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 
-export function stackSvg({ layers = [], rimCm = 0, finalCm = null } = {}) {
+export function stackSvg({ layers = [], rimCm = 0, finalCm = null, title = 'CROSS-SECTION' } = {}) {
   const W = 236, H = 158, x0 = 30, x1 = 104, yFloor = 136, yTop = 22;
   const total = layers.reduce((s, l) => s + Math.max(0, l.heightCm || 0), 0);
   const maxH = Math.max(rimCm || 0, total, finalCm || 0, 0.5) * 1.08;
@@ -65,7 +65,7 @@ export function stackSvg({ layers = [], rimCm = 0, finalCm = null } = {}) {
   const summary = layers.filter(l => l.heightCm > 0).map(l => `${l.name} ${fmt(l.heightCm)} cm`).join(', ');
   const aria = `Cross-section: ${summary}; ${fmt(total)} cm in all${rimCm > 0 ? `, tray rim at ${fmt(rimCm)} cm` : ''}${finalCm > 0 ? `, about ${fmt(finalCm)} cm after the bake` : ''}.`;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(aria)}">
-    <text x="${x0 + 4}" y="11" font-size="10" font-weight="600" letter-spacing=".06em" fill="rgba(230,238,230,.85)">CROSS-SECTION</text>
+    <text x="${x0 + 4}" y="11" font-size="10" font-weight="600" letter-spacing=".06em" fill="rgba(230,238,230,.85)">${esc(title)}</text>
     ${parts.join('')}
   </svg>`;
 }
