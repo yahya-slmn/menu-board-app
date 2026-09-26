@@ -11,6 +11,7 @@ import { prefersReducedMotion } from './quality.js';
 import { createSheet } from './sheet.js';
 import { packCutters } from './packing.js';
 import { analyzeScrap } from './scrap.js';
+import { planKnifeGrid, buildKnifeLines } from './knifeGrid.js';
 import { createPortionModel, drawDims, project } from './portion.js';
 
 // Public entry point for the Recipe on Fire game view. renderer.js (a classic script) reaches this
@@ -45,6 +46,7 @@ export function createRofGame(container, opts = {}) {
   let stageCenter = { x: 0, y: 0 };
   let oven = null;
   let sheet = null;        // Sheet & Trim: the dough as one mass in the tray
+  let knife = null;        // Sheet & Trim, Trim by Knife: { plan, cuts, lines, solid } (see setKnifeGrid)
   let armed = null;        // { shapeType, dims, materialId } -- the cutter that follows the pointer
   let ghost = null;        // the see-through cutter shown at the pointer while one is armed
   const items = [];
@@ -231,11 +233,14 @@ export function createRofGame(container, opts = {}) {
   function setInteractive(on) { interaction.setEnabled(on); }
   // ---- Sheet & Trim ---------------------------------------------------------------------------------
   const cutterItems = () => items.filter(i => i.kind === 'cutter');
+  // Everything cut from the sheet: stamped / arranged cutters, or the pieces of a knife grid (never both).
+  // Knife pieces aren't items (nothing to drag); they carry the same fields the mask / scrap / UI read.
+  const allCuts = () => (knife ? cutterItems().concat(knife.cuts) : cutterItems());
   const describeCutter = (it) => ({ id: it.id, x: it.tx, y: it.ty, rot: it.rotT, data: it.data });
   // Redraws the mask the sheet uses to tell "inside a cutter" from "scrap", and tells the UI.
   function cuttersChanged() {
     if (!sheet) return;
-    const cs = cutterItems();
+    const cs = allCuts();
     sheet.mask.redraw(cs.map(c => ({ poly: c.poly, x: c.tx, y: c.ty, rot: c.rotT })));
     sheet.setHasCuts(cs.length);
     stage.requestRender();
@@ -258,7 +263,7 @@ export function createRofGame(container, opts = {}) {
   function scheduleScrap() { clearTimeout(scrapTimer); scrapTimer = setTimeout(runScrap, 90); }
   function runScrap() {
     if (!sheet || !tray || tray.region.kind === 'cups') { scrap = null; renderFlags(); return; }
-    const cs = cutterItems();
+    const cs = allCuts();
     // A round cutter's outline is a 32-gon; use its true circle area so the numbers match the panel's exactly.
     const exact = (c) => (c.data.shapeType === 'round' ? Math.PI * (c.data.dims.diameterCm / 2) ** 2 : undefined);
     scrap = cs.length ? analyzeScrap({ region: tray.region, cutters: cs.map(c => ({ poly: c.poly, x: c.tx, y: c.ty, rot: c.rotT, area: exact(c) })) }) : null;
@@ -288,7 +293,7 @@ export function createRofGame(container, opts = {}) {
     ensureScrapDom();
     flagEls.splice(0).forEach(f => f.el.remove());
     // The switch is there whenever there are cutters on a sheet; the chip and flags only while highlighting.
-    scrapRow.hidden = !(sheet && cutterItems().length);
+    scrapRow.hidden = !(sheet && allCuts().length);
     scrapBtn.setAttribute('aria-pressed', String(scrapOn));
     const show = scrapOn && scrap && scrap.regions.length && sheetGrams > 0;
     chipEl.hidden = !show; if (tipEl && !show) tipEl.hidden = true;
@@ -346,6 +351,7 @@ export function createRofGame(container, opts = {}) {
   function endSheet() {
     closePortion({ quiet: true });
     disarmCutter();
+    dropKnife();
     clearItems();
     if (sheet) { stage.scene.remove(sheet.group); sheet.dispose(); sheet = null; }
     scrap = null; clearTimeout(scrapTimer);
@@ -450,6 +456,7 @@ export function createRofGame(container, opts = {}) {
   // Replaces every cutter with `list` ([{ shapeType, dims, x, y, materialId }]) -- used by auto-arrange.
   function setCutters(list) {
     closePortion({ quiet: true });
+    dropKnife();
     cutterItems().forEach(c => removeItem(c.id, { quiet: true }));
     list.forEach((c, i) => { const d = addCutter({ ...c, data: { materialId: c.materialId } }); const it = d && items.find(x => x.id === d.id); if (it) it.lift = fall(4 + (i % 6) * 0.5); });
     cuttersChanged();
@@ -470,7 +477,45 @@ export function createRofGame(container, opts = {}) {
     if (!tray || tray.region.kind === 'cups') return 0;
     return packCutters({ region: tray.region, shapeType, dims, marginCm, gapCm }).placements.length;
   }
-  function clearCutters() { closePortion({ quiet: true }); cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
+  function clearCutters() { closePortion({ quiet: true }); dropKnife(); cutterItems().forEach(c => removeItem(c.id, { quiet: true })); cuttersChanged(); }
+
+  // ---- Trim by Knife ---------------------------------------------------------------------------------
+  // A centred grid of straight cuts (knifeGrid.js). Replaces any cutters. `solid` = cut (solid lines) vs
+  // still marking (dotted). Returns the plan: { count, cols, rows, leftover: { across, down }, fits }.
+  function dropKnife() {
+    if (!knife) return;
+    if (knife.lines) { knife.lines.parent?.remove(knife.lines); knife.lines.userData.dispose(); }
+    knife = null;
+  }
+  function drawKnifeLines() {
+    if (!knife || !sheet) return;
+    if (knife.lines) { knife.lines.parent?.remove(knife.lines); knife.lines.userData.dispose(); }
+    // In the sheet's own space (it sits at the tray floor), just over its risen top.
+    knife.lines = buildKnifeLines(knife.plan.cuts, { y: sheet.topY() + 0.06, solid: knife.solid });
+    sheet.group.add(knife.lines);
+    stage.requestRender();
+  }
+  function setKnifeGrid({ acrossCm, downCm, solid = false }) {
+    closePortion({ quiet: true });
+    disarmCutter();
+    if (!sheet || !tray || tray.region.kind === 'cups') return planKnifeGrid({ region: null });
+    cutterItems().forEach(c => removeItem(c.id, { quiet: true }));
+    dropKnife();
+    const plan = planKnifeGrid({ region: tray.region, acrossCm, downCm });
+    const hx = acrossCm / 2, hy = downCm / 2;
+    const poly = [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+    const data = { shapeType: 'rectangular', dims: { lengthCm: acrossCm, widthCm: downCm }, materialId: 'knife' };
+    knife = { plan, solid, lines: null, cuts: plan.cells.map((c, i) => ({ id: `knife-${i}`, tx: c.x, ty: c.y, rotT: 0, poly, data })) };
+    drawKnifeLines();
+    cuttersChanged();
+    return plan;
+  }
+  function setKnifeSolid(solid) {
+    if (!knife || knife.solid === solid) return;
+    closePortion({ quiet: true });
+    knife.solid = solid;
+    drawKnifeLines();
+  }
   function setScrapHighlight(on) { scrapOn = on; sheet?.setScrapHighlight(on); renderFlags(); stage.requestRender(); }
   function setSheetGrams(g) { sheetGrams = g; renderFlags(); }
 
@@ -1002,9 +1047,9 @@ export function createRofGame(container, opts = {}) {
   const api = {
     setTray, clearTray, addCutter, addDough, setDoughState, showLookdev, removeItem, clearItems, on,
     beginPlacement, endPlacement, autoArrange, returnAllToBench, playBake, resetBake, setInteractive,
-    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, planCutters, clearCutters, setScrapHighlight, setSheetGrams,
+    beginSheet, endSheet, armCutter, disarmCutter, setCutters, autoArrangeCutters, planCutters, clearCutters, setKnifeGrid, setKnifeSolid, setScrapHighlight, setSheetGrams,
     getScrap: scrapSummary,
-    getCutters: () => cutterItems().map(describeCutter),
+    getCutters: () => allCuts().map(describeCutter),
     getSheet: () => sheet && { topY: sheet.topY(), thicknessCm: sheet.thicknessCm },
     setSfx: (fns) => Object.assign(sfx, fns),
     showPortion: openPortion, hidePortion: closePortion, capturePortion, isPortionOpen: () => !!portion, getPortion: () => portion?.desc || null,

@@ -797,6 +797,12 @@ table.materials-table td.cat-cell {
 .rof-compact-text span { font-size: 12px; color: var(--neutral); }
 .rof-compact button { flex: 0 0 auto; padding: 6px 12px; font-size: 12px; }
 .rof-side .mode-toggle-btn { padding: 7px 9px; font-size: 12px; white-space: nowrap; }
+.rof-trim-mode { margin-bottom: 10px; }
+.rof-knife-row { display: flex; gap: 8px; align-items: flex-end; }
+.rof-knife-row .field { margin: 0; flex: 0 1 110px; min-width: 0; }
+.rof-knife-row .field input { width: 100%; }
+.rof-knife-row button { flex: 0 0 auto; margin-left: auto; min-width: 96px; }
+#rof-knife-info { margin-bottom: 4px; }
 .rof-cutter-pick { margin-bottom: 10px; }
 .rof-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .rof-cutter-row { display: flex; gap: 8px; align-items: center; }

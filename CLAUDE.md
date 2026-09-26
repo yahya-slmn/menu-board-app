@@ -329,6 +329,13 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   (2026-09-26) plus a "Place by hand" toggle; choosing one shows, before anything is placed, one portion's finished / raw
   weight, size, estimated thickness and how many Auto-arrange would cut (`updateCutterInfo`: `cutPortionFor`, the same
   arithmetic as the portion view, and `game.planCutters`, the packer without placing).
+- Trim by Knife (2026-09-26; Trim's "Cutter | Trim by Knife" switch -- switching clears the tray): a uniform grid of straight
+  cuts, no Materials entry. Two numbers, the piece size Across / Down (cm); the grid is CENTRED, so leftover is two equal
+  strips on opposite edges; no gap or wall margin (a knife takes no dough); on round / triangle trays only wholly-inside
+  cells count. `rof/knifeGrid.js` (`planKnifeGrid`, pure; `buildKnifeLines`, one InstancedMesh). `game.setKnifeGrid` turns
+  the cells into rectangle "cuts" (`materialId: 'knife'`, not items: nothing to drag) that go through the SAME mask / scrap
+  / portion / PDF code as cutter pieces (`allCuts`). Dotted lines = preview; Cut -> solid lines, inputs locked, One portion /
+  Export PDF enabled (`cutsReady`); Edit cuts unlocks. Default size = the square giving `recipes.portion_weight_grams`, else 5 cm.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.

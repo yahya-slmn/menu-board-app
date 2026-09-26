@@ -10379,8 +10379,13 @@ function renderRecipeOnFireView(main) {
   let cutterMaterials = [];      // cutter-category Materials
   let armedCutterId = null;      // which cutter Material follows the pointer, if any
   let lastCutterId = null;       // last cutter chosen (auto-arrange uses it even after the pointer is freed)
-  let cutterList = [];           // cutters currently on the sheet, as reported by the game
+  let cutterList = [];           // cutters currently on the sheet, as reported by the game (or a knife grid's pieces)
   let trimNote = '';
+  // Trim step: 'cutter' (stamp / arrange cutters from Materials) or 'knife' (a centred grid of straight cuts; no
+  // material involved). knifeSpec = { across, down, cut }: the piece size in cm, and whether she pressed Cut
+  // (dotted preview -> solid lines; One portion / Export PDF wait for it). The sizes last for the screen visit.
+  let trimMode = 'cutter';
+  let knifeSpec = null;
   // Frozen when "Continue ->" is clicked on Setup: every later step computes off THIS snapshot, never
   // off live tray inputs, since those controls are gone once the Setup panel is replaced.
   let bakeSnapshot = null; // { material, dims, footprint, netWeight }
@@ -10460,6 +10465,7 @@ function renderRecipeOnFireView(main) {
     placeSession = null; placeCount = null; placeNote = '';
     placeGrams = null; placeGramsUser = false;
     cutterList = []; armedCutterId = null; trimNote = ''; sheetInfo = null;
+    if (knifeSpec) knifeSpec.cut = false;
     riseScale = 1;
     bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
   }
@@ -11262,6 +11268,11 @@ function renderRecipeOnFireView(main) {
       speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams finished. About ${cmSpeech(m.lengthCm)} ${m.round ? 'across' : 'long'}${m.round ? '' : `, ${cmSpeech(m.widthCm)} wide`}, ${cmSpeech(m.heightCm)} tall, estimated.`,
     };
   }
+  // What a group of cut pieces is called: the cutter's catalog name, or "Knife cut" for a knife grid.
+  const cutName = (key) => (String(key) === 'knife' ? 'Knife cut' : (cutterMaterials.find(c => String(c.id) === String(key)) || {}).name || 'Cutter');
+  // Whether the cut is final enough for One portion / Export PDF: any cutter placed, or a knife grid that was Cut.
+  const cutsReady = () => cutterList.length > 0 && (trimMode !== 'knife' || !!knifeSpec?.cut);
+  const notReadyText = () => (trimMode === 'knife' ? 'Cut the tray first' : 'Place a cutter first');
   function cutGroups() {
     const groups = new Map();
     for (const c of cutterList) {
@@ -11286,7 +11297,6 @@ function renderRecipeOnFireView(main) {
     const g = groups.find(x => x.key === String(key)) || groups.find(x => x.key === String(lastCutterId)) || groups.sort((a, b) => b.n - a.n)[0];
     const P = window.RofGame.portions;
     const { desc, m, grams } = cutPortionFor(g.data.shapeType, g.data.dims);
-    const mat = cutterMaterials.find(x => String(x.id) === g.key);
     const rows = portionWeightRows(grams);
     if (g.data.shapeType === 'round') rows.push({ label: 'Diameter', value: cmText(m.diameterCm) });
     else if (g.data.shapeType === 'rectangular') rows.push({ label: 'Length', value: cmText(m.lengthCm) }, { label: 'Width', value: cmText(m.widthCm) });
@@ -11294,8 +11304,8 @@ function renderRecipeOnFireView(main) {
     rows.push({ label: 'Thickness', value: cmText(m.heightCm, true), est: true });
     rows.push({ label: 'Before rising', value: `${Math.round(m.rawHeightCm * 100) / 10} mm` });
     rows.push({ label: 'Area', value: `${roundNice(m.areaCm2)} cm²` });
-    const choices = groups.length > 1 ? groups.map(x => ({ key: x.key, label: (cutterMaterials.find(c => String(c.id) === x.key) || {}).name || 'Cutter' })) : null;
-    const name = mat ? mat.name : 'Cut piece';
+    const choices = groups.length > 1 ? groups.map(x => ({ key: x.key, label: cutName(x.key) })) : null;
+    const name = cutName(g.key);
     return {
       ...desc, measures: m, weightGrams: grams, title: 'One portion', subtitle: `${name} · ${doneLabelOf(bakeDoneness)}`, rows,
       tray: trayCard(`${g.n} of ${cutterList.length} pieces cut`),
@@ -11339,7 +11349,7 @@ function renderRecipeOnFireView(main) {
     const pctOf = (w) => { const v = parseFloat(w.percent); return isNaN(v) ? 0 : v; };
     const fmtPct = (v) => `${Math.round(v * 10) / 10}%`;
     const desc = portionDesc();
-    if (!desc) throw new Error(sheetMode ? 'Place a cutter first.' : 'Nothing to print yet.');
+    if (!desc) throw new Error(sheetMode ? `${notReadyText()}.` : 'Nothing to print yet.');
 
     // Dough and wastage: every waste on the recipe, each against the running total just before it.
     const dough = [{ label: 'Process', value: procs.map(p => p.name || '(untitled process)').join(' + ') }, { label: 'Total quantity', value: g(total) }];
@@ -11357,13 +11367,12 @@ function renderRecipeOnFireView(main) {
     if (sheetMode) {
       const groups = cutGroups();
       const thick = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
-      make = { title: 'Sheet & cutters', rows: [
+      make = { title: trimMode === 'knife' ? 'Sheet & knife cuts' : 'Sheet & cutters', rows: [
         { label: 'Net Weight on this tray', value: g(sheetInfo.sessionGrams), note: sheetInfo.sessions > 1 ? `This batch needs ${sheetInfo.sessions} trays; the figures below are for one.` : '' },
         { label: 'Sheet thickness', value: `${Math.round(thick * 100) / 10} mm`, note: `about ${window.RofGame.fmtCm(desc.measures.heightCm, true)} once baked (est.)` },
         ...groups.map(x => {
-          const mat = cutterMaterials.find(c => String(c.id) === x.key);
           const area = cutterUnitAreaCm2(x.data.shapeType, x.data.dims);
-          return { label: `${x.n} × ${mat ? mat.name : 'Cutter'}`, value: `${g((area / fp.areaCm2) * sheetInfo.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
+          return { label: `${x.n} × ${cutName(x.key)}`, value: `${g((area / fp.areaCm2) * sheetInfo.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
         }),
         { label: 'Pieces cut', value: String(cutterList.length) },
         { label: 'Tray used by pieces', value: `${Math.round((trimScrap().covered / fp.areaCm2) * 100)}%` },
@@ -11443,7 +11452,7 @@ function renderRecipeOnFireView(main) {
     } catch (err) {
       say(`Could not export the PDF: ${err.message}`);
     } finally {
-      btn.disabled = rofMode === 'sheet' && cutterList.length === 0;
+      btn.disabled = rofMode === 'sheet' && !cutsReady();
     }
   }
 
@@ -11665,11 +11674,22 @@ function renderRecipeOnFireView(main) {
   function updateTrimSummary() {
     const el = document.getElementById('rof-trim-summary');
     if (!el || !bakeSnapshot || !sheetInfo) return;
+    const ready = cutsReady();
     const pbtn = document.getElementById('rof-portion-btn');
-    if (pbtn) { pbtn.disabled = cutterList.length === 0; pbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
+    if (pbtn) { pbtn.disabled = !ready; pbtn.title = ready ? '' : notReadyText(); }
     const xbtn = document.getElementById('rof-export-pdf-btn');
-    if (xbtn) { xbtn.disabled = cutterList.length === 0; xbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
+    if (xbtn) { xbtn.disabled = !ready; xbtn.title = ready ? '' : notReadyText(); }
+    if (trimMode === 'knife') updateKnifeInfo();
     const { footprint } = bakeSnapshot, grams = sheetInfo.sessionGrams;
+    // Knife, not cut yet: the readout above already has every number; say the lines are only a preview.
+    if (trimMode === 'knife') {
+      // The readout above already has every number (portion, pieces, trim); this just says where things stand.
+      const covered = trimScrap().covered;
+      el.innerHTML = `<div class="computed-value-box" style="margin:10px 0;"><div style="color:var(--neutral); font-size:12.5px;">${ready
+        ? `<strong style="color:var(--ink);">Cut:</strong> ${cutterList.length} pieces &middot; ${Math.round((covered / footprint.areaCm2) * 100)}% of the tray used`
+        : 'Dotted lines are a preview: nothing is cut until you press Cut.'}</div></div>`;
+      return;
+    }
     if (cutterList.length === 0) {
       el.innerHTML = `<div class="computed-value-box" style="margin:12px 0;"><div style="color:var(--neutral); font-size:12.5px;">${trimNote || 'No cutters placed yet.'}</div></div>`;
       return;
@@ -11706,10 +11726,113 @@ function renderRecipeOnFireView(main) {
     rofGame.announce(`${res.count} cutters arranged. Scrap ${Math.round(sc.grams)} grams, ${Math.round(sc.pct)} percent of the dough.`);
   }
 
+  // ---- Trim by Knife --------------------------------------------------------------------------------
+  // A centred grid of straight cuts (renderer/rof/knifeGrid.js): two numbers, the piece size across and down.
+  // The dotted lines are a preview; Cut makes them solid and final (One portion / Export PDF), Edit cuts
+  // unlocks them. Every piece is one portion, weighed exactly like a cutter piece (cutPortionFor).
+  const KNIFE_MIN_CM = 1, KNIFE_MAX_CM = 100;
+  // Starting size: the square that gives the recipe's portion weight, when it has one; else 5 x 5 cm.
+  function knifeDefaultCm() {
+    const pw = Number(selectedRecipe?.portion_weight_grams);
+    const fp = bakeSnapshot.footprint;
+    if (pw > 0 && sheetInfo.sessionGrams > 0) {
+      const side = Math.sqrt((pw * fp.areaCm2) / sheetInfo.sessionGrams);
+      return Math.min(20, Math.max(2, Math.round(side * 2) / 2));
+    }
+    return 5;
+  }
+  let knifePlan = null; // the game's last grid plan (counts, leftover strips)
+  function applyKnifeGrid() {
+    if (!rofGame || !knifeSpec) return;
+    knifePlan = rofGame.setKnifeGrid({ acrossCm: knifeSpec.across, downCm: knifeSpec.down, solid: knifeSpec.cut });
+    updateTrimSummary(); // the game reported the pieces synchronously
+  }
+  const cmNice = (v) => `${Math.round(v * 10) / 10} cm`;
+  // The readout above Cut: one portion (the same rows the cutter readout and the portion view use), the grid,
+  // and the trim -- the edge strips that don't make a whole piece, split evenly on opposite sides.
+  function updateKnifeInfo() {
+    const el = document.getElementById('rof-knife-info');
+    const cutBtn = document.getElementById('rof-knife-cut-btn');
+    if (!el || !knifeSpec) return;
+    const plan = knifePlan;
+    if (cutBtn && !knifeSpec.cut) cutBtn.disabled = !(plan && plan.fits);
+    if (!plan || !plan.fits) {
+      el.innerHTML = '<div class="rof-cutter-info-line"><span class="rof-leftover">Too big for this tray: no whole piece fits.</span></div>';
+      return;
+    }
+    const P = window.RofGame.portions, dims = { lengthCm: knifeSpec.across, widthCm: knifeSpec.down };
+    const { m, grams } = cutPortionFor('rectangular', dims);
+    const [weight, raw] = portionWeightRows(grams);
+    const W = plan.cols * plan.across + 2 * plan.leftover.across, H = plan.rows * plan.down + 2 * plan.leftover.down;
+    const rect = bakeSnapshot.material.shape_type === 'rectangular';
+    const sides = [];
+    if (plan.leftover.across >= 0.05) sides.push(`${cmNice(plan.leftover.across)} strip left and right`);
+    if (plan.leftover.down >= 0.05) sides.push(`${cmNice(plan.leftover.down)} top and bottom`);
+    const sc = trimScrap();
+    const trimText = sc.grams < 0.05
+      ? 'No trim: the pieces fill the tray exactly.'
+      : `Trim: ${rect ? (sides.join(', ') || 'none') : 'the edges outside the whole pieces'} &middot; ${P.fmtGrams(sc.grams)} g (${P.fmtGrams(sc.pct)}%)`;
+    el.innerHTML = `
+      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} raw dough (est.)` : 'no Baking Waste'}</div>
+      <div class="rof-cutter-info-line">${cutterPieceSizeLabel('rectangular', dims)} &middot; about ${cmText(m.heightCm, true)} thick (est.)</div>
+      <div class="rof-cutter-info-line"><strong>${plan.count}</strong> pieces${rect ? ` (${plan.cols} across × ${plan.rows} down) &middot; tray inside ${Math.round(W * 10) / 10} × ${Math.round(H * 10) / 10} cm` : ''}</div>
+      <div class="rof-cutter-info-line${sc.grams < 0.05 ? '' : ' rof-leftover'}">${trimText}</div>`;
+  }
+  function syncKnifeControls() {
+    const cut = !!knifeSpec?.cut;
+    ['rof-knife-across', 'rof-knife-down'].forEach(id => { const i = document.getElementById(id); if (i) i.disabled = cut; });
+    const btn = document.getElementById('rof-knife-cut-btn');
+    if (btn) {
+      btn.textContent = cut ? 'Edit cuts' : 'Cut';
+      btn.className = cut ? 'secondary' : 'primary';
+      btn.disabled = !cut && !(knifePlan && knifePlan.fits);
+    }
+  }
+  function onKnifeSize() {
+    const read = (id) => parseFloat(document.getElementById(id)?.value);
+    const a = read('rof-knife-across'), d = read('rof-knife-down');
+    const ok = (v) => v >= KNIFE_MIN_CM && v <= KNIFE_MAX_CM;
+    if (!ok(a) || !ok(d)) return; // half-typed: keep the last valid grid until the number is complete
+    knifeSpec.across = a; knifeSpec.down = d;
+    applyKnifeGrid();
+    syncKnifeControls();
+  }
+  function toggleKnifeCut() {
+    if (!knifeSpec) return;
+    knifeSpec.cut = !knifeSpec.cut;
+    rofGame.setKnifeSolid(knifeSpec.cut);
+    if (knifeSpec.cut) { playArrangeSound(); rofGame.announce(`Cut. ${knifePlan ? knifePlan.count : 0} pieces.`); }
+    else rofGame.announce('Editing the cuts. The lines are a preview again.');
+    syncKnifeControls();
+    updateTrimSummary();
+  }
+  // Cutter <-> Knife. A tray is cut one way or the other, so switching clears what is on it.
+  function setTrimMode(mode) {
+    if (mode === trimMode) return;
+    trimMode = mode;
+    if (mode === 'knife') {
+      rofGame.disarmCutter();
+      if (!knifeSpec) { const s0 = knifeDefaultCm(); knifeSpec = { across: s0, down: s0, cut: false }; }
+      knifeSpec.cut = false;
+    } else {
+      rofGame.clearCutters(); // drops the knife grid
+      if (knifeSpec) knifeSpec.cut = false;
+    }
+    renderTrimStepPanel(document.getElementById('rof-step-panel'));
+  }
+
   async function renderTrimStepPanel(panel) {
     if (rofGame) rofGame.setInteractive(true); // the bake switches input off; cutters need it back
-    panel.innerHTML = `
-      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Choose a cutter, then click the sheet to stamp it or use Auto-arrange. Drag to move one, scroll to turn it, Delete removes it. Right-drag turns the view.</div>
+    const knifeMode = trimMode === 'knife';
+    const tools = knifeMode ? `
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Set the piece size; the dotted lines show where the knife goes, centred on the tray. Cut when it looks right.</div>
+      <div class="rof-knife-row">
+        <div class="field"><label for="rof-knife-across">Across (cm)</label><input id="rof-knife-across" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${knifeSpec.across}" /></div>
+        <div class="field"><label for="rof-knife-down">Down (cm)</label><input id="rof-knife-down" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${knifeSpec.down}" /></div>
+        <button type="button" class="primary" id="rof-knife-cut-btn">Cut</button>
+      </div>
+      <div class="rof-cutter-info" id="rof-knife-info" role="status"></div>` : `
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Choose a cutter, then click the sheet to stamp it or use Auto-arrange. Drag to move one, scroll to turn it, Delete removes it.</div>
       <div class="rof-cutter-pick">
         <label for="rof-cutter-select" class="rof-sr-only">Cutter</label>
         <div class="rof-cutter-row">
@@ -11721,20 +11844,39 @@ function renderRecipeOnFireView(main) {
       <div style="display:flex; gap:8px; margin-bottom:6px;">
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
+      </div>`;
+    panel.innerHTML = `
+      <div class="mode-toggle rof-trim-mode" role="group" aria-label="Trim with">
+        <button type="button" class="mode-toggle-btn ${knifeMode ? '' : 'active'}" data-trim-mode="cutter" aria-pressed="${!knifeMode}">Cutter</button>
+        <button type="button" class="mode-toggle-btn ${knifeMode ? 'active' : ''}" data-trim-mode="knife" aria-pressed="${knifeMode}">Trim by Knife</button>
       </div>
+      ${tools}
       <div id="rof-trim-summary"></div>
       <div class="rof-export-status" id="rof-export-status" role="status"></div>
       <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn" disabled>Export PDF</button></div>`;
     wirePortionBtn();
+    panel.querySelectorAll('[data-trim-mode]').forEach(b => b.addEventListener('click', () => setTrimMode(b.dataset.trimMode)));
     document.getElementById('rof-export-pdf-btn').addEventListener('click', exportRofPdf);
     rofGame.setScrapHighlight(true);
-    document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
-    document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
     document.getElementById('rof-back-bake-btn').addEventListener('click', () => {
       rofGame.disarmCutter(); rofGame.clearCutters();
+      if (knifeSpec) knifeSpec.cut = false;
       goToRofStep('bake'); bakeState = 'done';
       renderTrayStepPanel();
     });
+
+    if (knifeMode) {
+      ['rof-knife-across', 'rof-knife-down'].forEach(id => document.getElementById(id).addEventListener('input', onKnifeSize));
+      document.getElementById('rof-knife-cut-btn').addEventListener('click', toggleKnifeCut);
+      // Coming (back) to Trim with no grid on the tray: lay it out again (as a preview).
+      if (!cutterList.some(c => String(c.data.materialId) === 'knife')) { knifeSpec.cut = false; applyKnifeGrid(); }
+      syncKnifeControls();
+      updateTrimSummary();
+      return;
+    }
+
+    document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
+    document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
     reloadMaterials();
     await ensureCutterMaterials();
     const sel = document.getElementById('rof-cutter-select');
