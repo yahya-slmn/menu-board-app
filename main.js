@@ -24,6 +24,7 @@ const recipePdf = require('./lib/recipePdf');
 const { translateTexts } = require('./lib/translateRecipe');
 const { estimateCalories } = require('./lib/estimateCalories');
 const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
+const { estimateDensity, toDensityItem } = require('./lib/estimateDensity');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
 const { filterNutIngredients, matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
 const { matchSeafoodTerms } = require('./lib/seafoodFilter');
@@ -2131,6 +2132,18 @@ ipcMain.handle('export-recipe-pdf', async (e, { data, suggestedName } = {}) => {
   const { pdf, pages } = await recipePdf.renderFitPdf(data, BrowserWindow);
   await fs.writeFile(result.filePath, pdf);
   return { success: true, path: result.filePath, pages };
+});
+
+// Recipe on Fire: AI density estimates (g/cm3) for raw masses -- layers, or a merged One dough (see lib/estimateDensity.js).
+// masses: [{ index, label, role: 'dough' | 'filling' | 'mixed', sources: [{ rows: [{ name, quantity, unit }], method }] }].
+// Plain data in and out; nothing is written here (the shared cache is phase D2). Each answer is an estimate with a range
+// and a confidence -- the renderer shows it as one, and the chef's own number always wins.
+ipcMain.handle('estimate-density', async (e, { masses } = {}) => {
+  if (!Array.isArray(masses) || masses.length === 0) return { estimates: [], promptVersion: null, missing: [] };
+  if (masses.length > 12) throw new Error('estimate-density: at most 12 masses per call');
+  const items = masses.map((m, i) => toDensityItem({ ...m, index: Number.isInteger(m?.index) ? m.index : i }));
+  const r = await estimateDensity(items);
+  return { estimates: [...r.estimates].map(([index, est]) => ({ index, ...est })), promptVersion: r.promptVersion, missing: r.missing };
 });
 
 ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fileName }) => {

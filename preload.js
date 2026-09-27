@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('calorie-estimate-progress', listener);
   },
   estimateMissingAmSnackStyles: () => ipcRenderer.invoke('estimate-missing-am-snack-styles'),
+  estimateDensity: (payload) => ipcRenderer.invoke('estimate-density', payload),
   onAmSnackStyleEstimateProgress: (callback) => {
     const listener = (event, payload) => callback(payload);
     ipcRenderer.on('am-snack-style-estimate-progress', listener);

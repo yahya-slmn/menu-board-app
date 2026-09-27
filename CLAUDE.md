@@ -428,6 +428,16 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   it. Only page 1 is shrink-fitted (`renderFitPdf` fits it alone, then prints it with the recipe pages; zoom is on `.page1`).
   Single-process batches (B6) are deferred. Earlier plan notes, kept for reference: page 2+ "Recipe for X portions:" from
   `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight) -- all done.
+- AI density (in progress, phases D1-D3; D1 done + deployed 2026-09-27: 6/6 reference mixtures inside their known ranges, repeat runs within 0.03): an explicit "Estimate" button will replace the flat 1.05 / 1.0
+  guesses with an estimate from a mass's ingredients, quantities and method (a layer, or several processes merged as One
+  dough). `supabase/functions/estimate-density` (Sonnet 5, thinking off, index-tagged like estimate-calories; returns value,
+  low / high range, confidence, a one-line basis, and `prompt_version`) <- `lib/estimateDensity.js` (pure, tested:
+  `toDensityItem`, `mergeIngredientRows` for One dough, `sanitizeEstimate` clamps to 0.1-1.6 and orders the range,
+  `reconcileEstimates`; `estimateDensity` retries missing indices once) <- IPC `estimate-density` / `window.api.estimateDensity`.
+  An estimate is the raw mass as it goes into the tray; the chef's own number always wins. `scripts/density-trial.js`
+  (read-only, asks for a login) checks reference mixtures against known densities and real recipes. Next: D2 a SHARED
+  Supabase cache keyed by composition (proportions, so scaling hits it and edits miss it, + method + prompt version),
+  D3 the UI (layer cards, and the One dough Sheet & Trim density that is a hidden 1.05 today).
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
