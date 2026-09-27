@@ -7,7 +7,9 @@
     "start": "electron .",
     "postinstall": "electron-builder install-app-deps",
     "build:mac": "electron-builder --mac",
-    "publish": "electron-builder --mac --publish always"
+    "build:win": "electron-builder --win",
+    "build": "electron-builder --mac --win",
+    "publish": "electron-builder --mac --win --publish always"
   },
   "build": {
     "appId": "com.menuboard.app",
@@ -38,6 +40,20 @@
           ]
         }
       ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     },
     "directories": {
       "output": "dist"
