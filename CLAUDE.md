@@ -435,9 +435,17 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   `toDensityItem`, `mergeIngredientRows` for One dough, `sanitizeEstimate` clamps to 0.1-1.6 and orders the range,
   `reconcileEstimates`; `estimateDensity` retries missing indices once) <- IPC `estimate-density` / `window.api.estimateDensity`.
   An estimate is the raw mass as it goes into the tray; the chef's own number always wins. `scripts/density-trial.js`
-  (read-only, asks for a login) checks reference mixtures against known densities and real recipes. Next: D2 a SHARED
-  Supabase cache keyed by composition (proportions, so scaling hits it and edits miss it, + method + prompt version),
-  D3 the UI (layer cards, and the One dough Sheet & Trim density that is a hidden 1.05 today).
+  (read-only, asks for a login; `--references-only` needs none) checks reference mixtures against known densities and real
+  recipes. D2 (cache, done 2026-09-27; table applied, live round trip PASS via `scripts/density-cache-check.js`): `density_estimates` (migration 20260927100000, apply BY HAND in the SQL editor --
+  the CLI's migration history lists everything since 2026-09-23 as unapplied because those were applied by hand, so
+  `supabase db push` would re-run them), keyed by (cache_key, prompt_version). `lib/densityKey.js` (pure, tested): sha256 of
+  the composition as each ingredient's SHARE of the total rounded to 0.5% (scaling keeps the key: 2990 / 3000 random
+  recipes scaled with scaleIngredientSets; the rest cross a step boundary and cost one re-estimate), sorted, name / unit /
+  method whitespace- and case-insensitive, plus role and method; process name and recipe ignored. `lib/densityCache.js`
+  `estimateDensityCached`: look up (newest prompt version >= DENSITY_PROMPT_VERSION, keep it equal to the function's
+  PROMPT_VERSION) -> estimate only the misses, each composition once -> upsert (ignore duplicates). Best-effort both ways:
+  no table = estimate without caching; a failed save keeps the answer. IPC returns `cached` indices. Next: D3 the UI (layer
+  cards, and the One dough Sheet & Trim density that is a hidden 1.05 today).
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
