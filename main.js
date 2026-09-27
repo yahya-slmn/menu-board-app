@@ -110,6 +110,10 @@ log.transports.console.level = 'debug';
 autoUpdater.logger = log;
 
 autoUpdater.autoDownload = true;
+// macOS: MacUpdater has no Windows-style install-on-quit handler. A downloaded update
+// only applies when quitAndInstall() runs (Squirrel.Mac). Keep this true so the zip is
+// fed to the native updater as soon as the download finishes, then force-install below.
+autoUpdater.autoInstallOnAppQuit = true;
 
 // Set only while a manually-triggered check (the menu item) is in flight -- every event handler
 // below branches on it so the automatic launch-time/periodic checks stay exactly as silent as
@@ -160,19 +164,12 @@ autoUpdater.on('update-not-available', (info) => {
 });
 
 autoUpdater.on('update-downloaded', (info) => {
-  log.info(`[auto-updater] update-downloaded: v${info.version} -- prompting to restart`);
+  log.info(`[auto-updater] update-downloaded: v${info.version} -- quitting to install`);
   resetCheckForUpdatesMenuItem();
-  dialog.showMessageBox(mainWindow || loginWindow, {
-    type: 'info',
-    title: 'Update Ready',
-    message: `Version ${info.version} has been downloaded.`,
-    detail: 'Restart Menu Board now to install it, or it will install automatically the next time you quit.',
-    buttons: ['Restart Now', 'Later'],
-    defaultId: 0,
-    cancelId: 1,
-  }).then((result) => {
-    if (result.response === 0) autoUpdater.quitAndInstall();
-  });
+  // Pass true, true to force-close windows and install immediately. On macOS the old
+  // "Restart Now / Later" dialog lied: choosing Later never installed, because MacUpdater
+  // does not install on quit the way NSIS does on Windows.
+  autoUpdater.quitAndInstall(true, true);
 });
 
 autoUpdater.on('error', (err) => {
