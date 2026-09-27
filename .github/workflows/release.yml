@@ -32,4 +32,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Explicitly skip signing so CI does not look for missing certs
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder ${{ matrix.args }} --publish always
+        run: npx electron-builder ${{ matrix.args }} --publish onTagOrDraft
