@@ -388,7 +388,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   Layers (raw -> baked per tray, wastage, "not used" / "short" as their own lines, never waste), Stack & cuts, One portion,
   Waste (each layer's planned Baking Waste beside the measured scrap), Baking (pre-bake and final bake). Prints on one A4.
   The layered tray is complete (L1-L5); Shape & Place and muffin trays stay single-dough only.
-- Batch Calculator (in progress, phases B1-B5; B1-B4 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
+- Batch Calculator (B1-B5 complete 2026-09-27): the layered tray run in REVERSE -- a target portion count,
   a tray, a cut (cutter or knife) and each layer's THICKNESS give the trays needed and each process's Total Quantity, which then
   drive Setup -> Trim for one tray's share (session-only; nothing written back). Layered recipes (2+ processes) only; a
   single-process batch (B6) is deferred. `rof/batch.js` `solveBatch` (pure, tested): pieces per tray from the SAME `packCutters`
@@ -418,8 +418,16 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   dropdown or knife sizes (`setTrimMode` refuses), a "From the batch: <cut> · Change in Batch" line instead; the plan is laid
   out on arrival (Auto-arrange with the batch's cutter / the knife grid as a preview); hand moves, Place by hand, Clear and
   Cut stay. `updateBatchCheck` (run with the trim summary) compares the tray with the plan ("As planned: ..." or "18 on this
-  tray, the plan has 21: ... 68 short of 500"). No batch = Trim exactly as before. Next: B5 PDF page 2+ "Recipe for X portions:" from
-  `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight).
+  tray, the plan has 21: ... 68 short of 500"). No batch = Trim exactly as before.
+  B5 (PDF): page 1 gains a "Batch" section (target, plan, this tray against the plan) and marks Trimming Waste "left out";
+  `data.batchRecipe` (renderer `buildBatchRecipeData`: the batch-scaled session rows in the Recipe Calculator's export shape,
+  Trimming Waste dropped from the wastes, Portion Weight = one cut piece's finished weight) is built in lib/recipePdf.js with
+  lib/export.js `buildRecipeContentModel` -- the Excel view's own model -- and printed as "Recipe for X portions:" from page 2,
+  full size, as many pages as it needs. `buildRecipeContentModel`'s additive `options.portionsProduced` sets Portions
+  Produced to the cut count (Net / portion weight would count the scrap between cuts as portions); every other caller omits
+  it. Only page 1 is shrink-fitted (`renderFitPdf` fits it alone, then prints it with the recipe pages; zoom is on `.page1`).
+  Single-process batches (B6) are deferred. Earlier plan notes, kept for reference: page 2+ "Recipe for X portions:" from
+  `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight) -- all done.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
@@ -500,7 +508,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   waste, oven) and `window.api.exportRecipePdf` -> `export-recipe-pdf` in main.js -> `lib/recipePdf.js`. It builds an HTML page
   and prints it with Electron's `printToPDF` (no PDF library; Arabic / RTL names shape correctly because Chromium lays
   them out). The save dialog comes first; the hidden print window has scripting off and a CSP; `renderFitPdf` shrinks
-  the page a step at a time until it is ONE A4 page. A print window needs the app to have another window open
+  the page a step at a time until it is ONE A4 page (a Batch Calculator batch then adds its recipe pages after it). A print window needs the app to have another window open
   (Electron quits when the last window closes) -- true in the app, but test scripts need a keep-alive window.
   The PDF keeps the planned Trimming Waste % (recipe, base = the running total before it) and the measured scrap
   (cutter layout, base = dough on this tray) as two separately labelled figures; never merge them.
