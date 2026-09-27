@@ -10368,6 +10368,18 @@ function renderRecipeOnFireView(main) {
   let prebakeSheetState = null;    // { rise, bake } of the base when the pre-bake came out (restored after "Bake again")
   const layersActive = () => doughLayout === 'layers' && selectedProcesses().length >= 2;
 
+  // ---- Batch Calculator (In layers only; the arithmetic is renderer/rof/batch.js, pure) ------------------
+  // An optional step BEFORE Setup that runs the layer plan in reverse: a target portion count, the tray, the cut
+  // (a cutter or a knife grid) and each layer's thickness (layerCfg's thicknessCm) give the trays needed and how
+  // much of each process to make. Session-only, like the rest of this screen. Phase B2: the step and its live
+  // result; carrying the batch into Setup is the next phase (B3), so Setup -> waits.
+  const BATCH_CFG_DEFAULT = { target: '', cutKind: 'cutter', cutterId: null, across: 5, down: 5 };
+  let batchOn = false;
+  let batchCfg = { ...BATCH_CFG_DEFAULT };
+  let batchResult = null;          // the last solveBatch() result
+  const batchActive = () => batchOn && layersActive();
+  function resetBatch() { batchOn = false; batchResult = null; }
+
   // ---- Step-wizard state -----------------------------------------------------------------------
   // One continuous session over shared state (processes / wastes / tray / whatever is in the game view),
   // not separate routes. `rofStep` decides which panel #rof-step-panel renders; the game view
@@ -10501,6 +10513,7 @@ function renderRecipeOnFireView(main) {
     selectedProcessLocalIds = new Set();
     combinedWastes = [];
     doughLayout = 'mixed'; layerOrder = []; layerCfg.clear(); layerTraysManual = null; layerPlan = null; layerOpenId = null; processListOpen = false;
+    resetBatch(); batchCfg = { ...BATCH_CFG_DEFAULT };
     layerBakeSlots = { prebake: null, final: null }; activeLayerBake = null; layerFinalRise = 1; prebakeSheetState = null;
     document.getElementById('rof-process-collapsed')?.remove();
     const procLabel = document.querySelector('#rof-process-field .rof-process-head label');
@@ -10609,6 +10622,10 @@ function renderRecipeOnFireView(main) {
       if (doughLayout === b.dataset.rofLayout) return;
       doughLayout = b.dataset.rofLayout;
       if (doughLayout === 'layers') { rofMode = 'sheet'; processListOpen = false; } // layers are Sheet & Trim only
+      else if (batchOn) { // the Batch Calculator is for layers only
+        resetBatch();
+        if (rofStep === 'batch') { rofStep = 'setup'; reachedRofSteps = new Set(['setup']); }
+      }
       renderProcessSummary();
       if (rofStep === 'setup') renderTrayStepPanel();
     }));
@@ -10664,6 +10681,7 @@ function renderRecipeOnFireView(main) {
       layerCfg.set(id, {
         density: hasFlour(p) ? (L ? L.DENSITY_DOUGH : 1.05) : (L ? L.DENSITY_FILLING : 1.0),
         prebake: false, fillKind: 'all', targetCm: '',
+        thicknessCm: '',       // Batch Calculator: the layer's raw thickness in the tray (cm)
         wastes: p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })),
         riseScale: 1,          // the pre-bake's rise slider (bottom layer)
         measuredCm: '',        // her measured height after the pre-bake (bottom layer)
@@ -10676,6 +10694,10 @@ function renderRecipeOnFireView(main) {
   function layerSummaryText(p, i) {
     const c = layerCfg.get(String(p.localId));
     const qty = `${roundNice(sumIngredientQuantities(p.ingredientRows))} g`;
+    if (batchActive()) { // the recipe's own quantity doesn't set anything here: the thickness does
+      const t = parseFloat(c.thicknessCm);
+      return `${t > 0 ? `${t} cm thick` : 'thickness … cm'}${i === 0 && c.prebake ? ' · pre-bake' : ''}`;
+    }
     if (i === 0) return `${qty}${c.prebake ? ' · pre-bake' : ''}`;
     return `${qty} · ${c.fillKind === 'height' ? (parseFloat(c.targetCm) > 0 ? `up to ${parseFloat(c.targetCm)} cm` : 'up to … cm') : 'all of it'}`;
   }
@@ -10686,7 +10708,9 @@ function renderRecipeOnFireView(main) {
     const ordered = syncLayers(procs), n = ordered.length;
     // A layer waiting for a height opens by itself.
     if (layerOpenId == null) {
-      const waiting = ordered.find((p, i) => { const c = layerCfg.get(String(p.localId)); return i > 0 && c.fillKind === 'height' && !(parseFloat(c.targetCm) > 0); });
+      const waiting = batchActive()
+        ? ordered.find((p) => !(parseFloat(layerCfg.get(String(p.localId)).thicknessCm) > 0))
+        : ordered.find((p, i) => { const c = layerCfg.get(String(p.localId)); return i > 0 && c.fillKind === 'height' && !(parseFloat(c.targetCm) > 0); });
       if (waiting) layerOpenId = String(waiting.localId);
     }
     summaryEl.innerHTML = `
@@ -10708,9 +10732,10 @@ function renderRecipeOnFireView(main) {
             </div>
             <div class="rof-layer-line" id="rof-layer-body-${id}" ${open ? '' : 'hidden'}>
               <label class="rof-layer-density">Density <input type="number" min="0.1" max="3" step="0.01" value="${c.density}" data-layer-density aria-label="Density of ${name}, g per cm³" /> g/cm³ <span class="rof-layer-est">est.</span></label>
+              ${batchActive() ? `<label class="rof-layer-thick" title="How thick this layer goes into the tray, raw (rolled or poured)${i === 0 ? ' -- before any pre-bake' : ''}">Thickness <input type="number" min="0.05" step="0.1" value="${c.thicknessCm}" data-layer-thickness class="rof-layer-target" aria-label="Thickness of ${name} in the tray, raw, cm" placeholder="cm" /> cm</label>` : ''}
               ${i === 0
                 ? `<label class="rof-layer-check"><input type="checkbox" data-layer-prebake ${c.prebake ? 'checked' : ''} /> Pre-bake alone first</label>`
-                : `<span class="rof-layer-fill">
+                : batchActive() ? '' : `<span class="rof-layer-fill">
                      <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
                        <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? '' : 'active'}" data-layer-fill="all" aria-pressed="${c.fillKind !== 'height'}">All of it</button>
                        <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? 'active' : ''}" data-layer-fill="height" aria-pressed="${c.fillKind === 'height'}">Up to a height</button>
@@ -10756,6 +10781,7 @@ function renderRecipeOnFireView(main) {
         summaryEl.querySelector(`[data-layer="${id}"] ${c.fillKind === 'height' ? '[data-layer-target]' : `[data-layer-fill="all"]`}`)?.focus();
       }));
       card.querySelector('[data-layer-target]')?.addEventListener('input', (e) => { c.targetCm = e.target.value; refreshSum(); updateLayerPlan(); });
+      card.querySelector('[data-layer-thickness]')?.addEventListener('input', (e) => { c.thicknessCm = e.target.value; refreshSum(); updateLayerPlan(); });
       renderLayerWasteRows(card, c);
     });
     updateSetupPreview();
@@ -10839,6 +10865,7 @@ function renderRecipeOnFireView(main) {
   // The plan under the tray picker: trays in the batch, then per layer what goes in each tray and to what
   // height, what's left unused (or short), the assembled height and the estimated height after baking.
   function updateLayerPlan() {
+    if (rofStep === 'batch') { updateBatchPlan(); return; } // same cards, the batch's own result
     const el = document.getElementById('rof-fill-summary');
     if (!el || !layersActive()) return;
     const material = bakeSnapshot?.material;
@@ -11045,19 +11072,20 @@ function renderRecipeOnFireView(main) {
   // A no-op (via the early `if (rofStep !== 'setup') return`) is deliberately safe to call from
   // refreshComputedNumbers regardless of which step is active.
   function updateSetupPreview() {
-    if (rofStep !== 'setup') return;
+    if (rofStep !== 'setup' && rofStep !== 'batch') return; // the Batch step picks the tray with the same select
     const materialSelect = document.getElementById('rof-material-select');
     const fillSummaryEl = document.getElementById('rof-fill-summary');
     const continueBtn = document.getElementById('rof-continue-btn');
-    if (!materialSelect || !fillSummaryEl) return;
+    if (!materialSelect || (!fillSummaryEl && rofStep === 'setup')) return;
 
     const procs = selectedProcesses();
     const material = trayMaterials.find(m => String(m.id) === String(materialSelect.value));
     if (procs.length === 0 || !material) {
       bakeSnapshot = null;
       previewEmptyEl.style.display = '';
-      fillSummaryEl.innerHTML = '';
+      if (fillSummaryEl) fillSummaryEl.innerHTML = '';
       if (continueBtn) continueBtn.disabled = true;
+      if (rofStep === 'batch') updateBatchPlan();
       syncPreviewMode();
       return;
     }
@@ -11068,8 +11096,9 @@ function renderRecipeOnFireView(main) {
       bakeSnapshot = null;
       previewEmptyEl.textContent = 'This tray is missing some dimensions.';
       previewEmptyEl.style.display = '';
-      fillSummaryEl.innerHTML = '';
+      if (fillSummaryEl) fillSummaryEl.innerHTML = '';
       if (continueBtn) continueBtn.disabled = true;
+      if (rofStep === 'batch') updateBatchPlan();
       syncPreviewMode();
       return;
     }
@@ -11142,8 +11171,8 @@ function renderRecipeOnFireView(main) {
   // Layers (Sheet & Trim): Setup -> Pre-bake (when the bottom layer is pre-baked) -> Fill -> Bake -> Trim.
   function layerStepLabels() {
     const bottom = layerOrder[0] && layerCfg.get(layerOrder[0]);
-    const keys = ['setup', ...(bottom?.prebake ? ['prebake'] : []), 'fill', 'bake', 'trim'];
-    const NAME = { setup: 'Setup', prebake: 'Pre-bake', fill: 'Fill', bake: 'Bake', trim: 'Trim' };
+    const keys = [...(batchActive() ? ['batch'] : []), 'setup', ...(bottom?.prebake ? ['prebake'] : []), 'fill', 'bake', 'trim'];
+    const NAME = { batch: 'Batch', setup: 'Setup', prebake: 'Pre-bake', fill: 'Fill', bake: 'Bake', trim: 'Trim' };
     return keys.map((key, i) => ({ key, label: `${i + 1}. ${NAME[key]}` }));
   }
   const rofStepLabels = () => (rofMode === 'shape' ? ROF_STEP_LABELS_SHAPE : layersActive() ? layerStepLabels() : ROF_STEP_LABELS_SHEET);
@@ -11174,6 +11203,7 @@ function renderRecipeOnFireView(main) {
   // ever skipped just because it was reached by a pill click instead of the usual button.
   function navigateRofStep(target) {
     if (target === rofStep || !reachedRofSteps.has(target)) return;
+    if (target === 'batch') { enterBatchStep(); return; }
     if (target === 'setup') { backToSetup(); return; }
     if (target === 'place') { // only reachable from 'bake', Shape & Place -- same as "<- Edit Placement"
       rofGame.resetBake();
@@ -11207,11 +11237,13 @@ function renderRecipeOnFireView(main) {
     const stepLabel = (rofStepLabels().find(x => x.key === rofStep) || {}).label || '';
     panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', stepLabel.replace(/^\d+\.\s*/, ''));
     if (rofStep === 'setup') renderSetupPanel(panel);
+    else if (rofStep === 'batch') renderBatchPanel(panel);
     else if (rofStep === 'place') renderPlaceStepPanel(panel);
     else if (rofStep === 'bake' || rofStep === 'prebake') renderBakeStepPanel(panel);
     else if (rofStep === 'fill') renderFillStepPanel(panel);
     else if (rofStep === 'trim') renderTrimStepPanel(panel);
     if (rofStep !== 'fill' && !(rofStep === 'bake' && layersActive())) showLayerStack(null); // the layers' cross-section: Fill and the stack's bake
+    if (rofStep !== 'batch') hideBatchCard();
     syncPreviewMode();
     syncRecipeBlock();
   }
@@ -11235,8 +11267,12 @@ function renderRecipeOnFireView(main) {
         </div>
         <div id="rof-mode-hint" style="font-size:12px; color:var(--neutral); margin-top:6px;"></div>
       </div>
-      <button type="button" class="primary" id="rof-continue-btn" style="margin-top:4px;" disabled>Continue →</button>
+      <div class="rof-setup-go">
+        <button type="button" class="primary" id="rof-continue-btn" style="margin-top:4px;" disabled>Continue →</button>
+        ${layersActive() ? '<button type="button" class="secondary" id="rof-batch-btn" title="Work backwards from how many portions you need: the trays and how much of each process to make">From a portion target…</button>' : ''}
+      </div>
     `;
+    document.getElementById('rof-batch-btn')?.addEventListener('click', () => { batchOn = true; enterBatchStep(); });
     const hintEl = document.getElementById('rof-mode-hint');
     const layered = layersActive();
     if (layered) {
@@ -11295,13 +11331,191 @@ function renderRecipeOnFireView(main) {
     renderTrayStepPanel();
   }
 
+  // ---- Batch Calculator: the Batch step (before Setup) -----------------------------------------------------
+  // Opened from Setup's "From a portion target…" (layers only). The layer cards above take a thickness instead of
+  // "All of it / Up to a height"; this panel has the tray, the cut and the target, and shows what it takes.
+  function enterBatchStep() {
+    resetGameSession();
+    rofStep = 'batch';
+    reachedRofSteps = new Set(['batch']);
+    bakeSnapshot = null;
+    layerOpenId = null; // a layer still waiting for its thickness opens by itself
+    renderProcessSummary(); // the layer cards switch to thicknesses
+    renderTrayStepPanel();
+  }
+  function leaveBatch() {
+    resetBatch();
+    rofStep = 'setup';
+    reachedRofSteps = new Set(['setup']);
+    bakeSnapshot = null;
+    layerOpenId = null;
+    renderProcessSummary();
+    renderTrayStepPanel();
+  }
+  const batchCutter = () => cutterMaterials.find(x => String(x.id) === String(batchCfg.cutterId)) || null;
+  // solveBatch's input from what is on screen (null cut = not chosen / not a usable size yet).
+  function batchInputs() {
+    const procs = syncLayers(selectedProcesses());
+    const material = bakeSnapshot?.material;
+    let cut = null;
+    if (batchCfg.cutKind === 'knife') {
+      const a = parseFloat(batchCfg.across), d = parseFloat(batchCfg.down);
+      if (a > 0 && d > 0) cut = { kind: 'knife', acrossCm: a, downCm: d };
+    } else {
+      const m = batchCutter();
+      if (m) cut = { kind: 'cutter', shapeType: m.shape_type, dims: materialDimsFromRow(m) };
+    }
+    return {
+      tray: material ? { shapeType: material.shape_type, footprint: bakeSnapshot.footprint } : null,
+      cut,
+      target: Number(batchCfg.target),
+      layers: procs.map((p, i) => {
+        const c = layerCfg.get(String(p.localId));
+        return {
+          key: String(p.localId), name: p.name || '(untitled process)',
+          totalGrams: sumIngredientQuantities(p.ingredientRows), wastes: c.wastes,
+          density: parseFloat(c.density), thicknessCm: parseFloat(c.thicknessCm), prebake: i === 0 && c.prebake,
+          // Only for the after-bake height estimate; the quantities never depend on it.
+          hMul: layerHMul(p) * (i === 0 && c.prebake ? (Number(c.riseScale) || 1) : layerFinalRise),
+        };
+      }),
+    };
+  }
+  // Big batch quantities read better with thousands separators (22,911.5 g).
+  const batchGrams = (v) => `${(Math.round(v * 10) / 10).toLocaleString('en-US')} g`;
+  // The result: a one-line status under the inputs (what's still to set, what's wrong, or the headline), and the
+  // full card -- per layer what goes in each tray and how much to make, one piece, the notes -- over the stage,
+  // which has the room (nothing happens on the tray in this step), so the step fits 1280x800 with any number of layers.
+  function batchCard() {
+    let el = document.getElementById('rof-batch-card');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'rof-batch-card';
+      el.className = 'rof-batch-card';
+      el.setAttribute('role', 'region');
+      el.setAttribute('aria-label', 'Batch result');
+      gameWrapEl.appendChild(el);
+    }
+    return el;
+  }
+  function hideBatchCard() { const el = document.getElementById('rof-batch-card'); if (el) el.hidden = true; }
+  function updateBatchPlan() {
+    const el = document.getElementById('rof-batch-result');
+    if (!el) return;
+    const say = (html) => { el.innerHTML = html; hideBatchCard(); };
+    if (!bakeSnapshot) { batchResult = null; say('<span class="rof-batch-wait">Choose a tray.</span>'); return; }
+    const input = batchInputs();
+    // Inputs not set yet are one neutral line, not a list of errors.
+    const missing = [];
+    if (!input.cut) missing.push(batchCfg.cutKind === 'knife' ? 'the piece size' : 'a cutter');
+    if (!(input.target > 0)) missing.push('how many portions');
+    input.layers.forEach(l => { if (!(l.thicknessCm > 0)) missing.push(`${l.name}'s thickness`); });
+    if (missing.length && bakeSnapshot.material.shape_type !== 'muffin_tray') {
+      batchResult = null;
+      const list = missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]}`;
+      say(`<span class="rof-batch-wait">Still to set: <span dir="auto">${escHtml(list)}</span>.</span>`);
+      return;
+    }
+    const r = batchResult = window.RofGame.batch.solveBatch(input);
+    if (!r.ok) { say(r.errors.map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('')); return; }
+    const P = window.RofGame.portions, g = (v) => `${P.fmtGrams(v)} g`;
+    const over = r.extraPortions ? ` <span class="rof-layer-est" title="${r.extraPortions} more than the ${input.target} asked for: the last tray is a full tray">(+${r.extraPortions})</span>` : '';
+    const trays = `${r.trays} tray${r.trays === 1 ? '' : 's'}`;
+    el.innerHTML = `<strong>${trays}</strong> &middot; ${r.perTray} per tray = <strong>${r.totalPortions}</strong> portions${over}${r.warnings.length ? ' <span class="rof-leftover">&middot; see the warning</span>' : ''}`;
+    const trimmed = r.layers.filter(l => l.trimmingExcluded.length);
+    const card = batchCard();
+    card.innerHTML = `
+      <div class="rof-batch-card-title">Batch for ${input.target} portions</div>
+      <div class="rof-batch-head"><strong>${r.perTray}</strong> per tray × <strong>${trays}</strong> = <strong>${r.totalPortions}</strong> portions${over}</div>
+      <div class="rof-plan-grid rof-batch-grid" role="table" aria-label="Each layer, top first: raw grams in each tray, and how much of the process to make for all the trays">
+        <div class="rof-plan-r rof-batch-colhead" role="row"><span role="columnheader">Layer (top first)</span><span role="columnheader">Each tray, raw</span><span role="columnheader">To make</span></div>
+        ${[...r.layers].reverse().map(l => `
+          <div class="rof-plan-r" role="row"><span role="cell" class="rof-plan-name" dir="auto" title="${escHtml(l.name)}">${escHtml(l.name)} <span class="rof-layer-est">${cmFmt(l.thicknessCm)}</span></span>
+            <span role="cell">${g(l.rawPerTray)}</span>
+            <span role="cell" title="${escHtml(`${roundNice(l.multiplier)} × the recipe's ${P.fmtGrams(l.savedTotal)} g`)}"><strong>${batchGrams(l.requiredTotal)}</strong> <span class="rof-layer-est">×${Math.round(l.multiplier * 10) / 10}</span></span></div>`).join('')}
+      </div>
+      <div class="rof-batch-foot">One piece ≈ <strong>${g(r.finishedPerPieceGrams)}</strong> finished &middot; stack ${cmFmt(r.stackThicknessCm)} raw <span class="rof-layer-est">(≈${cmFmt(r.check.finalHeightEstCm)} baked, est.)</span></div>
+      ${trimmed.length ? `<div class="rof-batch-note">Trimming Waste (${trimmed.map(l => l.trimmingExcluded.map(w => `${w.percent}%`).join(' + ')).join(', ')}) is left out on purpose: the cuts on the tray are the real trimming, so taking the recipe's Trimming % off too would overstate what you prepare.</div>` : ''}
+      ${r.warnings.map(w => `<div class="rof-leftover">${escHtml(w)}</div>`).join('')}`;
+    card.hidden = false;
+  }
+  function fillBatchCutterSelect() {
+    const sel = document.getElementById('rof-batch-cutter');
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${cutterMaterials.length ? 'Choose a cutter…' : 'No cutters yet'}</option>`
+      + cutterMaterials.map(m => `<option value="${m.id}">${escHtml(m.name)} (${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))})</option>`).join('')
+      + `<option value="${NEW_MATERIAL}">+ Create new cutter…</option>`;
+    sel.value = batchCutter() ? String(batchCfg.cutterId) : '';
+    sel.disabled = false;
+  }
+  function renderBatchPanel(panel) {
+    const knife = batchCfg.cutKind === 'knife';
+    panel.innerHTML = `
+      <div class="rof-batch-controls">
+        <div class="rof-batch-row">
+          <label for="rof-material-select" class="rof-sr-only">Tray / Pan</label>
+          <select id="rof-material-select" class="builder-select"><option value="">— Select a tray —</option></select>
+          <label class="rof-batch-target">Portions <input id="rof-batch-target" type="number" min="1" step="1" value="${escHtml(batchCfg.target)}" placeholder="500" /></label>
+        </div>
+        <div class="rof-batch-row">
+          <span class="mode-toggle rof-mini-toggle" role="group" aria-label="Cut with">
+            <button type="button" class="mode-toggle-btn ${knife ? '' : 'active'}" data-batch-cut="cutter" aria-pressed="${!knife}">Cutter</button>
+            <button type="button" class="mode-toggle-btn ${knife ? 'active' : ''}" data-batch-cut="knife" aria-pressed="${knife}">Knife</button>
+          </span>
+          ${knife
+            ? `<span class="rof-batch-knife"><input id="rof-batch-across" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${escHtml(batchCfg.across)}" aria-label="Piece size across, cm" /> × <input id="rof-batch-down" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${escHtml(batchCfg.down)}" aria-label="Piece size down, cm" /> cm</span>`
+            : `<select id="rof-batch-cutter" class="builder-select" aria-label="Cutter" disabled><option value="">Loading cutters…</option></select>`}
+        </div>
+      </div>
+      <div class="rof-batch-result" id="rof-batch-result" role="status" aria-live="polite"></div>
+      <div class="rof-setup-go">
+        <button type="button" class="primary" id="rof-batch-go" disabled title="Carrying the batch into Setup comes next.">Setup →</button>
+        <button type="button" class="rof-link-btn" id="rof-batch-off">Use the recipe as saved</button>
+      </div>`;
+    document.getElementById('rof-material-select').addEventListener('change', (e) => {
+      if (e.target.value === NEW_MATERIAL) { createTrayInline(e.target); return; }
+      lastMaterialId = e.target.value || null;
+      updateSetupPreview();
+    });
+    panel.querySelectorAll('[data-batch-cut]').forEach(b => b.addEventListener('click', () => {
+      if (batchCfg.cutKind === b.dataset.batchCut) return;
+      batchCfg.cutKind = b.dataset.batchCut;
+      renderBatchPanel(panel);
+      panel.querySelector(`[data-batch-cut="${batchCfg.cutKind}"]`)?.focus();
+    }));
+    document.getElementById('rof-batch-target').addEventListener('input', (e) => { batchCfg.target = e.target.value; updateBatchPlan(); });
+    ['across', 'down'].forEach(k => document.getElementById(`rof-batch-${k}`)?.addEventListener('input', (e) => { batchCfg[k] = e.target.value; updateBatchPlan(); }));
+    document.getElementById('rof-batch-off').addEventListener('click', leaveBatch);
+    reloadMaterials();
+    populateMaterialSelect(); // -> updateSetupPreview -> the tray on the stage and updateBatchPlan
+    if (!knife) {
+      ensureCutterMaterials().then(() => {
+        const sel = document.getElementById('rof-batch-cutter');
+        if (!sel) return; // moved on (or switched to Knife) while the list loaded
+        fillBatchCutterSelect();
+        sel.addEventListener('change', async () => {
+          if (sel.value !== NEW_MATERIAL) { batchCfg.cutterId = sel.value || null; updateBatchPlan(); return; }
+          sel.value = batchCutter() ? String(batchCfg.cutterId) : '';
+          const res = await openMaterialCreateModal({ category: 'cutter' });
+          if (!res) return;
+          if (res.materials) materialsPromise = Promise.resolve(res.materials); else reloadMaterials();
+          await ensureCutterMaterials();
+          batchCfg.cutterId = String(res.id);
+          fillBatchCutterSelect();
+          updateBatchPlan();
+        });
+        updateBatchPlan();
+      });
+    }
+  }
+
   // The recipe card collapses to a one-line strip (with a Change button) as soon as a recipe is picked,
   // and after Setup the process/wastage block collapses into that strip too -- so the controls for the
   // current step sit beside the stage instead of below a stack of setup cards.
   const RECIPE_SOURCE_LABELS = { book: 'Recipe Book', extractor: 'Recipe Extractor', generated: 'Recipe Generator' };
   function syncRecipeBlock() {
     const haveRecipe = !!selectedRecipe && workingProcesses.length > 0;
-    const inSetup = rofStep === 'setup';
+    const inSetup = rofStep === 'setup' || rofStep === 'batch';
     const collapseCard = haveRecipe && (!inSetup ? !!bakeSnapshot : !recipeEditing);
     recipeCardEl.style.display = collapseCard ? 'none' : '';
     recipeCompactEl.style.display = collapseCard ? '' : 'none';
@@ -11318,7 +11532,7 @@ function renderRecipeOnFireView(main) {
       <button type="button" class="secondary" id="rof-compact-change">Change</button>`;
     document.getElementById('rof-compact-change').addEventListener('click', () => {
       recipeEditing = true;
-      if (rofStep !== 'setup') backToSetup();
+      if (rofStep !== 'setup' && rofStep !== 'batch') backToSetup();
       else syncRecipeBlock();
     });
   }

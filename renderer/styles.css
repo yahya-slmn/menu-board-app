@@ -851,6 +851,27 @@ table.materials-table td.cat-cell {
 .rof-plan-r > span:nth-child(2) { text-align: right; }
 .rof-plan-name { overflow: hidden; text-overflow: ellipsis; }
 .rof-plan-t > span { border-top: 1px solid #cfdacb; padding-top: 3px; margin-top: 2px; font-weight: 600; }
+/* Batch Calculator (the step before Setup) */
+.rof-setup-go { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rof-batch-controls { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.rof-batch-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; }
+.rof-batch-row select { flex: 1 1 150px; min-width: 0; }
+.rof-batch-knife { display: inline-flex; align-items: center; gap: 5px; }
+.rof-batch-knife input, .rof-batch-target input { width: 64px; padding: 3px 6px; }
+.rof-batch-target { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; font-weight: 600; flex: none; }
+.rof-batch-result { font-size: 12.5px; margin: 0 0 10px; min-height: 18px; }
+.rof-batch-wait { color: var(--neutral); }
+/* The full result, over the stage (like the Fill step's cross-section). */
+.rof-batch-card { position: absolute; top: 62px; left: 12px; z-index: 3; width: min(460px, calc(100% - 24px)); max-height: calc(100% - 124px); overflow: auto;
+  padding: 10px 14px 12px; border-radius: 10px; background: var(--paper); box-shadow: 0 6px 22px rgba(0, 0, 0, .28); font-size: 12.5px; color: var(--ink); }
+.rof-batch-card-title { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--sage-dark); font-weight: 700; margin-bottom: 4px; }
+.rof-batch-head { margin-bottom: 6px; font-size: 13.5px; }
+.rof-batch-grid { row-gap: 1px; }
+.rof-batch-grid > .rof-plan-r > span:nth-child(3) { text-align: right; }
+.rof-batch-colhead > span { color: var(--neutral); font-size: 11px; border-bottom: 1px solid var(--line); padding-bottom: 2px; }
+.rof-batch-foot { margin-top: 6px; }
+.rof-batch-note { margin-top: 6px; color: var(--neutral); font-size: 11.5px; line-height: 1.35; }
+.rof-batch-card .rof-leftover { margin-top: 4px; }
 .rof-layer-note { font-size: 12px; line-height: 1.45; margin: 1px 0 3px; }
 .rof-layer-note-1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rof-layer-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }

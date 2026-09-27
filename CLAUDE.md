@@ -388,7 +388,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   Layers (raw -> baked per tray, wastage, "not used" / "short" as their own lines, never waste), Stack & cuts, One portion,
   Waste (each layer's planned Baking Waste beside the measured scrap), Baking (pre-bake and final bake). Prints on one A4.
   The layered tray is complete (L1-L5); Shape & Place and muffin trays stay single-dough only.
-- Batch Calculator (in progress, phases B1-B5; B1 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
+- Batch Calculator (in progress, phases B1-B5; B1 + B2 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
   a tray, a cut (cutter or knife) and each layer's THICKNESS give the trays needed and each process's Total Quantity, which then
   drive Setup -> Trim for one tray's share (session-only; nothing written back). Layered recipes (2+ processes) only; a
   single-process batch (B6) is deferred. `rof/batch.js` `solveBatch` (pure, tested): pieces per tray from the SAME `packCutters`
@@ -398,7 +398,14 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   raw / its non-Baking wastes; then a forward `planLayers` check must give every thickness back. **Trimming Waste is LEFT OUT
   of the batch on purpose** (`planLayers({ excludeTrimming: true })`; default false = L1's convention, which counts it as a
   pre-tray waste, unchanged): in a batch the cut layout IS the trimming measurement, and taking the recipe's Trimming % off too
-  would overstate what she prepares. This difference from L1 is intentional, not a bug. Next: B2 the Batch step UI, B3 carry
+  would overstate what she prepares. This difference from L1 is intentional, not a bug (the Batch card says so too).
+  B2 (UI): Setup's "From a portion target…" (layers only) opens a Batch step BEFORE Setup (`rofStep` 'batch', pills
+  "1. Batch 2. Setup ..."; `batchOn` / `batchCfg` / `enterBatchStep` / `leaveBatch` "Use the recipe as saved"). The SAME layer
+  cards take a Thickness instead of All of it / Up to a height (`layerCfg.thicknessCm`; density, wastage, pre-bake unchanged);
+  the panel has the tray (the same `#rof-material-select`, so `updateSetupPreview` draws it), Portions, Cutter | Knife. The
+  full result is a card OVER THE STAGE (`#rof-batch-card`, like Fill's cross-section) so any number of layers fits
+  1280x800; the panel keeps a one-line status ("Still to set: ...", an error, or the headline). One dough / a process change
+  turns the batch off. Next: B3 carry
   into Setup / Pre-bake / Fill / Bake (scaled session ingredient rows via `scaleIngredientSets`, tray count locked, every
   layer "All of it"), B4 Trim locked to the batch's cut, B5 PDF page 2+ "Recipe for X portions:" from
   `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight).
