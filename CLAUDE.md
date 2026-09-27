@@ -54,7 +54,16 @@ terminal instead of `[object Object]`.
   view-render functions (`renderItemsView`, `renderGenerateView`,
   `renderBuildMenuView`, `renderHistoryView`, `renderExportAllView`,
   `renderRecipeListView`/`renderRecipeFormView`, `renderCalculatorView`,
-  `renderIngredientsView`) swapped via `state.currentView`. `login.html`/
+  `renderIngredientsView`) swapped via `state.currentView`. Generate Menu, Build Menu and Export
+  All Sections sit behind ONE nav entry, **Menu Planner** (`renderMenuPlannerView`, 2026-09-25): a
+  Generate / Build switch (Generate adds All Sections = Export All / One Section = Generate Menu) above
+  the three screens' own, unchanged render functions, drawn into `#planner-body` (`display: contents`,
+  so Build Menu's scroll area + docked tabs still lay out in `#main`). `state.menuPlanner` holds the
+  mode; the switches lock while a run is in flight (`setMenuPlannerBusy`). The Generate name / created by
+  / dates carry between All Sections and One Section for the session (`wireMenuPlannerFields`, which
+  fills the screens' own inputs after they render); Build Menu keeps its own. The last mode is
+  remembered in `localStorage.menuPlannerMode` (default Generate + One Section). There are no
+  separate `generate` / `build` / `exportAll` views any more: they are Menu Planner modes only. `login.html`/
   `login.js` are a separate, pre-auth window (`createLoginWindow()` in
   `main.js`) shown before the main window ever loads.
 
@@ -99,6 +108,48 @@ terminal instead of `[object Object]`.
 - `SECTION_SLOTS` is the declarative spec of what each section's daily menu
   must contain: an ordered list of `[categoryCode, count, options]`. This is
   the first place to look when a section's menu shape needs to change.
+- Staff Main (since 2026-09-23) is exactly 7: KG-LP/MS-UP's 2 Lunch Mains + 2 Lunch Starches and MS-UP's Lunch
+  Vegetable (forced in, `STAFF_MAIN_SHARED_CATEGORIES` / `STAFF_MAIN_VEGETABLE_*`), then Staff's own 1 VEGAN + 1
+  VEGETARIAN with different `carb_type` (`distinctAmongOwnOnly`). Daycare's main is no longer shared into Staff Main (the
+  export's Lists sheet still lists Daycare mains so older saved menus re-export). "Meat-free" rules (Staff Breakfast, Lunch
+  Box) accept VEGAN or VEGETARIAN. Daycare's Lunch Main never repeats the previous school day's protein
+  (`noConsecutiveProtein`, including the last saved school day before the run). Staff's lunch drinks are three FIXED
+  daily-repeating items (`STAFF_WATER` / `STAFF_SOFT_DRINK` / `STAFF_FRESH_JUICE`, `fixedDaily`), replacing `STAFF_JUICE`,
+  which stays only for old menus; with no daily item set the row stays empty and a warning says so. They export under one
+  "Beverages" label. Staff Fruit Basket left Staff lunch on 2026-09-24 (`STAFF_FRUIT_BASKET` stays in the export map / parser
+  vocabulary only so older menus still export and parse).
+- Shared snacks + Pastry / Cold Kitchen (2026-09-24): Daycare and KG-LP serve ONE AM Snack and ONE PM Snack a day
+  (`SECTION_COUPLINGS`: KG-LP/MS-UP share lunch, Daycare/KG-LP share snacks; whichever is generated second copies the first's
+  saved picks for the same dates, else both-catalogs pool + merged history); MS-UP keeps its own. `SNACK_STYLE_BY_PATTERN` /
+  `snackStyleFor`: one flip per school day of the run (Pattern A on day 1, reset per run), AMs opposite, PMs opposite,
+  Daycare/KG-LP AM vs PM opposite -> 2 Pastry + 2 Cold Kitchen daily (AM Snack's pattern is unchanged). The style filter also
+  applies on the shared (coupled) path (`_styleSplit`). Staff Breakfast shares TWO AM Snacks (Daycare's -- or KG-LP's -- and
+  MS-UP's) and its `styleMix` makes the six 3 Pastry + 3 Cold Kitchen (`_styleMixTracker`): the meat-free composition pick
+  first (either style; breaks the mix only if no fitting meat-free dish exists, warned "style mix short of"), then the mix
+  outranks different dish types (relaxed first), then the mix gives way, warned. Build Menu: KG-LP's snack cells follow Daycare
+  read-only (`syncBuilderSharedSnacks`), Daycare's dropdown lists dishes both catalogs have, grouped by today's style; a
+  wrong-style pick is allowed and labelled "breaks today's rotation"; Auto-Fill sends the grid's other sections as the engine's
+  `partnerPicks` (`builder-fill-suggestions` `gridPicks`), never feeding KG-LP's mirror back into Daycare. In a styleMix slot
+  a dish not served in 28 days also outranks different dish types (a repeat is worse than two of one kind on a 6-dish buffet).
+- Chicken / beef are never AM or PM Snack, for EVERY dish (`lib/categoryRules.js` `snackLunchOnlyHit`: protein type, or a
+  whole word in the name; one definition, also used by `lib/aiMenuSafety.js`). Enforced 2026-09-24 as the chef's explicit
+  exception to "new rules apply forward only": the engine's catalog / draft pools (`_snackAllowed`), copies from a partner's
+  saved menu and Staff Breakfast shares (refused + warned), Build Menu's dropdowns (`get-section-item-pool`) and the AI review
+  catalog replace list. Offending catalog dishes stay in the catalog, tagged "Not served: chicken/beef in a snack"
+  (`snack_rule_blocked` from `get-items`); Add / Edit Item only warns. AM / PM Snack have an editable protein type
+  (`PROTEIN_ELIGIBLE_CATEGORIES`, 2026-09-24) -- set the real one (Turkey, Vegetarian...); saving keeps it. History is never changed or flagged; the Excel `_Lists`
+  dropdowns are not filtered. Staff Breakfast's own dishes are out of scope. `scripts/snack-chicken-beef-list.js` (read-only,
+  login) lists the offending dishes to `backups/snack-chicken-beef-list.txt`, plus every dish (any category) whose name says
+  turkey but whose protein type is chicken / beef.
+- TURKEY protein type (`supabase/migrations/20260924160000_turkey_protein_type.sql`, additive): before it, the AI filed turkey
+  as CHICKEN (then blocked as a snack, or counted as a KG-LP / MS-UP chicken main). Turkey counts as meat for the Staff Lunch Box
+  rule (generator / aiMenuGenerate `MEAT_PROTEINS` / aiMenuRules `MEAT`), never as the chicken main; `lib/classify.js` suggests
+  it for turkey names; the `generate-menu-dishes` guide says "Turkey, including turkey ham, is TURKEY, never CHICKEN". Not
+  retroactive. Protein codes the live table lacks are simply unused (request spreads filter by live codes).
+- Reading exports back in (`lib/menuIngredients.js` `parseWorkbookDishes`, used by Menu Ingredients Generator and the Recipe
+  Generator's upload): a day block is found by date + weekday; layout comes from the old RC / Quantity / Weight-Unit markers
+  when present (files already sent out), else CEO by its person-name header cells (`lib/menuLayout.js` `CEO_PERSONS`, shared
+  with the exporter) or by two twin dish columns, and School vs Staff by vocabulary (warns only when the fit is unclear).
 - `options` can include `distinctProtein` (no two picks share a protein
   type), `distinctAttr` (no two picks share a `sauce_type`/`carb_type`/
   `dish_concept` value), and `composition` (ordered sub-rules like "exactly 1
@@ -120,13 +171,81 @@ terminal instead of `[object Object]`.
   has no equivalent of `better-sqlite3`'s synchronous `db.transaction()`, so
   a failure partway through is not rolled back automatically.
 
+**Created By mix** (2026-09-25; Menu Planner Generate, One Section and All Sections only): optional target percentages per
+Created By value, passed as `createdByMix` to `generate-menu` / `generate-and-export-all` ONLY -- Build Menu's Auto-Fill and the AI
+Menu Generator never pass it. A best-effort ordering bias, per section + category (`lib/createdByMix.js`, pure): `_scoreAndSort`
+ranks as always, then (only with a mix and a `mixKey` from `_pickItems`) reorders the FRESH candidates (not served in
+NO_REPEAT_DAYS) by which value is furthest behind its target; not-fresh ones keep today's order after them, so the mix never brings
+a dish back sooner, and every rule still accepts / rejects in `_pickItems` unchanged. Only real choices count (forced shares and
+daily dishes don't). No mix = byte-identical picks (proven with a seeded old-vs-new run over a stand-in database). The panel's
+pool check (`createdByMixPoolCheck`) shows each category's dishes per value before generating, with a ceiling estimate (each dish
+once per 28 days); the report after is target vs achieved with the reason when short. Session only (`state.menuPlanner.mix`), never
+saved; the Generate button reads "... with Created By mix" while it is on.
+
+**Dish Catalog "Created By"** (`menu_items.created_by_label`, `supabase/migrations/20260924140000_menu_items_created_by_label.sql`):
+free-text attribution ("AI", "OLD" = existed before the column was added, a chef's name), a read-only column between Menu use and
+Code, edited only in Add / Edit Item (under Item name, beside Code). It is NOT provenance: `is_ai_generated` / `ai_menu_run_id` still
+drive the calorie scope (the Dish Catalog no longer shows them: no AI chip, no flag-based filter since 2026-09-24), and
+editing the label never changes them. New manual items
+start blank; Approve writes "AI". `lib/catalogCreatedBy.js` tidies the value and snaps a case-only variant to the spelling
+already in use; suggestions are every label in use plus the recipe people. The Dish Catalog's source filter is one "Created
+By" dropdown (All / each stored label / Not set). The "Code" column (`menu_items.rc_code`: RC for older dishes, RG for
+program-made ones) is likewise read-only in the list and typed in Add / Edit Item -- never generated; a missing one shows a red
+"NEW". `update-item` only writes the label / code when they are sent. The old Tags column is three
+(2026-09-25): Style (Pastry / Cold Kitchen), Protein, and Menu use (Daily, "Not served" -- how the engine treats the dish).
+Protein chips come from `proteinChip` / `PROTEIN_COLOR` in renderer.js (also the AI review screen's `aiAttrChips`); a code with
+no color gets the outlined `.protein-other` chip, since a bare `.chip` is white text on nothing. A new protein type needs a
+color there. Column widths are set by position (`dish-catalog-table` nth-child in styles.css) to fit 1280 x 800 unscrolled.
+
+**Pastry / Cold Kitchen style** (`menu_items.am_snack_style`, despite the name): AM Snack, and since 2026-09-24 PM Snack and
+Staff Breakfast too (`STYLED_CATEGORIES` in main.js / `STYLE_ELIGIBLE_CATEGORIES` in renderer.js). The `estimate-am-snack-style`
+Edge Function takes a `category` (PM Snack Cold Kitchen = the savory / salty side); the Dish Catalog's "Estimate missing styles"
+button fills blanks only. `scripts/snack-style-pool-check.js` (read-only, asks for a login) reports the pool sizes by style for the
+Daycare / KG-LP shared snack rule (it writes `backups/snack-style-pool-check.txt`; a test must never run it unredirected).
+
+**One-time calorie review** (`lib/calorieReview.js`, 2026-09-25; no AI): the Dish Catalog's "Export calories for review" /
+"Import reviewed calories" strip. Export = every ACTIVE Daycare / KG-LP / MS-UP dish, one row per dish (ID | Item name | Category |
+Section(s) | Current calories per 100g ("(flagged)" = unverified) | Reviewed calories per 100g | Notes). Import reads headers by
+name, matches by ID AND name, only filled Reviewed values count (0-900), shows a preview (`preview-calorie-import`), and Confirm
+writes only that plan (`apply-calorie-import` by token): calories_per_100g set, calories_unverified cleared. Notes aren't saved.
+Remove the strip once the review is done.
+
+**Dish Catalog import from menus** (2026-09-25; Dish Catalog -> "Import dishes from menus…", `renderCatalogImportView`; no AI):
+reads chef-edited menu exports (`parseWorkbookDishes`, which now also returns each row's `layout` and `period`) and plans, in
+`lib/catalogImport.js` (pure), which dishes the catalog lacks. Section: Staff / CEO by layout, School by tab name
+(`resolveSectionFromSheetName`) or the chef's pick. Category: School by label = category name, Staff / CEO by (period, label)
+through the export's `STAFF_ROW_MAP` / `CEO_ROW_MAP` reversed ("Option 1/2" = Lunch Box, "Option 3" = its salad; Beverages
+skipped). Matching is the Recipe Generator's dedup UNCHANGED (0.80 same-word-count Dice) against every catalog item, any category,
+inactive included; new spellings merge only within a category. Staff's Main Dish / Breakfast rows that name a school dish are
+the export's shared copies and add nothing. Three groups: new (ticked; one entry per dish per category, "Also listed as" when a
+name is under two), "look like an existing dish" (unticked, beside the match -- on the September files ~1 in 4 were really
+different dishes), and in the catalog but not on a section's menu (unticked: add the section, or add under the section's
+category). `apply-catalog-import` writes only ticked keys of the stored plan: Created By via `normalizeCreatedByLabel`, portions
+for each section's age groups like Add Item, no code / calories / style. A header date may carry a note ("29-09-2026 Arminian
+Day"); the parser reads the first 10 characters.
+
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its
 name, mirroring the logic originally used to import the seed Excel file. Pure
 function, no DB access — returns `{ category: null, ... }` when it can't
 guess, forcing manual selection in the UI.
 
-**Export (`lib/export.js`):** builds `.xlsx` workbooks with `exceljs`. Each
+**CEO menu v2** (2026-09-25, the chef's "September week_04" reference layout): Breakfast = Main Dish, Juice, Yogurt;
+Lunch = Main Dish, Salad, Juice, Snack, Bread (`SECTION_SLOTS.CEO`, 8 picks). `CEO_RAW_VEG` retired forward-only (category and
+dishes untouched, never picked; old menus re-export their Raw Veg row). `CEO_FRUITS` IS the Snack category -- renamed by
+`20260925100000_ceo_structure_v2.sql`, code kept. The export's Lunch "Protein" row is only a second label: the Main Dish's two
+dish cells are merged down over it (`CEO_PROTEIN_ROW_OF`, `addCeoDay`, shared by the menu and blank-template builders); it is
+not a category, slot or pick, and the parser skips it. CEO sheet style: yellow weekday + date and green person names, all
+black bold; bold dish text; widths 14/14/56/56; no blank rows between days, only the blue separator after Thursday; row heights
+left to Excel. The parser also accepts a CEO day header with no date (weekday + both person names), as the reference has.
+`dropDanglingDropdowns` removes any dropdown whose `_Lists` range was never made (a retired category's row in an old menu, a
+category whose dishes were all deactivated), in every menu export. CEO Lunch Main has an editable protein type.
+
+**Export (`lib/export.js`):** builds `.xlsx` workbooks with `exceljs`. Since 2026-09-24 no menu export (Generate Menu,
+Build Menu and its blank template, Export All, AI Menu Generator, History re-exports) carries an RC or a quantity column --
+just meal period, category / item type and dish name(s); RC stays in-app catalog data. The hidden `_Lists` sheet holds only
+dish names for the dish-name dropdowns (`List_*` ranges). The blank template keeps its fill-in headcount (School) and
+department (Staff) columns. Each
 section has its own sheet builder in `SECTION_BUILDERS` (school sections
 share `buildSchoolSheet`; Staff and CEO each get a distinct layout) because
 their source spreadsheets have fundamentally different column structures —
@@ -206,7 +325,76 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   pointer (red where it can't go), a click on empty sheet stamps one, clicking an existing cutter picks it
   up instead, and unplaceable cutters are dropped rather than overlapped. Per-piece weight / count /
   utilization / waste come from `updateTrimSummary` (share of tray area x grams in the tray);
-  Auto-arrange is `packing.js` (below). Not offered on muffin trays (a portion per cup already).
+  Auto-arrange is `packing.js` (below). Not offered on muffin trays (a portion per cup already). The cutter is ONE dropdown
+  (2026-09-26) plus a "Place by hand" toggle; choosing one shows, before anything is placed, one portion's finished / raw
+  weight, size, estimated thickness and how many Auto-arrange would cut (`updateCutterInfo`: `cutPortionFor`, the same
+  arithmetic as the portion view, and `game.planCutters`, the packer without placing).
+- Trim by Knife (2026-09-26; Trim's "Cutter | Trim by Knife" switch -- switching clears the tray): a uniform grid of straight
+  cuts, no Materials entry. Two numbers, the piece size Across / Down (cm); the grid is CENTRED, so leftover is two equal
+  strips on opposite edges; no gap or wall margin (a knife takes no dough); on round / triangle trays only wholly-inside
+  cells count. `rof/knifeGrid.js` (`planKnifeGrid`, pure; `buildKnifeLines`, one InstancedMesh). `game.setKnifeGrid` turns
+  the cells into rectangle "cuts" (`materialId: 'knife'`, not items: nothing to drag) that go through the SAME mask / scrap
+  / portion / PDF code as cutter pieces (`allCuts`). Dotted lines = preview; Cut -> solid lines, inputs locked, One portion /
+  Export PDF enabled (`cutsReady`); Edit cuts unlocks. Default size = the square giving `recipes.portion_weight_grams`, else 5 cm.
+- Layered tray (Phase 4, done 2026-09-26: L1 plan, L2 pre-bake, L3 fill, L4 bake, L5 trim / portion / PDF): with 2+ processes ticked, Setup's "One dough | In layers"
+  choice (beside the process label; One dough = the unchanged mixed flow). In layers: an ordered stack (top drawn first),
+  each layer its OWN wastage (session copy), density (1.05 dough / 1.0 no-flour filling, est., editable), "Pre-bake alone
+  first" (bottom only), and above it "All of it" or "Up to a height" (ASSEMBLY height from the tray floor, ruler-checkable).
+  `rof/layers.js` `planLayers` (pure, tested): grams in the tray are RAW (Total x every non-Baking waste); height = g /
+  (area x density), each layer starting where the one below ends; a pre-baked base sits at her measured height, else its
+  estimate; trays = her count, else the bottom process's Fill Weight when it is saved for THIS tray, else 1; "up to a height"
+  takes only what it needs, the rest is reported "Not used" (or "Short by", with how far it reaches) -- never waste or scrap.
+  Est. final height: a pre-baked layer stays, others rise by their own estimate; a flourless layer uses `FILLING_H_MUL`
+  (the rise model's no-flour fallback is a standard DOUGH rise). Sheet & Trim only, no muffin trays.
+  L2 (Pre-bake): steps are Setup -> Pre-bake (only when the bottom layer is pre-baked) -> Fill -> Bake -> Trim
+  (`layerStepLabels`). The Pre-bake reuses the Bake panel (`rofStep === 'prebake'`): the base process's own rise model
+  (`layerRiseModel`), its own method's oven settings, a sheet of the base's raw height. After it: the estimate, an optional
+  "Measured height" (`measuredCm`, valid only for the grams per tray it was measured on -- `measuredForGrams`), which sets
+  the base on screen to that height (`riseForHeight`, can go below raw) and replans the layer above. Fill -> is disabled until
+  L3; without a pre-bake Continue waits for Fill too. Layers-mode Setup fits 1280x800 unscrolled: the process checklist folds
+  into the head line ("2 of 2 processes · Change"), layer cards are an accordion (one open; `layerOpenId`), the plan is a
+  compact grid, and the Method field / Tray label step aside. One dough with 2+ processes (fixed 2026-09-26, was 805 px):
+  its summary is a compact list (`.rof-mix-summary`: a row per process, then "Wastage (combined)" beside "total -> Net" on
+  one row; the same span ids refreshComputedNumbers fills), and the One dough / In layers toggle sits in the gaps around
+  the process label line (negative margin) instead of making it taller. One process keeps the original box. A short filling
+  in Setup's layer plan is one line (`layerUseHtml(..., { compact: true })`, the full sentence as its tooltip); Pre-bake and
+  Fill show the full sentence. Every layers-mode state, the short-filling ones included, fits 1280x800.
+  L3 (Fill): from the Pre-bake ("Fill ->") or straight from Setup (no pre-bake: the base goes in raw). Each layer above the
+  base: All of it / Up to a height (the SAME layerCfg as Setup's cards), grams per tray, not used / short, rim warning.
+  3D: `game.setFillLayers([{ key, heightCm, look }])` -- each layer a sheet mesh (sheet.js `makeMaterial`) with a
+  `rof/filling.js` material (`fillingLook`: base colour + flecks from ingredient-name keywords, pure), built 1 cm thick and
+  SCALED to its height (instant; it eases = "pours"), stacked on the bottom sheet's top and following it
+  (`setDoughState` -> `layoutFills`). A short filling still shows the target height; the red line says what it reaches.
+  The 3D side view can't show a stack (the tray wall hides it; sheets are surfaces, no body to section), so the Fill step
+  shows `rof/stack.js` `stackSvg` instead: a to-scale 2D cross-section (bands in each layer's colour, cm ruler, rim, dashed
+  after-bake estimate) in the stage's top-left under the view buttons.
+  L4 (final Bake, rofStep 'bake' in layers mode): the same Bake panel; one note per layer (a pre-baked base "stays at
+  X cm, browns a little more"; others their rise estimate's verdict and raw -> baked height, est.). `playBake({ layered:
+  { baseFixed, fills: [{ key, hMul, brownSpeed }] } })`: a pre-baked base keeps its rise and takes up to a third of the
+  remaining browning; each layer on top grows to raw x (1 + RISE_H x hMul) (its assembled height kept in `f.rawH`) and
+  browns towards amber (`setFillBrown`); `resetBake` puts layers back and `restoreAssembled` (renderer) puts a pre-baked
+  base back to `prebakeSheetState`. The pre-bake and the final bake each keep their own oven settings / doneness / rise
+  correction (`useLayerBake` swaps `layerBakeSlots`); `layerFinalRise` feeds the plan's after-bake heights. The final
+  bake's oven settings are pre-filled from the methods of the layers that bake in it, top first. After it the
+  cross-section shows "BAKED (EST.)" heights.
+  L5 (Trim, portion, PDF): `prepareLayerTrim` sets `sheetInfo` to describe the STACK (`layered: true`; sessionGrams = its
+  baked grams per tray, every layer through its own Baking Waste; rawGrams; assembled thicknessCm; `stackHMul` =
+  riseForHeight(assembled, baked est.), so measurePortion's cut height IS the stack's baked height; per-layer heights /
+  colours / kind), and everything in Trim (cutter / knife readouts, summary, scrap, portion view, PDF) reads it unchanged.
+  `bakingLoss` for a stack = baked / raw grams ("Raw before baking (all layers)"). In 3D the top of the stack (`stackTopY`)
+  carries the knife lines, scrap flags / hover and the cutter ghost; the filling material shares the base sheet's cutter
+  mask, so the red hatched scrap and cut lines show on the filling (`createFillingMaterial({ scrap })`). The portion view
+  draws one slab per layer (`desc.layers`; dough layers in crust colours, fillings in theirs). PDF: `buildLayerPdfData` --
+  Layers (raw -> baked per tray, wastage, "not used" / "short" as their own lines, never waste), Stack & cuts, One portion,
+  Waste (each layer's planned Baking Waste beside the measured scrap), Baking (pre-bake and final bake). Prints on one A4.
+  The layered tray is complete (L1-L5); Shape & Place and muffin trays stay single-dough only.
+- Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
+  `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
+  muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
+  The form is ONE component, `mountMaterialForm(root, …)` (save() / dispose()), used by the Materials screen and by
+  `openMaterialCreateModal`: Recipe on Fire's "+ Create new cutter…" (Trim) / "+ Create new tray…" (Setup) dropdown
+  options open it as a dialog with the Category FIXED to the entry point's, save a real `materials` row, and the new
+  one is chosen at once (a new cutter is also in hand). Setup and Trim reload the materials list each time they open.
 - The old 2D tray canvas and photo-sprite dough flow are gone; the game view is the only tray view. The
   Bake panel (both methods) has a rise override slider (30-160%) scaling the model's height/width
   multipliers -- it applies at bake time only, so raising it above what placement reserved can make
@@ -301,6 +489,57 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   `dough-shape-photos` bucket, undeploy `generate-dough-shape-image`) -- the app-side removal (old Dough
   Shapes screen, `lib/doughShapes.js`, `lib/generateDoughShapeImage.js`, the nav entry) is done; `dough_shapes`
   and its Shapes modal are the live, in-use feature and were untouched by that removal.
+
+## AI Menu Generator (in progress on `feature/ai-menu-generator`)
+
+The AI invents dishes for a date range (Daycare / KG-LP / MS-UP / Staff; CEO never), the unchanged engine schedules them, and
+the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus`. Tables: `ai_menu_runs`,
+`ai_menu_draft_dishes`, `ai_menu_draft_picks` (`supabase/migrations/20260923100000_ai_menu_generator.sql`).
+- `lib/aiMenu.js`: which categories are AI (`AI_CATEGORIES`, Staff Sweets included; the rest stay catalog-only) and `computeDraftMenus`, the engine run
+  over in-memory pools (`MenuGenerator({ draftPools, partnerPicks })`).
+- `lib/aiMenuGenerate.js`: pool sizing, the AI calls (`generate-menu-dishes` Edge Function, Sonnet 5, thinking off), the gates,
+  and the top-up loop that reads the engine's own warnings. Deploy the function with `--use-api` (Docker bundling hangs here).
+- `lib/aiMenuSafety.js` is MANDATORY on every AI or chef-written dish (generate, edit, replace, approve): nut/sesame
+  (`nutFilter`; za'atar allowed in a dish NAME only), seafood for student sections, halal (`halalFilter.js`), and known-risk dishes
+  (hummus, pesto...) must list their substitute. Also feature-only (not in `halalFilter.js`): pepperoni / sausage / hot dog /
+  frankfurter / wiener / salami / chorizo banned whatever meat is named, no spicy framing (`SPICY_TERMS`; aromatic words like
+  cumin, paprika, baharat stay allowed), and per-category rules (Daycare Lunch Salad = cooked veg sticks, no puree / raw
+  carrot or celery; PM Snack never manakish; Daycare PM Snack soft only). A hit is a hard block, reported, never cleaned up or
+  overridden.
+- Catalog duplicates (`findDuplicateMatch`, same category) LINK to the existing item; deliberately not widened (reviewed).
+- Review screen (`renderAiMenuView`, `lib/aiMenuReview.js`, `lib/aiMenuRules.js`): shared picks (MS-UP Lunch Main / Starch,
+  Staff's shared Main / Breakfast) are read-only copies and follow their source; menu rules only WARN after edits; empty slots
+  block Approve.
+- Approve (`lib/aiMenuApprove.js`, needs `20260924120000_ai_menu_approve.sql`): the only step that writes the Dish Catalog and
+  History. Claim draft -> approving by compare-and-swap (`approve_claim` + heartbeat `approve_claimed_at`; a claim quiet for
+  `STALE_MS` can be resumed). Before any write: empty slots, the full safety check and the retired-name check block and hand the
+  run back as a draft. Then dishes -> `menu_items` (`is_ai_generated`, `ai_menu_run_id`; marker `resolved_item_id`; a unique-name
+  clash links instead of duplicating), missing `item_portions` for the sections whose menus have the dish's category (shared
+  copies don't add Staff portions), the four sections via `persistMenu` (recorded in `approve_progress`; a half-saved one is
+  deleted and redone) and CEO by the unchanged engine, all in one `batch_id`. Every step is idempotent, so Resume finishes it.
+- Calories are NOT part of Approve: after a successful Approve, main.js `estimateApprovedRunCalories` runs the shared
+  `runCalorieBackfill` in the background for that run's new dishes and stores the result in `approve_progress.calories` (the
+  approved run shows it and can re-run it). Scope (`lib/calorieScope.js`): school sections as before, plus every
+  `is_ai_generated` dish in any section; AI dishes' draft key ingredients are the estimator's input when no real recipe matches.
+  Dish Catalog has an "Estimate missing calories" button and an AI badge / "AI-generated only" filter.
+- Snacks in the AI generator follow the same sharing: one `DAYCARE+KG_LP` pool per snack (Daycare's audience limits; the
+  shared PM Snack is soft only, its savory side included), MS-UP's own pools, every snack pool split by style; KG-LP's snack
+  picks are read-only copies of Daycare's (`source_section_code` DAYCARE; review propagates Daycare -> KG-LP -> Staff
+  Breakfast). Staff Breakfast's own four a day are sized per style (6 dish types in 6 dishes means one of each type a day, so
+  few dishes fit a given day: the pools are deliberately generous).
+- National Day (`lib/nationalDay.js`): every Tuesday, every AI category in every section is one cuisine from a 16-entry cycle,
+  calendar-anchored (2026-09-01 = Saudi; Tuesdays since then mod 16). The generator orders each Tuesday's dishes to that day's
+  exact rules (`tuesdayGroups`) in the same calls as the regular dishes (each group carries its `cuisine`, which the AI must
+  echo back); themed dishes are kept for their Tuesday (`ai_menu_draft_dishes.cuisine`). The engine's `dayTheme` option
+  (`_themeSplit` / `_pickThemed`, AI only -- the regular engine never passes it) falls back themed -> themed with the distinct
+  rule relaxed -> regular -> regular relaxed, warning at each step; never an empty slot, never relaxed safety.
+  Exports of an approved run's menus (at Approve and History re-exports) label each themed Tuesday's weekday header cell
+  `TUESDAY · ARMENIAN DAY` (School and Staff; never CEO, which is unthemed): main.js `fetchGeneratedMenuExportData` matches the
+  menu's `batch_id` to an approved `ai_menu_runs` row and `nationalDayThemesForBatch` (`lib/aiMenuApprove.js`) reads the cuisine
+  SAVED on that date's picked draft dishes (never recalculated from the calendar). Other menus get no label. The parser reads
+  the weekday as the text before the `·`; School's weekday column widens only on sheets that carry a label.
+- Trial scripts (`scripts/ai-menu-trial-run.js`, `scripts/ai-menu-dup-check.js`, `scripts/staff-main-backfill.js`) ask for a
+  login: run them in a normal terminal.
 
 ## Adding a new section or category
 

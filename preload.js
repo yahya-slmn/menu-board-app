@@ -16,9 +16,14 @@ contextBridge.exposeInMainWorld('api', {
   addItem: (payload) => ipcRenderer.invoke('add-item', payload),
   updateItem: (payload) => ipcRenderer.invoke('update-item', payload),
   checkCategoryChangeImpact: (payload) => ipcRenderer.invoke('check-category-change-impact', payload),
-  updateItemRc: (payload) => ipcRenderer.invoke('update-item-rc', payload),
+  listCreatedByLabels: () => ipcRenderer.invoke('list-created-by-labels'),
   deleteItem: (itemId) => ipcRenderer.invoke('delete-item', itemId),
   estimateMissingCalories: () => ipcRenderer.invoke('estimate-missing-calories'),
+  exportCalorieReview: () => ipcRenderer.invoke('export-calorie-review'),
+  previewCalorieImport: (payload) => ipcRenderer.invoke('preview-calorie-import', payload),
+  applyCalorieImport: (payload) => ipcRenderer.invoke('apply-calorie-import', payload),
+  previewCatalogImport: (payload) => ipcRenderer.invoke('preview-catalog-import', payload),
+  applyCatalogImport: (payload) => ipcRenderer.invoke('apply-catalog-import', payload),
   // Same one-way-progress-events pattern as onExportProgress above (main.js sends
   // 'calorie-estimate-progress' while working through batches, since a single invoke() call has
   // no way to report interim status on its own). Returns an unsubscribe function, same reason.
@@ -146,6 +151,7 @@ contextBridge.exposeInMainWorld('api', {
   exportMenuToExcel: (payload) => ipcRenderer.invoke('export-menu-to-excel', payload),
   exportAllSectionsToExcel: (payload) => ipcRenderer.invoke('export-all-sections-to-excel', payload),
   generateAndExportAll: (payload) => ipcRenderer.invoke('generate-and-export-all', payload),
+  createdByMixPools: (payload) => ipcRenderer.invoke('created-by-mix-pools', payload),
 
   getSectionSlots: (sectionCode) => ipcRenderer.invoke('get-section-slots', sectionCode),
   getSchoolDays: (payload) => ipcRenderer.invoke('get-school-days', payload),
@@ -154,4 +160,20 @@ contextBridge.exposeInMainWorld('api', {
   builderFillSuggestions: (payload) => ipcRenderer.invoke('builder-fill-suggestions', payload),
   saveManualMenu: (payload) => ipcRenderer.invoke('save-manual-menu', payload),
   exportBlankTemplate: (payload) => ipcRenderer.invoke('export-blank-template', payload),
+
+  aiMenuGenerate: (payload) => ipcRenderer.invoke('ai-menu-generate', payload),
+  aiMenuListRuns: () => ipcRenderer.invoke('ai-menu-list-runs'),
+  aiMenuGetRun: (runId) => ipcRenderer.invoke('ai-menu-get-run', runId),
+  aiMenuReplacementOptions: (payload) => ipcRenderer.invoke('ai-menu-replacement-options', payload),
+  aiMenuReplacePick: (payload) => ipcRenderer.invoke('ai-menu-replace-pick', payload),
+  aiMenuUpdateDish: (payload) => ipcRenderer.invoke('ai-menu-update-dish', payload),
+  aiMenuSuggest: (payload) => ipcRenderer.invoke('ai-menu-suggest', payload),
+  aiMenuDiscardRun: (runId) => ipcRenderer.invoke('ai-menu-discard-run', runId),
+  aiMenuApprove: (payload) => ipcRenderer.invoke('ai-menu-approve', payload),
+  aiMenuEstimateCalories: (payload) => ipcRenderer.invoke('ai-menu-estimate-calories', payload),
+  onAiMenuProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('ai-menu-progress', listener);
+    return () => ipcRenderer.removeListener('ai-menu-progress', listener);
+  },
 });

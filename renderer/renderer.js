@@ -8,6 +8,13 @@ const state = {
   // Whether the "Menu" nav group (Generate/Build/Export All) is expanded -- same toggle
   // pattern as itemCatalogExpanded, just gated on any of MENU_GROUP_VIEWS instead of 'items'.
   menuGroupExpanded: true,
+  // Menu Planner (2026-09-25): Generate Menu / Build Menu / Export All Sections behind one nav entry.
+  // mode 'generate' | 'build'; scope (Generate only) 'one' = Generate Menu, 'all' = Export All Sections.
+  // busy: a generation run is in flight -- the switches stay disabled until it finishes.
+  // fields: the Generate form's name / created by / dates, shared by both scopes for the session.
+  menuPlanner: { mode: 'generate', scope: 'one', busy: false, restored: false, fields: { label: '', createdBy: '', start: '', end: '' },
+    // Created By mix: session only, never saved (see renderMixPanel). values: { label: percent }.
+    mix: { values: {}, open: false, check: null, checkKey: '', scope: null } },
   categories: [],
   proteinTypes: [],
   currentGeneratedMenuId: null,
@@ -25,6 +32,10 @@ const state = {
   // "current"; a later export sends it back so main.js can refuse to export against a superseded
   // upload's in-memory workbooks (see main.js's own comment on menuIngredientsToken).
   menuIngredients: { files: [], uploadToken: null },
+  // Dish Catalog -> "Import dishes from menus" (renderCatalogImportView): shown in place of the catalog
+  // while open. files: [{ name, base64 }] kept so a section pick can re-read them; sel: key -> the
+  // chef's tick / name / category / protein per row; overrides: 'file::sheet' -> section code.
+  catalogImport: { open: false, files: [], plan: null, sel: {}, overrides: {}, createdBy: 'Tetiana', result: null, busy: false },
   // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
   // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
   // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
@@ -87,6 +98,13 @@ const state = {
   // exist at all for view/formId/pendingPhoto/removePhoto, the same three things every other
   // list<->form screen's own state slice needs.
   materials: { view: 'list', formId: null, pendingPhoto: null, removePhoto: false },
+  // AI Menu Generator (renderAiMenuView): the run list + generate form, or one run under review.
+  // `generating`/`progress` survive leaving the screen, since generation keeps running in main.js.
+  aiMenu: {
+    view: 'list', runId: null, tab: 'DAYCARE', data: null, generating: false, progress: '',
+    form: { label: '', createdBy: '', startDate: '', endDate: '' },
+    dishFilter: { q: '', cat: '', servedOnly: true },
+  },
 };
 
 // Recipe Book and Recipe Extractor are two fully separate tables (see CLAUDE.md-equivalent
@@ -374,9 +392,14 @@ function createProgressPanel(container, { label } = {}) {
   return { update, done, destroy };
 }
 
-const CATEGORY_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb' };
+// Protein code -> chip color class. A code with no entry (a protein type added later) gets the
+// outlined .protein-other chip: a bare .chip is white text on no background, i.e. invisible.
+const PROTEIN_COLOR = { CHICKEN: 'chicken', BEEF: 'beef', LAMB: 'lamb', TURKEY: 'turkey', FISH: 'fish', VEGETARIAN: 'vegetarian', VEGAN: 'vegan' };
+function proteinChip(code, label) {
+  return code ? `<span class="chip ${PROTEIN_COLOR[code] || 'protein-other'}">${aiEsc(label || code)}</span>` : '';
+}
 // AM_SNACK_STYLE_OPTIONS (defined below) already carries the display name for each style code --
-// this just maps that same code to its own chip color class, same pattern as CATEGORY_COLOR does
+// this just maps that same code to its own chip color class, same pattern as PROTEIN_COLOR does
 // for protein codes. Pastry gets a warm rose (bakery), Cold Kitchen a cool teal ("cold") --
 // distinct from every existing chip color (chicken/beef/lamb/daily).
 const AM_SNACK_STYLE_COLOR = { PASTRY: 'pastry', COLD_KITCHEN: 'cold-kitchen' };
@@ -387,16 +410,29 @@ const AM_SNACK_STYLE_COLOR = { PASTRY: 'pastry', COLD_KITCHEN: 'cold-kitchen' };
 // required by lib/generator.js's SECTION_SLOTS composition rules (1 vegetarian among Staff's
 // 6 breakfast picks; 1 meat protein + 1 vegetarian for the lunchbox); STAFF_LUNCHBOX_SALAD
 // isn't generator-enforced but is 100% consistently tagged in the existing catalog.
-// CEO_LUNCH_MAIN was deliberately left out despite the "lunch main" name -- 0% real usage.
+// CEO_LUNCH_MAIN added 2026-09-25 (CEO v2: its export row pair reads "Main Dish" / "Protein"); it
+// had 0% protein tagging before, so existing CEO mains start blank -- set them in Edit Item.
+// AM_SNACK / PM_SNACK added 2026-09-24: the AI Menu Generator already writes a protein onto snack
+// dishes, and a locked field wiped it on every save; the chef sets the real one (Turkey, Vegetarian,
+// ...). What a snack may NOT be is unchanged (lib/categoryRules.js: chicken / beef by protein type or
+// name keeps it off new menus; the form warns).
 const PROTEIN_ELIGIBLE_CATEGORIES = new Set([
   'LUNCH_MAIN', 'STAFF_MAIN', 'STAFF_BREAKFAST', 'STAFF_LUNCHBOX', 'STAFF_LUNCHBOX_SALAD',
+  'AM_SNACK', 'PM_SNACK', 'CEO_LUNCH_MAIN',
 ]);
 
 // AM_SNACK only -- backs lib/generator.js's Pastry/Cold-Kitchen weekly rotation
 // (AM_SNACK_STYLE_BY_PATTERN), scoped to Daycare/KG-LP/MS-UP the same way AM_SNACK itself only
 // ever appears in those three sections' own category lists (SECTION_SLOTS never lists it for
 // Staff/CEO), so no separate section check is needed here.
-const STYLE_ELIGIBLE_CATEGORIES = new Set(['AM_SNACK']);
+// Categories with a Pastry / Cold Kitchen style (menu_items.am_snack_style) -- PM Snack and Staff Breakfast
+// since 2026-09-24; mirrors STYLED_CATEGORIES in main.js.
+const STYLE_ELIGIBLE_CATEGORIES = new Set(['AM_SNACK', 'PM_SNACK', 'STAFF_BREAKFAST']);
+// Chicken / beef are lunch only, never AM or PM Snack -- mirrors lib/categoryRules.js (the engine,
+// Build Menu and the AI review screen enforce it; the Add / Edit Item form only warns).
+const SNACK_LUNCH_ONLY_CATEGORIES = new Set(['AM_SNACK', 'PM_SNACK']);
+const SNACK_LUNCH_ONLY_PROTEINS = new Set(['CHICKEN', 'BEEF']);
+const SNACK_LUNCH_ONLY_WORDS = /\b(chicken|beef)\b/i;
 const AM_SNACK_STYLE_OPTIONS = [
   { code: 'PASTRY', name: 'Pastry' },
   { code: 'COLD_KITCHEN', name: 'Cold Kitchen' },
@@ -437,16 +473,17 @@ function showToast(message) {
 // Whether it's safe to blow away #main's current content and re-render the active view.
 // Every view in SAFE_VIEWS re-fetches its own primary data live on every render already (see
 // renderItemsView/renderHistoryView/renderRecipeListView/renderIngredientsView/
-// renderExtractedIngredientsView/renderExportAllView/renderGenerateView), so replacing them just shows the same screen with
-// fresher data underneath. Build Menu (state.builder.sections[...].selections) and an
+// renderExtractedIngredientsView, and Menu Planner's Generate modes), so replacing them just shows the same screen with
+// fresher data underneath. Menu Planner's Build mode (state.builder.sections[...].selections) and an
 // in-progress Recipe/Extractor form (state.recipes/extractor.ingredientRows) hold real unsaved work that a
 // re-render would silently discard, and an open Add/Edit modal (Item/Ingredient, appended to
 // document.body) was populated from data fetched at modal-open time -- none of these should
 // ever be touched by a background refresh.
-const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'exportAll', 'generate'];
+const SAFE_REFRESH_VIEWS = ['items', 'history', 'recipes', 'extractor', 'recipeGenerator', 'ingredients', 'extractedIngredients', 'menuPlanner'];
 function isSafeToForceRerender() {
   if (document.querySelector('.modal-overlay')) return false;
-  if (state.currentView === 'build') return false;
+  // Menu Planner: Build mode holds the unsaved grid; a Generate run in flight must finish first.
+  if (state.currentView === 'menuPlanner' && (state.menuPlanner.mode === 'build' || state.menuPlanner.busy)) return false;
   if (state.currentView === 'recipes' && state.recipes.view === 'form') return false;
   if (state.currentView === 'extractor' && state.extractor.view === 'form') return false;
   if (state.currentView === 'recipeGenerator' && state.generatedRecipes.view === 'form') return false;
@@ -662,8 +699,9 @@ function renderSectionNav() {
   });
 }
 
-// The 3 screens grouped under the "Menu" nav parent (see index.html's #menu-sublist).
-const MENU_GROUP_VIEWS = ['generate', 'build', 'exportAll', 'menuIngredients', 'cleanMenu'];
+// The screens grouped under the "Menu" nav parent (see index.html's #menu-sublist). Generate Menu,
+// Build Menu and Export All Sections are modes of Menu Planner, not views of their own.
+const MENU_GROUP_VIEWS = ['menuPlanner', 'aiMenu', 'menuIngredients', 'cleanMenu'];
 
 function wireNav() {
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
@@ -691,8 +729,8 @@ function wireNav() {
   });
 
   // "Menu" parent button has no data-view/screen of its own -- it just expands/collapses its
-  // sub-list, landing on the first child (Generate Menu) the first time you enter the group,
-  // same interaction as Dish Catalog above.
+  // sub-list, landing on the first child (Menu Planner, in its last-used mode) the first time you
+  // enter the group, same interaction as Dish Catalog above.
   document.getElementById('menu-parent-btn').addEventListener('click', () => {
     if (isSidebarCollapsed()) {
       toggleRailFlyout(document.getElementById('menu-parent-btn'), document.getElementById('menu-sublist'));
@@ -703,7 +741,7 @@ function wireNav() {
     } else {
       resetDrilldownScreens();
       state.menuGroupExpanded = true;
-      state.currentView = 'generate';
+      state.currentView = 'menuPlanner';
     }
     renderView();
   });
@@ -807,13 +845,13 @@ async function renderView() {
   updateItemCatalogExpansion();
   const main = document.getElementById('main');
   main.dataset.view = state.currentView;
-  main.classList.toggle('build-mode', state.currentView === 'build');
+  if (state.currentView === 'menuPlanner') restoreMenuPlannerMode(state.menuPlanner); // before the layout below
+  main.classList.toggle('build-mode', state.currentView === 'menuPlanner' && state.menuPlanner.mode === 'build');
   try {
   if (state.currentView === 'items') return await renderItemsView(main);
-  if (state.currentView === 'generate') return await renderGenerateView(main);
-  if (state.currentView === 'build') return await renderBuildMenuView(main);
+  if (state.currentView === 'menuPlanner') return await renderMenuPlannerView(main);
+  if (state.currentView === 'aiMenu') return await renderAiMenuView(main);
   if (state.currentView === 'history') return await renderHistoryView(main);
-  if (state.currentView === 'exportAll') return await renderExportAllView(main);
   if (state.currentView === 'menuIngredients') return await renderMenuIngredientsView(main);
   if (state.currentView === 'cleanMenu') return await renderCleanMenuView(main);
   if (state.currentView === 'recipes') return await renderRecipesView(main);
@@ -843,10 +881,12 @@ function currentSectionName() {
 // ITEM CATALOG VIEW
 // ============================================================
 async function renderItemsView(main) {
+  if (state.catalogImport.open) return renderCatalogImportView(main);
   const [items, proteinTypes] = await Promise.all([
     window.api.getItems(state.currentSection),
     window.api.getProteinTypes(),
   ]);
+  fillCreatedByList();
 
   // Category options: distinct category_name values actually present in this section's items,
   // in the order they already appear (get-items pre-sorts by meal-period/category order) --
@@ -857,8 +897,20 @@ async function renderItemsView(main) {
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Dish Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
-      <button class="primary" id="add-item-btn">+ Add Item</button>
+      <div class="action-toolbar">
+        <button class="secondary" id="estimate-styles-btn" title="Tags every AM Snack / PM Snack (Daycare, KG-LP, MS-UP) and Staff Breakfast dish without a style as Pastry or Cold Kitchen. Only fills empty values; correct any of them in Edit Item.">Estimate missing styles</button>
+        <button class="secondary" id="estimate-calories-btn" title="Estimates calories for every Daycare / KG-LP / MS-UP dish without a value, and every AI-generated dish in any section. Only fills empty values.">Estimate missing calories</button>
+        <button class="secondary" id="catalog-import-btn" title="Reads menu Excel files exported from this app and edited by hand, and lists every dish the catalog doesn't have yet. Nothing is added until you tick and confirm.">Import dishes from menus…</button>
+        <button class="primary" id="add-item-btn">+ Add Item</button>
+      </div>
     </div>
+    <div class="calorie-review-bar">
+      <span>One-time calorie review (Daycare, KG-LP and MS-UP, whichever tab is open):</span>
+      <button class="secondary small" id="calorie-review-export-btn" title="An Excel file of every active Daycare, KG-LP and MS-UP dish with its current calories, for a researcher to fill in real values.">Export calories for review</button>
+      <button class="secondary small" id="calorie-review-import-btn" title="Upload the reviewed file: shows what will change first, then writes only the filled-in Reviewed values.">Import reviewed calories</button>
+      <input type="file" id="calorie-review-file" accept=".xlsx" hidden />
+    </div>
+    <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
       <label for="item-search">Search by name</label>
       <input id="item-search" type="search" />
@@ -866,6 +918,7 @@ async function renderItemsView(main) {
         <option value="">All Categories</option>
         ${categoryNames.map(c => `<option value="${c}">${c}</option>`).join('')}
       </select>
+      <select id="item-source-filter" aria-label="Created By">${createdByFilterOptions(items)}</select>
       <select id="item-protein-filter" hidden>
         <option value="">All Proteins</option>
         ${proteinTypes.map(p => `<option value="${p.code}">${p.name}</option>`).join('')}
@@ -874,10 +927,78 @@ async function renderItemsView(main) {
     <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
+  document.getElementById('catalog-import-btn').addEventListener('click', () => {
+    Object.assign(state.catalogImport, { open: true, plan: null, result: null, sel: {}, overrides: {} });
+    renderItemsView(main);
+  });
+  document.getElementById('estimate-styles-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const statusEl = document.getElementById('calorie-estimate-status');
+    btn.disabled = true;
+    const unsubscribe = window.api.onAmSnackStyleEstimateProgress(({ message }) => { statusEl.textContent = message; });
+    try {
+      const r = await window.api.estimateMissingAmSnackStyles();
+      unsubscribe();
+      showToast(r.totalMissing ? `Style set for ${r.estimated} of ${r.totalMissing} dish(es).` : 'Every AM Snack, PM Snack and Staff Breakfast dish already has a style.');
+      await renderItemsView(main);
+      if ((r.failures || []).length) document.getElementById('calorie-estimate-status').textContent = `Notes: ${r.failures.slice(0, 3).join(' | ')}`;
+    } catch (err) {
+      unsubscribe();
+      statusEl.textContent = `Style estimate failed: ${err.message}`;
+      btn.disabled = false;
+    }
+  });
+  document.getElementById('calorie-review-export-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const r = await window.api.exportCalorieReview();
+      if (r.success) showToast(`Exported ${r.count} dish(es) to ${r.path}`);
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+    } finally { btn.disabled = false; }
+  });
+  const reviewFile = document.getElementById('calorie-review-file');
+  document.getElementById('calorie-review-import-btn').addEventListener('click', () => { reviewFile.value = ''; reviewFile.click(); });
+  reviewFile.addEventListener('change', async () => {
+    const file = reviewFile.files[0];
+    if (!file) return;
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const plan = await window.api.previewCalorieImport({ base64 });
+      openCalorieImportPreview(plan, file.name, () => renderItemsView(main));
+    } catch (err) {
+      alert(`Couldn't read that file: ${err.message}`);
+    }
+  });
+  document.getElementById('estimate-calories-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const statusEl = document.getElementById('calorie-estimate-status');
+    btn.disabled = true;
+    const unsubscribe = window.api.onCalorieEstimateProgress(({ message }) => { statusEl.textContent = message; });
+    try {
+      const r = await window.api.estimateMissingCalories();
+      const problems = (r.failures || []).length ? ` Notes: ${r.failures.slice(0, 3).join(' | ')}` : '';
+      showToast(r.totalMissing ? `Calories estimated for ${r.estimated} of ${r.totalMissing} dish(es)${r.flagged ? ` (${r.flagged} flagged unverified)` : ''}.` : 'Every dish in scope already has calories.');
+      unsubscribe();
+      await renderItemsView(main);
+      if (problems) document.getElementById('calorie-estimate-status').textContent = problems.trim();
+    } catch (err) {
+      unsubscribe();
+      statusEl.textContent = `Calorie estimate failed: ${err.message}`;
+      btn.disabled = false;
+    }
+  });
 
   const searchInput = document.getElementById('item-search');
   const categoryFilter = document.getElementById('item-category-filter');
   const proteinFilter = document.getElementById('item-protein-filter');
+  const sourceFilter = document.getElementById('item-source-filter');
   const content = document.getElementById('items-content');
 
   if (items.length === 0) {
@@ -897,15 +1018,18 @@ async function renderItemsView(main) {
     renderFiltered();
   });
   proteinFilter.addEventListener('change', renderFiltered);
+  sourceFilter.addEventListener('change', renderFiltered);
 
   function renderFiltered() {
     const query = searchInput.value.trim().toLowerCase();
     const cat = categoryFilter.value;
     const protein = proteinFilter.hidden ? '' : proteinFilter.value;
+    const source = sourceFilter.value;
     const filtered = items.filter(it =>
       (!query || it.name.toLowerCase().includes(query)) &&
       (!cat || it.category_name === cat) &&
-      (!protein || it.protein_code === protein)
+      (!protein || it.protein_code === protein) &&
+      createdByFilterMatch(it, source)
     );
 
     if (filtered.length === 0) {
@@ -914,7 +1038,7 @@ async function renderItemsView(main) {
     }
 
     // One shared table for every category (not a table-per-category), with the category
-    // column merged via rowspan -- keeps Tags/RC in the same horizontal position for every
+    // column merged via rowspan -- keeps Style/Protein/Menu use/Code in the same horizontal position for every
     // row regardless of which category it belongs to, instead of each category's table
     // auto-sizing its own column widths independently.
     //
@@ -939,14 +1063,14 @@ async function renderItemsView(main) {
               ${it.calories_per_100g != null ? it.calories_per_100g : '—'}
               ${it.calories_unverified ? `<span class="chip unverified" title="AI estimate -- flagged as implausible for this item's category/protein, no real recipe was available to ground it. Worth a manual check, or add a real recipe so re-estimating can use its actual ingredients.">unverified</span>` : ''}
             </td>
-            <td>
-              ${it.protein_code ? `<span class="chip ${CATEGORY_COLOR[it.protein_code] || ''}">${it.protein_name}</span>` : ''}
-              ${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}
+            <td>${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}</td>
+            <td>${proteinChip(it.protein_code, it.protein_name)}</td>
+            <td class="menu-use-cell">
               ${it.is_daily_repeating ? `<span class="chip daily">Daily</span>` : ''}
+              ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/<wbr>beef in a snack</span>` : ''}
             </td>
-            <td>
-              <input class="rc-input ${it.rc_code ? '' : 'rc-missing'}" data-rc="${it.id}" value="${it.rc_code || ''}" placeholder="NEW" />
-            </td>
+            <td class="created-by-cell" data-created-by="${it.id}">${it.created_by_label ? aiEsc(it.created_by_label) : '<span class="list-empty">—</span>'}</td>
+            <td class="code-cell" data-code="${it.id}"${it.rc_code ? ` title="${aiEsc(it.rc_code)}"` : ''}>${it.rc_code ? aiEsc(it.rc_code) : '<span class="code-missing">NEW</span>'}</td>
             <td style="text-align:right">
               <button class="icon-btn" data-edit="${it.id}">Edit</button>
               <button class="icon-btn danger" data-delete="${it.id}">Delete</button>
@@ -958,7 +1082,7 @@ async function renderItemsView(main) {
 
     content.innerHTML = `
       <div class="table-scroll"><table class="items-table dish-catalog-table">
-        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Tags</th><th>RC</th><th></th></tr></thead>
+        <thead><tr><th>Category</th><th>Name</th><th>Calories (100g)</th><th>Style</th><th>Protein</th><th>Menu use</th><th>Created By</th><th>Code</th><th></th></tr></thead>
         <tbody>${bodyRows.join('')}</tbody>
       </table></div>
     `;
@@ -985,21 +1109,400 @@ async function renderItemsView(main) {
         }
       });
     });
-    content.querySelectorAll('[data-rc]').forEach(input => {
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
-      input.addEventListener('change', async () => {
-        const id = input.dataset.rc;
-        const rcCode = input.value.trim() || null;
-        await window.api.updateItemRc({ id, rcCode });
-        const it = items.find(i => i.id == id);
-        if (it) it.rc_code = rcCode;
-        input.classList.toggle('rc-missing', !rcCode);
-      });
-    });
   }
 
   searchInput.addEventListener('input', renderFiltered);
   renderFiltered();
+}
+
+// The one-time calorie import's preview (main.js preview-calorie-import): what will change, what stays,
+// what is skipped and why. Nothing is written until Confirm, and then only this plan (by its token).
+// ============================================================
+// Dish Catalog -> "Import dishes from menus" (main.js preview-catalog-import / apply-catalog-import,
+// lib/catalogImport.js). Reads chef-edited menu exports, lists what the catalog lacks, and adds ONLY the
+// ticked rows: new dishes (ticked), "looks like an existing dish" (not ticked -- the 0.80 name match
+// also flags some different dishes, so each sits beside its catalog match), and dishes already in the
+// catalog but not on a section's menu (not ticked). Shown in place of the Dish Catalog while open.
+// ============================================================
+const CI_SCHOOL_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP'];
+
+function ciSectionName(code) {
+  return state.sections.find(s => s.code === code)?.name || code;
+}
+
+// "SUNDAY 28-09-2026" -> "Sun 28-09"; "Sunday" (no date) -> "Sun".
+function ciShortDay(day) {
+  const [weekday, date] = String(day).split(' ');
+  const wd = weekday ? weekday[0].toUpperCase() + weekday.slice(1, 3).toLowerCase() : '';
+  return date ? `${wd} ${date.slice(0, 5)}` : wd;
+}
+
+// File names without the words every file shares ("September week_01" .. -> "week_01").
+function ciFileLabeler(plan) {
+  const names = [...new Set([...plan.newDishes, ...plan.similar, ...plan.notInSection].flatMap(e => Object.keys(e.files)))];
+  const words = names.map(n => n.split(' '));
+  let common = 0;
+  while (names.length > 1 && words.every(w => w.length > common + 1 && w[common] === words[0][common])) common++;
+  return (name) => name.split(' ').slice(common).join(' ') || name;
+}
+
+function ciFilesText(entry, label) {
+  return Object.entries(entry.files).map(([f, days]) => `${label(f)}${days.length ? `: ${days.map(ciShortDay).join(', ')}` : ''}`).join(' · ');
+}
+
+// Fresh selections for a new plan: new dishes ticked, the other two groups not.
+function ciInitSelections(plan) {
+  const sel = {};
+  for (const e of plan.newDishes) sel[e.key] = { include: true, name: e.name, categoryCode: e.categoryCode, proteinCode: e.proteinCode || '' };
+  for (const e of plan.similar) sel[e.key] = { include: false, name: e.name, categoryCode: e.categoryCode, proteinCode: e.proteinCode || '' };
+  for (const e of plan.notInSection) sel[e.key] = { include: false };
+  return sel;
+}
+
+async function ciReadFiles(fileList) {
+  return Promise.all([...fileList].map(file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, base64: reader.result.split(',')[1] });
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  })));
+}
+
+async function renderCatalogImportView(main) {
+  const ci = state.catalogImport;
+  fillCreatedByList();
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Import dishes from menus</h1><span class="page-description">Menu Excel files exported from this app and edited by hand: every dish the Dish Catalog doesn't have yet, for you to review before anything is added.</span></div>
+      <div class="action-toolbar"><button class="secondary" id="ci-back">← Dish Catalog</button></div>
+    </div>
+    <div class="ci-panel ci-controls">
+      <label class="ci-field">Menu files
+        <input type="file" id="ci-files" accept=".xlsx" multiple />
+      </label>
+      <label class="ci-field">Created By
+        <input type="text" id="ci-created-by" list="created-by-list" value="${aiEsc(ci.createdBy)}" autocomplete="off" />
+      </label>
+      <button class="primary" id="ci-read" ${ci.files.length ? '' : 'disabled'}>Read files</button>
+      <span class="ci-chosen">${ci.files.length ? `${ci.files.length} file(s): ${ci.files.map(f => aiEsc(f.name)).join(', ')}` : 'No files chosen'}</span>
+    </div>
+    <div id="ci-status" class="ai-progress" role="status" aria-live="polite"></div>
+    <div id="ci-body"></div>
+  `;
+  document.getElementById('ci-back').addEventListener('click', () => {
+    Object.assign(state.catalogImport, { open: false, plan: null, result: null, files: [], sel: {}, overrides: {} });
+    renderItemsView(main);
+  });
+  document.getElementById('ci-created-by').addEventListener('input', (e) => { ci.createdBy = e.target.value; ciUpdateFooter(); });
+  document.getElementById('ci-files').addEventListener('change', async (e) => {
+    try {
+      ci.files = await ciReadFiles(e.target.files);
+      Object.assign(ci, { plan: null, result: null, sel: {}, overrides: {} });
+      renderCatalogImportView(main);
+    } catch (err) { alert(`Couldn't read those files: ${err.message}`); }
+  });
+  document.getElementById('ci-read').addEventListener('click', () => ciPreview(main));
+  if (ci.result) ciRenderResult(main);
+  else if (ci.plan) ciRenderPlan(main);
+}
+
+async function ciPreview(main) {
+  const ci = state.catalogImport;
+  const status = document.getElementById('ci-status');
+  const btn = document.getElementById('ci-read');
+  btn.disabled = true;
+  status.textContent = 'Reading the files and the Dish Catalog…';
+  try {
+    ci.plan = await window.api.previewCatalogImport({ files: ci.files, sectionOverrides: ci.overrides });
+    ci.sel = ciInitSelections(ci.plan);
+    status.textContent = '';
+    ciRenderPlan(main);
+  } catch (err) {
+    status.textContent = `Couldn't read the files: ${err.message}`;
+  } finally { btn.disabled = false; }
+}
+
+function ciEntryRow(e, kind, label) {
+  const sel = state.catalogImport.sel[e.key];
+  const categorySelect = `<select class="ci-cat" aria-label="Category for ${aiEsc(e.name)}">${e.categoryOptions.map(c => `<option value="${c.code}" ${c.code === sel.categoryCode ? 'selected' : ''}>${aiEsc(c.name)}</option>`).join('')}</select>`;
+  const proteinSelect = `<select class="ci-protein" aria-label="Protein for ${aiEsc(e.name)}" ${PROTEIN_ELIGIBLE_CATEGORIES.has(sel.categoryCode) ? '' : 'hidden'}>
+      <option value="">— protein —</option>${state.proteinTypes.map(p => `<option value="${p.code}" ${p.code === sel.proteinCode ? 'selected' : ''}>${aiEsc(p.name)}</option>`).join('')}</select>`;
+  const notes = [
+    e.variants?.length ? `<span class="ci-note">Also spelled: ${e.variants.map(aiEsc).join(' / ')}</span>` : '',
+    e.alsoListedAs?.length ? `<span class="ci-note ci-note-warn">Also listed as ${e.alsoListedAs.map(aiEsc).join(', ')}: the menus used it in both rows. Untick one unless both are wanted.</span>` : '',
+    kind === 'similar' ? `<span class="ci-note">≈ <strong>${aiEsc(e.matchedName)}</strong> in the catalog (${e.matchedCategories.map(aiEsc).join(', ')})</span>` : '',
+    e.snackWarning ? `<span class="chip unverified" title="Chicken and beef are served at lunch only: this snack would never be put on a new menu.">Not served: chicken/<wbr>beef in a snack</span>` : '',
+  ].join('');
+  return `
+    <tr data-key="${aiEsc(e.key)}" class="${sel.include ? '' : 'ci-off'}">
+      <td><input type="checkbox" class="ci-include" ${sel.include ? 'checked' : ''} aria-label="Add ${aiEsc(e.name)}" /></td>
+      <td><input type="text" class="ci-name" value="${aiEsc(sel.name)}" aria-label="Name" />${notes}</td>
+      <td>${categorySelect}${proteinSelect}</td>
+      <td>${e.sections.map(s => `<span class="chip daily">${aiEsc(ciSectionName(s))}</span>`).join(' ')}</td>
+      <td class="ci-files">${aiEsc(ciFilesText(e, label))}</td>
+    </tr>`;
+}
+
+function ciNotInSectionRow(e, label) {
+  const sel = state.catalogImport.sel[e.key];
+  const action = e.kind === 'addSection'
+    ? `Add <strong>${aiEsc(ciSectionName(e.section))}</strong> to this ${aiEsc(e.categoryName)} dish (now in ${e.inSections.map(s => aiEsc(ciSectionName(s))).join(', ') || 'no section'})${e.isActive ? '' : ' — it is inactive'}`
+    : `Add as a <strong>${aiEsc(e.categoryName)}</strong> dish for ${aiEsc(ciSectionName(e.section))} (the catalog has it as ${e.existingCategories.map(aiEsc).join(', ')})`;
+  return `
+    <tr data-key="${aiEsc(e.key)}" class="${sel.include ? '' : 'ci-off'}">
+      <td><input type="checkbox" class="ci-include" ${sel.include ? 'checked' : ''} aria-label="${aiEsc(e.name)}" /></td>
+      <td>${aiEsc(e.name)}</td>
+      <td colspan="2">${action}</td>
+      <td class="ci-files">${aiEsc(ciFilesText(e, label))}</td>
+    </tr>`;
+}
+
+// Rows grouped by first section, then category (the plan is already sorted that way).
+function ciGroupedRows(list, rowFn) {
+  let html = '', section = null, category = null;
+  for (const e of list) {
+    const sec = e.sections?.[0] ?? e.section;
+    if (sec !== section) { html += `<tr class="ci-section-row"><th colspan="5">${aiEsc(ciSectionName(sec))}</th></tr>`; section = sec; category = null; }
+    if (e.categoryCode !== category) { html += `<tr class="ci-category-row"><th colspan="5">${aiEsc(e.categoryName)}</th></tr>`; category = e.categoryCode; }
+    html += rowFn(e);
+  }
+  return html;
+}
+
+function ciTable(id, list, rowFn, heads) {
+  return `<div class="cr-scroll"><table class="cr-table ci-table" id="${id}">
+    <thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+    <tbody>${ciGroupedRows(list, rowFn)}</tbody></table></div>`;
+}
+
+function ciRenderPlan(main) {
+  const ci = state.catalogImport;
+  const plan = ci.plan;
+  const label = ciFileLabeler(plan);
+  const body = document.getElementById('ci-body');
+  const heads = ['Add', 'Dish', 'Category', 'Sections', 'Seen in'];
+  const skippedReasons = {};
+  for (const s of plan.skipped) skippedReasons[s.reason] = (skippedReasons[s.reason] || 0) + 1;
+  body.innerHTML = `
+    <p class="ci-summary">${ci.files.length} file(s) · ${plan.rowsRead} dish rows ·
+      <button class="ci-jump" data-jump="ci-h-new"><strong>${plan.newDishes.length} new</strong></button> ·
+      <button class="ci-jump" data-jump="ci-h-similar">${plan.similar.length} look like an existing dish</button> ·
+      <button class="ci-jump" data-jump="ci-h-notin">${plan.notInSection.length} in the catalog but not on a section's menu</button> ·
+      ${plan.alreadyInCount} already in the catalog (${plan.catalogSize} catalog dishes checked)</p>
+    ${plan.unresolvedSheets.length ? `<div class="ci-panel ci-unresolved"><strong>Which section is each of these tabs?</strong> Their names don't say, so their dishes are left out until you choose.
+      ${plan.unresolvedSheets.map(u => { const key = `${u.fileName}::${u.sheetName}`; return `<label class="ci-field">${aiEsc(label(u.fileName))} — tab “${aiEsc(u.sheetName)}”
+        <select class="ci-override" data-key="${aiEsc(key)}"><option value="">Choose…</option>${CI_SCHOOL_SECTIONS.map(c => `<option value="${c}" ${ci.overrides[key] === c ? 'selected' : ''}>${aiEsc(ciSectionName(c))}</option>`).join('')}</select></label>`; }).join('')}</div>` : ''}
+    ${plan.warnings.length || plan.skipped.length ? `<details class="ci-details"><summary>Notes from reading the files (${plan.warnings.length + Object.keys(skippedReasons).length})</summary><ul>
+      ${Object.entries(skippedReasons).map(([r, n]) => `<li>Skipped ${n} row(s): ${aiEsc(r)}</li>`).join('')}
+      ${plan.warnings.map(w => `<li>${aiEsc(w)}</li>`).join('')}</ul></details>` : ''}
+
+    <h2 class="ci-h2" id="ci-h-new">New dishes (${plan.newDishes.length})
+      <span class="ci-bulk"><button class="secondary small" data-bulk="ci-new" data-on="1">Select all</button><button class="secondary small" data-bulk="ci-new" data-on="0">Select none</button></span></h2>
+    ${plan.newDishes.length ? ciTable('ci-new', plan.newDishes, e => ciEntryRow(e, 'new', label), heads) : '<p class="ci-empty">None: every dish in these files is already in the catalog or listed below.</p>'}
+
+    <h2 class="ci-h2" id="ci-h-similar">Look like an existing dish (${plan.similar.length}) <button class="ci-jump ci-top" data-jump="ci-body">Back to top</button></h2>
+    <p class="ci-hint">Named almost like a dish already in the catalog. Often the same dish typed differently (then leave it unticked), but sometimes a different dish with a similar name: tick those to add them.</p>
+    ${plan.similar.length ? ciTable('ci-similar', plan.similar, e => ciEntryRow(e, 'similar', label), heads) : '<p class="ci-empty">None.</p>'}
+
+    <h2 class="ci-h2" id="ci-h-notin">In the catalog, not on this section's menu (${plan.notInSection.length}) <button class="ci-jump ci-top" data-jump="ci-body">Back to top</button></h2>
+    <p class="ci-hint">The dish exists, but a menu used it in a section it isn't listed for. Tick to make it available there.</p>
+    ${plan.notInSection.length ? ciTable('ci-notin', plan.notInSection, e => ciNotInSectionRow(e, label), ['Add', 'Dish', 'What happens', '', 'Seen in']) : '<p class="ci-empty">None.</p>'}
+
+    <div class="ci-footer"><span id="ci-count"></span><button class="primary" id="ci-apply"></button></div>
+  `;
+
+  body.querySelectorAll('.ci-jump').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.jump).scrollIntoView({ block: 'start', behavior: 'smooth' })));
+  body.querySelectorAll('.ci-override').forEach(selEl => selEl.addEventListener('change', () => {
+    if (selEl.value) ci.overrides[selEl.dataset.key] = selEl.value; else delete ci.overrides[selEl.dataset.key];
+    ciPreview(main);
+  }));
+  body.querySelectorAll('[data-bulk]').forEach(btn => btn.addEventListener('click', () => {
+    const on = btn.dataset.on === '1';
+    document.querySelectorAll(`#${btn.dataset.bulk} tr[data-key]`).forEach(tr => {
+      ci.sel[tr.dataset.key].include = on;
+      tr.querySelector('.ci-include').checked = on;
+      tr.classList.toggle('ci-off', !on);
+    });
+    ciUpdateFooter();
+  }));
+  body.querySelectorAll('tr[data-key]').forEach(tr => {
+    const sel = ci.sel[tr.dataset.key];
+    tr.querySelector('.ci-include').addEventListener('change', (e) => { sel.include = e.target.checked; tr.classList.toggle('ci-off', !sel.include); ciUpdateFooter(); });
+    tr.querySelector('.ci-name')?.addEventListener('input', (e) => { sel.name = e.target.value; });
+    const proteinEl = tr.querySelector('.ci-protein');
+    proteinEl?.addEventListener('change', (e) => { sel.proteinCode = e.target.value; });
+    tr.querySelector('.ci-cat')?.addEventListener('change', (e) => {
+      sel.categoryCode = e.target.value;
+      proteinEl.hidden = !PROTEIN_ELIGIBLE_CATEGORIES.has(sel.categoryCode);
+    });
+  });
+  document.getElementById('ci-apply').addEventListener('click', () => ciApply(main));
+  ciUpdateFooter();
+}
+
+function ciSelectedKeys() {
+  const ci = state.catalogImport;
+  if (!ci.plan) return [];
+  return [...ci.plan.newDishes, ...ci.plan.similar, ...ci.plan.notInSection].filter(e => ci.sel[e.key]?.include).map(e => e.key);
+}
+
+function ciUpdateFooter() {
+  const ci = state.catalogImport;
+  const btn = document.getElementById('ci-apply');
+  if (!btn || !ci.plan) return;
+  const keys = ciSelectedKeys();
+  const who = ci.createdBy.trim();
+  document.getElementById('ci-count').textContent = `${keys.length} selected`;
+  btn.textContent = keys.length ? `Add ${keys.length} to the Dish Catalog${who ? ` as “${who}”` : ''}` : 'Nothing selected';
+  btn.disabled = !keys.length || ci.busy;
+}
+
+async function ciApply(main) {
+  const ci = state.catalogImport;
+  const keys = ciSelectedKeys();
+  const blank = keys.filter(k => ci.sel[k].name !== undefined && !String(ci.sel[k].name).trim());
+  if (blank.length) { alert('A ticked dish has an empty name. Type one or untick it.'); return; }
+  if (!ci.createdBy.trim() && !confirm('Created By is empty, so these dishes will have no Created By. Add them anyway?')) return;
+  const picks = keys.map(key => {
+    const s = ci.sel[key];
+    if (s.name === undefined) return { key };
+    return { key, name: s.name, categoryCode: s.categoryCode, proteinCode: PROTEIN_ELIGIBLE_CATEGORIES.has(s.categoryCode) ? (s.proteinCode || null) : null };
+  });
+  ci.busy = true;
+  ciUpdateFooter();
+  const status = document.getElementById('ci-status');
+  status.textContent = `Adding ${picks.length} to the Dish Catalog…`;
+  try {
+    ci.result = await window.api.applyCatalogImport({ token: ci.plan.token, createdBy: ci.createdBy, picks });
+    ci.plan = null;
+    status.textContent = '';
+    renderCatalogImportView(main);
+  } catch (err) {
+    status.textContent = `Couldn't add them: ${err.message}`;
+  } finally {
+    ci.busy = false;
+    ciUpdateFooter();
+  }
+}
+
+function ciRenderResult(main) {
+  const r = state.catalogImport.result;
+  const styled = r.created.filter(c => STYLE_ELIGIBLE_CATEGORIES.has(c.categoryCode)).length;
+  document.getElementById('ci-body').innerHTML = `
+    <div class="ci-panel ci-result">
+      <h2 class="ci-h2">Done</h2>
+      <ul>
+        <li><strong>${r.created.length}</strong> dish(es) added to the Dish Catalog${r.createdByLabel ? ` as “${aiEsc(r.createdByLabel)}”` : ''}.</li>
+        ${r.sectionsAdded.length ? `<li><strong>${r.sectionsAdded.length}</strong> existing dish(es) made available in another section.</li>` : ''}
+        ${r.failed.length ? `<li class="ci-failed">${r.failed.length} not added:<ul>${r.failed.map(f => `<li>${aiEsc(f.name)}: ${aiEsc(f.reason)}</li>`).join('')}</ul></li>` : ''}
+      </ul>
+      <p class="ci-hint">New dishes have no code, calories or Pastry / Cold Kitchen style yet, the same as a dish added with + Add Item.
+        ${styled ? `${styled} of them are snacks or Staff Breakfast dishes, which only enter the daily style rotation once they have a style.` : ''}</p>
+      <div class="ci-result-actions">
+        ${styled ? '<button class="secondary" id="ci-styles">Estimate missing styles</button>' : ''}
+        <button class="primary" id="ci-done">Back to the Dish Catalog</button>
+      </div>
+      <div id="ci-styles-status" class="ai-progress" role="status" aria-live="polite"></div>
+    </div>`;
+  document.getElementById('ci-done').addEventListener('click', () => document.getElementById('ci-back').click());
+  document.getElementById('ci-styles')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const statusEl = document.getElementById('ci-styles-status');
+    btn.disabled = true;
+    const unsubscribe = window.api.onAmSnackStyleEstimateProgress(({ message }) => { statusEl.textContent = message; });
+    try {
+      await window.api.estimateMissingAmSnackStyles();
+      statusEl.textContent = 'Styles estimated. Check or correct any of them in Edit Item.';
+    } catch (err) {
+      statusEl.textContent = `Style estimate failed: ${err.message}`;
+      btn.disabled = false;
+    } finally { unsubscribe(); }
+  });
+}
+
+function openCalorieImportPreview(plan, fileName, onDone) {
+  const fmt = (v) => (v == null ? '—' : v);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-labelledby="cr-title" style="max-width:760px;">
+      <h2 id="cr-title">Import reviewed calories</h2>
+      <p style="margin-top:-6px; color:var(--neutral);">${aiEsc(fileName)} — ${plan.rows} row(s) read.</p>
+      <ul class="cr-summary">
+        <li><strong>${plan.updates.length}</strong> dish(es) will be updated</li>
+        <li><strong>${plan.unchanged}</strong> already have that value (no change)</li>
+        <li><strong>${plan.blank}</strong> row(s) with no Reviewed value (no change)</li>
+        <li><strong>${plan.skipped.length}</strong> row(s) skipped${plan.skipped.length ? ' (listed below)' : ''}</li>
+      </ul>
+      ${plan.updates.length ? `
+        <div class="cr-scroll" style="max-height:260px;"><table class="cr-table">
+          <thead><tr><th>Dish</th><th>Now</th><th>New</th></tr></thead>
+          <tbody>${plan.updates.map(u => `<tr><td>${aiEsc(u.name)}</td><td>${fmt(u.from)}${u.fromFlagged ? ' <span class="chip unverified">flagged</span>' : ''}</td><td><strong>${u.to}</strong></td></tr>`).join('')}</tbody>
+        </table></div>` : ''}
+      ${plan.skipped.length ? `
+        <h3 style="margin:14px 0 6px; font-size:14px;">Skipped</h3>
+        <div class="cr-scroll" style="max-height:180px;"><table class="cr-table">
+          <thead><tr><th>Row</th><th>Dish</th><th>Why</th></tr></thead>
+          <tbody>${plan.skipped.map(k => `<tr><td>${k.rowNumber}</td><td>${aiEsc(k.name || '')}</td><td>${aiEsc(k.reason)}</td></tr>`).join('')}</tbody>
+        </table></div>` : ''}
+      <div class="actions">
+        <button class="secondary" id="cr-cancel">Cancel</button>
+        <button class="primary" id="cr-confirm" ${plan.updates.length ? '' : 'disabled'}>Update ${plan.updates.length} dish(es)</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#cr-cancel').addEventListener('click', close);
+  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  overlay.querySelector('#cr-confirm').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await window.api.applyCalorieImport({ token: plan.token });
+      close();
+      showToast(r.failed.length ? `Updated ${r.written} dish(es); ${r.failed.length} failed: ${r.failed.slice(0, 3).map(f => f.name).join(', ')}` : `Updated calories for ${r.written} dish(es).`);
+      onDone();
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+      e.currentTarget.disabled = false;
+    }
+  });
+  overlay.querySelector('#cr-cancel').focus();
+}
+
+// Dish Catalog "Created By" (menu_items.created_by_label): free text with suggestions -- every label already
+// used plus the recipe people (list-created-by-labels in main.js). One <datalist> in <body>, refreshed when
+// the catalog or the item form opens and after an inline edit. A failed lookup just leaves no suggestions.
+async function fillCreatedByList() {
+  let list = document.getElementById('created-by-list');
+  if (!list) { list = document.createElement('datalist'); list.id = 'created-by-list'; document.body.appendChild(list); }
+  let names;
+  try { names = await window.api.listCreatedByLabels(); } catch { names = []; }
+  list.textContent = '';
+  for (const name of names) { const o = document.createElement('option'); o.value = name; list.appendChild(o); }
+}
+
+// The Created By filter: All / one entry per Created By value in use in this section (AI, OLD, a chef's
+// name; case-insensitive) / Not set. (The flag-based "AI-generated" entry was dropped 2026-09-24: Created
+// By owns provenance in the Dish Catalog; is_ai_generated still drives calorie estimation.)
+function createdByFilterOptions(items) {
+  const labels = new Map();
+  for (const it of items) {
+    const l = (it.created_by_label || '').trim();
+    if (l && !labels.has(l.toLowerCase())) labels.set(l.toLowerCase(), l);
+  }
+  const sorted = [...labels.values()].sort((a, b) => a.localeCompare(b));
+  return [
+    `<option value="">Created by: all</option>`,
+    ...sorted.map(l => `<option value="label:${aiEsc(l.toLowerCase())}">Created by: ${aiEsc(l)}</option>`),
+    items.some(it => !(it.created_by_label || '').trim()) ? `<option value="none">Created by: not set</option>` : '',
+  ].join('');
+}
+
+function createdByFilterMatch(it, value) {
+  if (!value) return true;
+  const label = (it.created_by_label || '').trim().toLowerCase();
+  if (value === 'none') return !label;
+  return label === value.slice('label:'.length);
 }
 
 async function openItemModal(existingItem) {
@@ -1016,6 +1519,17 @@ async function openItemModal(existingItem) {
       <div class="field">
         <label>Item name</label>
         <input id="m-name" value="${isEdit ? existingItem.name : ''}" />
+        <div class="field-warning" id="m-snack-rule-warning" role="status" style="display:none;"></div>
+      </div>
+      <div class="field-row" style="display:flex; gap:14px;">
+        <div class="field" style="max-width:280px; flex:1;">
+          <label for="m-created-by">Created By</label>
+          <input id="m-created-by" list="created-by-list" value="${isEdit ? aiEsc(existingItem.created_by_label || '') : ''}" placeholder="e.g. Tetiana" />
+        </div>
+        <div class="field" style="max-width:200px; flex:1;">
+          <label for="m-code">Code</label>
+          <input id="m-code" value="${isEdit ? aiEsc(existingItem.rc_code || '') : ''}" placeholder="e.g. RC or RG code" />
+        </div>
       </div>
       <div class="field">
         <label>Meal period</label>
@@ -1033,7 +1547,7 @@ async function openItemModal(existingItem) {
         </div>
       </div>
       <div class="field">
-        <label>Protein type (only for main-dish categories)</label>
+        <label>Protein type (mains, snacks, Staff breakfast and lunch box)</label>
         <select id="m-protein">
           <option value="">— none —</option>
           ${state.proteinTypes.map(p => `<option value="${p.code}" ${isEdit && existingItem.protein_code === p.code ? 'selected' : ''}>${p.name}</option>`).join('')}
@@ -1046,8 +1560,8 @@ async function openItemModal(existingItem) {
         <label>Calories per 100g</label>
         <input id="m-calories" type="number" min="0" step="1" value="${isEdit && existingItem.calories_per_100g != null ? existingItem.calories_per_100g : ''}" />
       </div>
-      <div class="field" style="max-width:220px;">
-        <label>Style (AM Snack only)</label>
+      <div class="field" style="max-width:320px;">
+        <label>Style (AM Snack, PM Snack, Staff Breakfast)</label>
         <select id="m-am-snack-style">
           <option value="">— auto-classify with AI —</option>
           ${AM_SNACK_STYLE_OPTIONS.map(s => `<option value="${s.code}" ${isEdit && existingItem.am_snack_style === s.code ? 'selected' : ''}>${s.name}</option>`).join('')}
@@ -1076,6 +1590,7 @@ async function openItemModal(existingItem) {
     </div>
   `;
   document.body.appendChild(overlay);
+  fillCreatedByList();
 
   const nameInput = overlay.querySelector('#m-name');
   const periodSelect = overlay.querySelector('#m-period');
@@ -1138,7 +1653,24 @@ async function openItemModal(existingItem) {
     if (!eligible) styleSelect.value = '';
   }
 
-  periodSelect.addEventListener('change', () => refreshCategoryOptions());
+  // Non-blocking: a chicken / beef AM or PM Snack can still be saved (e.g. to rename it later), but it
+  // is never put on a new menu.
+  const snackRuleWarning = overlay.querySelector('#m-snack-rule-warning');
+  function refreshSnackRuleWarning() {
+    const cat = categorySelect.value;
+    const m = nameInput.value.match(SNACK_LUNCH_ONLY_WORDS);
+    const byProtein = SNACK_LUNCH_ONLY_PROTEINS.has(proteinSelect.value);
+    const show = SNACK_LUNCH_ONLY_CATEGORIES.has(cat) && (m || byProtein);
+    snackRuleWarning.style.display = show ? 'block' : 'none';
+    if (show) {
+      snackRuleWarning.textContent = `Chicken and beef are served at lunch only: ${m ? `"${m[0]}" in the name` : 'its protein type'} keeps this snack off every new menu. You can still save it — rename it (e.g. a turkey version) or choose another category to have it served.`;
+    }
+  }
+  nameInput.addEventListener('input', refreshSnackRuleWarning);
+  proteinSelect.addEventListener('change', refreshSnackRuleWarning);
+  categorySelect.addEventListener('change', refreshSnackRuleWarning);
+
+  periodSelect.addEventListener('change', () => { refreshCategoryOptions(); refreshSnackRuleWarning(); });
   categorySelect.addEventListener('change', () => {
     categoryWarning.style.display = 'none';
     saveBtn.disabled = !categorySelect.value;
@@ -1147,6 +1679,7 @@ async function openItemModal(existingItem) {
   });
 
   refreshCategoryOptions(isEdit ? existingItem.category_code : undefined);
+  refreshSnackRuleWarning();
 
   nameInput.addEventListener('blur', async () => {
     if (isEdit || !nameInput.value.trim()) return;
@@ -1160,6 +1693,7 @@ async function openItemModal(existingItem) {
     }
     if (suggestion.protein && !proteinSelect.disabled) proteinSelect.value = suggestion.protein;
     dailyCheckbox.checked = suggestion.isDailyRepeating;
+    refreshSnackRuleWarning();
   });
 
   overlay.querySelector('#m-cancel').addEventListener('click', () => overlay.remove());
@@ -1220,6 +1754,8 @@ async function openItemModal(existingItem) {
           caloriesPer100g,
           amSnackStyle,
           removeInvalidSectionPortions,
+          createdByLabel: overlay.querySelector('#m-created-by').value,
+          rcCode: overlay.querySelector('#m-code').value,
         })
       : await window.api.addItem({
           name, categoryCode: categorySelect.value,
@@ -1229,6 +1765,8 @@ async function openItemModal(existingItem) {
           amSnackStyle,
           portions: checkedAgeGroupCodes,
           sectionCode: state.currentSection,
+          createdByLabel: overlay.querySelector('#m-created-by').value,
+          rcCode: overlay.querySelector('#m-code').value,
         });
 
     // menu_items has UNIQUE(name, category_id) -- the same dish name legitimately recurs across
@@ -1251,6 +1789,265 @@ async function openItemModal(existingItem) {
 // features used to share that one piece of state, which made whichever nav button was
 // clicked last silently change what the other view meant by "section"; owning it locally
 // removes that coupling entirely.
+// ============================================================
+// MENU PLANNER (2026-09-25) -- one nav entry for Generate Menu, Build Menu and Export All Sections.
+// A thin shell: two switches on top, and below them the three screens' OWN, unchanged render
+// functions draw into #planner-body (display: contents, so Build Menu's scroll area and docked tab
+// strip still lay out as direct children of #main, exactly as before). Generate + One Section =
+// renderGenerateView, Generate + All Sections = renderExportAllView, Build = renderBuildMenuView.
+// Nothing here touches generation: every screen keeps calling the same IPC. Build Menu's grid
+// lives in state.builder, so switching modes never loses it.
+// ============================================================
+// The last mode used is remembered on this computer (a convenience only: any storage failure just
+// means the default, Generate + One Section).
+const MENU_PLANNER_MODE_KEY = 'menuPlannerMode';
+function restoreMenuPlannerMode(mp) {
+  if (mp.restored) return;
+  mp.restored = true;
+  try {
+    const saved = JSON.parse(localStorage.getItem(MENU_PLANNER_MODE_KEY) || 'null');
+    if (saved && ['generate', 'build'].includes(saved.mode)) mp.mode = saved.mode;
+    if (saved && ['one', 'all'].includes(saved.scope)) mp.scope = saved.scope;
+  } catch { /* keep the default */ }
+}
+function saveMenuPlannerMode(mp) {
+  try { localStorage.setItem(MENU_PLANNER_MODE_KEY, JSON.stringify({ mode: mp.mode, scope: mp.scope })); } catch { /* not critical */ }
+}
+
+// Generate + One Section and Generate + All Sections ask for the same four things: carry them across
+// the switch (session only). Fills the screen's own inputs after it has rendered and records edits;
+// the date change event lets the screen's own date-range wiring update its "N school days" hint.
+const MENU_PLANNER_FIELD_IDS = {
+  one: { label: 'g-label', createdBy: 'g-created-by', start: 'g-start', end: 'g-end' },
+  all: { label: 'ea-label', createdBy: 'ea-created-by', start: 'ea-start', end: 'ea-end' },
+};
+function wireMenuPlannerFields(mp) {
+  const ids = MENU_PLANNER_FIELD_IDS[mp.scope];
+  for (const key of ['label', 'createdBy', 'start', 'end']) {
+    const el = document.getElementById(ids[key]);
+    if (!el) continue;
+    if (mp.fields[key] && !el.value) {
+      el.value = mp.fields[key];
+      if (key === 'start' || key === 'end') el.dispatchEvent(new Event('change'));
+    }
+    const record = () => { mp.fields[key] = el.value; };
+    el.addEventListener('input', record);
+    el.addEventListener('change', record);
+  }
+}
+
+function renderMenuPlannerView(main) {
+  const mp = state.menuPlanner;
+  restoreMenuPlannerMode(mp);
+  const seg = (group, value, label, current) =>
+    `<button type="button" class="planner-seg-btn ${current === value ? 'active' : ''}" data-planner-${group}="${value}" aria-pressed="${current === value}">${label}</button>`;
+  main.innerHTML = `
+    <div class="planner-switch ${mp.mode === 'build' ? 'in-build' : ''}">
+      <div class="planner-seg" role="group" aria-label="Menu Planner mode">
+        ${seg('mode', 'generate', 'Generate Menu', mp.mode)}${seg('mode', 'build', 'Build Menu', mp.mode)}
+      </div>
+      ${mp.mode === 'generate' ? `
+      <div class="planner-seg" role="group" aria-label="Sections">
+        ${seg('scope', 'all', 'All Sections', mp.scope)}${seg('scope', 'one', 'One Section', mp.scope)}
+      </div>` : ''}
+    </div>
+    <div id="planner-body"></div>
+  `;
+  main.querySelectorAll('[data-planner-mode], [data-planner-scope]').forEach(btn => {
+    btn.disabled = mp.busy;
+    btn.addEventListener('click', () => {
+      if (mp.busy) return;
+      if (btn.dataset.plannerMode) mp.mode = btn.dataset.plannerMode;
+      if (btn.dataset.plannerScope) mp.scope = btn.dataset.plannerScope;
+      saveMenuPlannerMode(mp);
+      renderView();
+    });
+  });
+  const body = document.getElementById('planner-body');
+  if (mp.mode === 'build') return renderBuildMenuView(body);
+  const rendered = mp.scope === 'all' ? renderExportAllView(body) : renderGenerateView(body);
+  return Promise.resolve(rendered).then((r) => { wireMenuPlannerFields(mp); return r; });
+}
+
+// ============================================================
+// Created By mix (2026-09-25): Generate + One Section / All Sections only. Target percentages per
+// Created By value, a BEST-EFFORT bias the engine applies per section + category (lib/createdByMix.js):
+// every rule still wins, and a thin pool just lands short, reported. Off by default (no value above 0);
+// kept for the session in state.menuPlanner.mix, never saved, and always visible while on (the Generate
+// button reads "... with Created By mix").
+// ============================================================
+const MIX_SECTION_ORDER = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];
+const MIX_SHORT_POINTS = 10; // lib/createdByMix.js SHORT_POINTS
+const mixLabelText = (l) => (l ? l : 'Not set');
+
+function mixValues() { return state.menuPlanner.mix.values; }
+function mixTotal() { return Object.values(mixValues()).reduce((n, v) => n + (Number(v) || 0), 0); }
+function mixActive() { return Object.values(mixValues()).some(v => Number(v) > 0); }
+// { label: percent } for the engine, or null when off.
+function mixPayload() {
+  if (!mixActive()) return null;
+  return Object.fromEntries(Object.entries(mixValues()).filter(([, v]) => Number(v) > 0).map(([l, v]) => [l, Number(v)]));
+}
+function mixSummaryText() {
+  if (!mixActive()) return 'Off: picks as usual';
+  return Object.entries(mixValues()).filter(([, v]) => Number(v) > 0).sort((a, b) => b[1] - a[1])
+    .map(([l, v]) => `${mixLabelText(l)} ${v}%`).join(' · ');
+}
+// lib/createdByMix.js shareCeiling, mirrored (this is a classic script): the most a value could reach
+// from its dish count alone, each dish at most once per 28 calendar days of the run.
+function mixShareCeiling(dishes, picks, numWeekdays) {
+  if (!picks) return 100;
+  const uses = Math.max(1, Math.ceil((numWeekdays * 7) / 5 / 28));
+  return Math.min(100, Math.floor((100 * dishes * uses) / picks));
+}
+
+// host: where the panel goes. getScope(): { sectionCodes, numWeekdays, allSections, exactDays }.
+// onChange(): called whenever the mix changes, so the screen can relabel / disable its Generate button.
+// The mix panel's scope from a screen's own date fields (20 school days until dates are chosen).
+async function mixScope(startId, endId, sectionCodes, allSections) {
+  const startDate = document.getElementById(startId)?.value;
+  const endDate = document.getElementById(endId)?.value;
+  let numWeekdays = 20, exactDays = false;
+  if (startDate && endDate && endDate >= startDate) {
+    const n = await window.api.getSchoolDayCount({ startDate, endDate });
+    if (n > 0) { numWeekdays = n; exactDays = true; }
+  }
+  return { sectionCodes, numWeekdays, allSections, exactDays };
+}
+
+function renderMixPanel(host, getScope, onChange) {
+  const mix = state.menuPlanner.mix;
+  host.innerHTML = `
+    <details class="mix-panel" ${mix.open ? 'open' : ''}>
+      <summary><span class="mix-title">Created By mix</span> <span class="mix-optional">(optional)</span> <span class="mix-summary" id="mix-summary"></span></summary>
+      <div class="mix-body">
+        <p class="mix-hint">Nudges each category's picks toward these shares of Created By. Every menu rule still comes first, so a category
+          without enough of a value's dishes lands short (listed below before you generate, and in a report after). Off when everything is 0.</p>
+        <div id="mix-values" class="mix-values">Loading the dishes in scope…</div>
+        <div class="mix-total-row"><span id="mix-total"></span><button type="button" class="secondary small" id="mix-off">Turn off</button></div>
+        <div id="mix-check"></div>
+      </div>
+    </details>`;
+  const details = host.querySelector('.mix-panel');
+  details.addEventListener('toggle', () => { mix.open = details.open; if (details.open) mixRefresh(); });
+  host.querySelector('#mix-off').addEventListener('click', () => { mix.values = {}; mixRender(); onChange(); });
+
+  async function mixRefresh() {
+    const scope = await getScope();
+    const key = `${scope.sectionCodes.join(',')}|${scope.numWeekdays}|${scope.allSections}|${scope.exactDays}`;
+    mix.scope = scope;
+    if (mix.check && mix.checkKey === key) return mixRender();
+    mix.checkKey = key;
+    host.querySelector('#mix-values').textContent = 'Loading the dishes in scope…';
+    try {
+      const check = await window.api.createdByMixPools(scope);
+      if (mix.checkKey !== key) return; // a newer scope was asked for meanwhile
+      mix.check = check;
+    } catch (err) {
+      host.querySelector('#mix-values').textContent = `Couldn't load the dishes: ${err.message}`;
+      return;
+    }
+    mixRender();
+  }
+
+  function mixRender() {
+    host.querySelector('#mix-summary').textContent = mixSummaryText();
+    const total = mixTotal();
+    host.querySelector('#mix-total').innerHTML = !mixActive() ? 'Off'
+      : total === 100 ? 'Total 100% ✓' : `<span class="mix-bad">Total ${total}%: must be 100%</span>`;
+    const check = mix.check;
+    if (!check) return;
+    const choiceRows = check.rows.filter(r => r.picks > 0);
+    const dishes = (label) => choiceRows.reduce((n, r) => n + (r.byLabel[label] || 0), 0);
+    const labels = [...check.labels, ''];
+    for (const l of Object.keys(mix.values)) if (!labels.includes(l)) labels.push(l);
+    const valuesEl = host.querySelector('#mix-values');
+    valuesEl.innerHTML = labels.map(l => `
+      <label class="mix-value">
+        <span class="mix-value-name">${aiEsc(mixLabelText(l))}</span>
+        <input type="number" min="0" max="100" step="5" data-label="${aiEsc(l)}" value="${Number(mix.values[l]) || 0}" aria-label="${aiEsc(mixLabelText(l))} percent" />
+        <span class="mix-pct">%</span>
+        <span class="mix-count">${dishes(l)} dish${dishes(l) === 1 ? '' : 'es'} in scope</span>
+      </label>`).join('');
+    valuesEl.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(100, Math.round(Number(inp.value) || 0)));
+      if (v) mix.values[inp.dataset.label] = v; else delete mix.values[inp.dataset.label];
+      host.querySelector('#mix-summary').textContent = mixSummaryText();
+      const t = mixTotal();
+      host.querySelector('#mix-total').innerHTML = !mixActive() ? 'Off' : t === 100 ? 'Total 100% ✓' : `<span class="mix-bad">Total ${t}%: must be 100%</span>`;
+      renderCheck();
+      onChange();
+    }));
+    renderCheck();
+  }
+
+  function renderCheck() {
+    const check = mix.check;
+    const scope = mix.scope;
+    const el = host.querySelector('#mix-check');
+    if (!check || !scope) return;
+    const targets = Object.entries(mix.values).filter(([, v]) => Number(v) > 0);
+    const secName = (c) => state.sections.find(s => s.code === c)?.name || c;
+    const shortfalls = [];
+    for (const r of check.rows) {
+      if (!r.picks) continue;
+      for (const [l, t] of targets) {
+        const n = r.byLabel[l] || 0;
+        const ceiling = mixShareCeiling(n, r.picks, scope.numWeekdays);
+        if (ceiling < t - MIX_SHORT_POINTS) shortfalls.push({ r, l, n, t, ceiling });
+      }
+    }
+    const shownLabels = targets.length ? targets.map(([l]) => l) : [...check.labels, ''];
+    const note = (r) => r.fixedDaily ? 'Fixed daily dish: not affected'
+      : r.follows ? `Follows ${secName(r.follows)}'s pick` : r.sharedWith ? `Shared with ${secName(r.sharedWith)}: dishes both have` : '';
+    el.innerHTML = `
+      <h4 class="mix-h4">${targets.length ? (shortfalls.length ? `Can't reach this mix in ${new Set(shortfalls.map(s => s.r)).size} categor${new Set(shortfalls.map(s => s.r)).size === 1 ? 'y' : 'ies'}` : 'Every category has enough dishes for this mix') : 'Dishes per category'}
+        <span class="mix-h4-note">${scope.exactDays ? `${scope.numWeekdays} school days` : `${scope.numWeekdays} school days (choose dates for an exact check)`}</span></h4>
+      ${shortfalls.length ? `<ul class="mix-shortfalls">${shortfalls.map(s => `<li><strong>${aiEsc(secName(s.r.section))} · ${aiEsc(s.r.categoryName)}</strong>: ${aiEsc(mixLabelText(s.l))} has ${s.n === 0 ? 'no dishes' : `only ${s.n} dish${s.n === 1 ? '' : 'es'}`} for ${s.r.picks} picks, so at most ~${s.ceiling}% (asked ${s.t}%)</li>`).join('')}</ul>` : ''}
+      <details class="mix-all" ${targets.length ? '' : 'open'}><summary>All categories</summary>
+        <div class="cr-scroll"><table class="cr-table mix-table">
+          <thead><tr><th>Section</th><th>Category</th><th>Choices</th>${shownLabels.map(l => `<th>${aiEsc(mixLabelText(l))}</th>`).join('')}<th></th></tr></thead>
+          <tbody>${check.rows.map(r => `<tr class="${shortfalls.some(s => s.r === r) ? 'mix-short' : ''}">
+            <td>${aiEsc(secName(r.section))}</td><td>${aiEsc(r.categoryName)}</td><td>${r.picks || '—'}</td>
+            ${shownLabels.map(l => { const n = r.byLabel[l] || 0; return `<td class="${r.picks && n <= 1 ? 'mix-thin' : ''}">${r.picks ? n : ''}</td>`; }).join('')}
+            <td class="mix-note">${aiEsc(note(r))}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </details>`;
+  }
+
+  host.refreshMix = () => { if (mix.open) mixRefresh(); };
+  mixRender();
+  if (mix.open) mixRefresh();
+}
+
+// After generating: target vs achieved per category. reportBySection: { SECTION: rows | null }.
+function mixReportHtml(reportBySection) {
+  const sections = MIX_SECTION_ORDER.filter(s => reportBySection && reportBySection[s]);
+  if (!sections.length) return '';
+  const secName = (c) => state.sections.find(s => s.code === c)?.name || c;
+  const all = sections.flatMap(s => reportBySection[s]);
+  const shortCount = all.filter(r => r.short).length;
+  return `
+    <details class="mix-report" open>
+      <summary>Created By mix: how it landed <span class="mix-h4-note">${shortCount ? `${shortCount} categor${shortCount === 1 ? 'y' : 'ies'} short of the mix` : 'every category reached it'}</span></summary>
+      ${sections.map(s => `
+        <h4 class="mix-h4">${aiEsc(secName(s))}</h4>
+        <div class="cr-scroll"><table class="cr-table mix-table">
+          <thead><tr><th>Category</th><th>Choices</th><th>Target → achieved</th><th>Why short</th></tr></thead>
+          <tbody>${reportBySection[s].map(r => `<tr class="${r.short ? 'mix-short' : ''}">
+            <td>${aiEsc(r.categoryName)}</td><td>${r.picks}</td>
+            <td>${r.rows.filter(x => x.target || x.achieved).map(x => `<span class="mix-cell">${aiEsc(mixLabelText(x.label))} ${x.target}% → <strong>${x.achieved}%</strong></span>`).join(' ')}</td>
+            <td class="mix-note">${r.rows.filter(x => x.note).map(x => `${aiEsc(mixLabelText(x.label))}: ${aiEsc(x.note)}`).join('; ')}</td></tr>`).join('')}</tbody>
+        </table></div>`).join('')}
+    </details>`;
+}
+
+// A Generate / Export All run is in flight: lock the Menu Planner switches until it finishes.
+function setMenuPlannerBusy(busy) {
+  state.menuPlanner.busy = busy;
+  document.querySelectorAll('[data-planner-mode], [data-planner-scope]').forEach(b => { b.disabled = busy; });
+}
+
 function renderGenerateView(main) {
   main.innerHTML = `
     <div class="topbar">
@@ -1282,6 +2079,7 @@ function renderGenerateView(main) {
       <button class="primary" id="g-generate">Generate Menu</button>
     </div>
     <div id="g-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
+    <div id="g-mix"></div>
     <div id="g-result"></div>
   `;
 
@@ -1293,7 +2091,14 @@ function renderGenerateView(main) {
 
   wireDateRangeFields('g-start', 'g-end', 'g-day-count');
 
-  document.getElementById('g-generate').addEventListener('click', async () => {
+  const genBtn = document.getElementById('g-generate');
+  const updateGenBtn = () => { genBtn.textContent = mixActive() ? 'Generate with Created By mix' : 'Generate Menu'; };
+  const mixHost = document.getElementById('g-mix');
+  renderMixPanel(mixHost, () => mixScope('g-start', 'g-end', [sectionSelect.value], false), updateGenBtn);
+  updateGenBtn();
+  for (const id of ['g-section', 'g-start', 'g-end']) document.getElementById(id).addEventListener('change', () => mixHost.refreshMix());
+
+  genBtn.addEventListener('click', async () => {
     const label = document.getElementById('g-label').value.trim() || 'Untitled Menu';
     const createdBy = document.getElementById('g-created-by').value.trim() || null;
     const startDate = document.getElementById('g-start').value;
@@ -1303,14 +2108,21 @@ function renderGenerateView(main) {
 
     const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
     if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+    if (mixActive() && mixTotal() !== 100) return alert(`The Created By mix adds up to ${mixTotal()}%. Make it 100%, or turn it off.`);
 
     const resultEl = document.getElementById('g-result');
     resultEl.innerHTML = 'Generating…';
-    const { menuId, resultDays, warnings } = await window.api.generateMenu({
-      sectionCode: sectionSelect.value, label, startDate, numWeekdays, createdBy,
-    });
+    let menuId, resultDays, warnings, mixReport;
+    const sectionCode = sectionSelect.value;
+    setMenuPlannerBusy(true);
+    try {
+      ({ menuId, resultDays, warnings, mixReport } = await window.api.generateMenu({
+        sectionCode, label, startDate, numWeekdays, createdBy, createdByMix: mixPayload(),
+      }));
+    } finally { setMenuPlannerBusy(false); }
     state.currentGeneratedMenuId = menuId;
     renderMenuResult(resultEl, menuId, resultDays, warnings, createdBy);
+    if (mixReport) resultEl.insertAdjacentHTML('afterbegin', mixReportHtml({ [sectionCode]: mixReport }));
   });
 }
 
@@ -1521,6 +2333,43 @@ function builderSelectionKey(date, categoryCode, idx) {
   return `${date}|${categoryCode}|${idx}`;
 }
 
+// Daycare and KG-LP serve ONE shared AM Snack and ONE shared PM Snack a day (lib/generator.js
+// SECTION_COUPLINGS, 2026-09-24): chosen on the Daycare tab, KG-LP's cells follow read-only.
+const BUILDER_SHARED_SNACKS = { source: 'DAYCARE', copy: 'KG_LP', categories: ['AM_SNACK', 'PM_SNACK'] };
+// Pastry / Cold Kitchen for a snack cell on the grid's dayIndex-th school day (1-based); mirrors
+// SNACK_STYLE_BY_PATTERN / snackStyleFor in lib/generator.js (Pattern A on day 1 of the range).
+const BUILDER_SNACK_STYLE = {
+  A: { AM_SNACK: { DAYCARE: 'PASTRY', KG_LP: 'PASTRY', MS_UP: 'COLD_KITCHEN' }, PM_SNACK: { DAYCARE: 'COLD_KITCHEN', KG_LP: 'COLD_KITCHEN', MS_UP: 'PASTRY' } },
+  B: { AM_SNACK: { DAYCARE: 'COLD_KITCHEN', KG_LP: 'COLD_KITCHEN', MS_UP: 'PASTRY' }, PM_SNACK: { DAYCARE: 'PASTRY', KG_LP: 'PASTRY', MS_UP: 'COLD_KITCHEN' } },
+};
+const BUILDER_STYLE_LABEL = { PASTRY: 'Pastry', COLD_KITCHEN: 'Cold Kitchen' };
+function builderSnackStyle(dayIndex, categoryCode, sectionCode) {
+  return BUILDER_SNACK_STYLE[dayIndex % 2 === 1 ? 'A' : 'B'][categoryCode]?.[sectionCode] || null;
+}
+
+// Copies Daycare's snack choices into KG-LP's (hidden, read-only) selections. Run after any change
+// that can touch them, and before the completeness count and the export.
+function syncBuilderSharedSnacks() {
+  const src = state.builder.sections[BUILDER_SHARED_SNACKS.source];
+  const dst = state.builder.sections[BUILDER_SHARED_SNACKS.copy];
+  if (!src || !dst) return;
+  for (const day of state.builder.days) {
+    for (const cat of BUILDER_SHARED_SNACKS.categories) {
+      const key = builderSelectionKey(day.date, cat, 0);
+      if (key in dst.selections) dst.selections[key] = src.selections[key] || '';
+    }
+  }
+}
+
+// The style note under a snack cell: nothing when the dish matches today's style, otherwise
+// "breaks today's rotation" (allowed -- Build Menu is the manual override screen; Auto-Fill keeps it).
+function builderStyleNoteHtml(item, requiredStyle) {
+  if (!requiredStyle || !item) return '';
+  if (item.am_snack_style === requiredStyle) return '';
+  const what = item.am_snack_style ? BUILDER_STYLE_LABEL[item.am_snack_style] : 'No style set';
+  return `<div class="builder-style-note">${what} — breaks today's rotation (${BUILDER_STYLE_LABEL[requiredStyle]} today)</div>`;
+}
+
 function renderBuildMenuView(main) {
   if (!state.builder.activeSection) state.builder.activeSection = state.sections[0].code;
 
@@ -1612,15 +2461,17 @@ async function buildAllBuilderGrids() {
       window.api.getSectionSlots(section.code),
       window.api.getSectionItemPool(section.code),
     ]);
-    const slots = slotDefs.map(({ categoryCode, count }) => {
+    const slots = slotDefs.map(({ categoryCode, count, fixedDaily }) => {
       const items = itemsByCategory[categoryCode] || [];
       const dailyItems = items.filter(i => i.is_daily_repeating).slice(0, count);
-      return { categoryCode, count, isDaily: dailyItems.length > 0, dailyItems, eligibleItems: items };
+      // fixedDaily (Staff's three beverages): the category's daily item or nothing -- never a free
+      // choice, same as the engine (MenuGenerator._pickItems).
+      return { categoryCode, count, fixedDaily, isDaily: dailyItems.length > 0, dailyItems, eligibleItems: items };
     });
 
     const selections = {};
     for (const slot of slots) {
-      if (slot.isDaily) continue;
+      if (slot.isDaily || slot.fixedDaily) continue;
       for (const day of state.builder.days) {
         for (let idx = 0; idx < slot.count; idx++) {
           selections[builderSelectionKey(day.date, slot.categoryCode, idx)] = '';
@@ -1629,6 +2480,35 @@ async function buildAllBuilderGrids() {
     }
     state.builder.sections[section.code] = { slots, selections };
   }));
+
+  // The shared Daycare / KG-LP snacks: Daycare's dropdown offers only dishes both catalogs have
+  // (the engine's shared pool); KG-LP's cells follow Daycare's pick.
+  for (const cat of BUILDER_SHARED_SNACKS.categories) {
+    const src = state.builder.sections[BUILDER_SHARED_SNACKS.source]?.slots.find(sl => sl.categoryCode === cat);
+    const dst = state.builder.sections[BUILDER_SHARED_SNACKS.copy]?.slots.find(sl => sl.categoryCode === cat);
+    if (!src || !dst) continue;
+    const inCopy = new Set(dst.eligibleItems.map(it => it.id));
+    src.eligibleItems = src.eligibleItems.filter(it => inCopy.has(it.id));
+    dst.sharedFrom = BUILDER_SHARED_SNACKS.source;
+  }
+
+  // Staff's Main Dish carries the school's shared dishes (KG-LP/MS-UP Lunch Main and Starch, MS-UP's
+  // Lunch Vegetable -- see STAFF_MAIN_SOURCE_SECTIONS in lib/generator.js), which live in those
+  // categories, not STAFF_MAIN -- offer them in Staff Main's dropdowns too, grouped by where they
+  // come from.
+  const staffMain = state.builder.sections.STAFF?.slots.find(sl => sl.categoryCode === 'STAFF_MAIN');
+  if (staffMain) {
+    const sharedFrom = [['KG_LP', 'LUNCH_MAIN', 'Shared: Lunch Main'], ['KG_LP', 'LUNCH_STARCH', 'Shared: Lunch Starch'], ['MS_UP', 'LUNCH_VEGETABLE', 'Shared: MS-UP Lunch Vegetable']];
+    const have = new Set(staffMain.eligibleItems.map(it => it.id));
+    for (const [sec, cat, group] of sharedFrom) {
+      const slot = state.builder.sections[sec]?.slots.find(sl => sl.categoryCode === cat);
+      for (const it of slot?.eligibleItems || []) {
+        if (have.has(it.id)) continue;
+        have.add(it.id);
+        staffMain.eligibleItems.push({ ...it, group });
+      }
+    }
+  }
 
   renderBuilderGrid();
   updateBuilderCompleteness();
@@ -1662,9 +2542,36 @@ function renderBuilderGrid() {
   daysContainer.querySelectorAll('select[data-key]').forEach(sel => {
     sel.addEventListener('change', () => {
       state.builder.sections[code].selections[sel.dataset.key] = sel.value;
+      if (code === BUILDER_SHARED_SNACKS.source) syncBuilderSharedSnacks();
+      // Refresh this cell's "breaks today's rotation" note in place.
+      const note = sel.parentElement.querySelector('.builder-style-note-slot');
+      if (note) {
+        const slot = section.slots.find(sl => sl.categoryCode === sel.dataset.cat);
+        const item = slot?.eligibleItems.find(it => String(it.id) === sel.value);
+        note.innerHTML = sel.value ? builderStyleNoteHtml(item, sel.dataset.style || null) : '';
+      }
       updateBuilderCompleteness();
     });
   });
+}
+
+// A slot's <option>s; items tagged with a `group` (Staff Main's shared school dishes) go under
+// their own <optgroup> after the slot's own category. requiredStyle (snack cells): today's style
+// first, then the other style, labelled as breaking the rotation, then dishes without a style.
+function builderOptionsHtml(items, current, requiredStyle = null) {
+  const opt = it => `<option value="${it.id}" ${String(it.id) === current ? 'selected' : ''}>${it.name}</option>`;
+  if (requiredStyle) {
+    const other = requiredStyle === 'PASTRY' ? 'COLD_KITCHEN' : 'PASTRY';
+    const groupHtml = (label, list) => (list.length ? `<optgroup label="${label}">${list.map(opt).join('')}</optgroup>` : '');
+    return groupHtml(`${BUILDER_STYLE_LABEL[requiredStyle]} — today's style`, items.filter(it => it.am_snack_style === requiredStyle))
+      + groupHtml(`${BUILDER_STYLE_LABEL[other]} — breaks today's rotation`, items.filter(it => it.am_snack_style === other))
+      + groupHtml('No style set', items.filter(it => !BUILDER_STYLE_LABEL[it.am_snack_style]));
+  }
+  const own = items.filter(it => !it.group);
+  const groups = [...new Set(items.filter(it => it.group).map(it => it.group))];
+  if (!groups.length) return own.map(opt).join('');
+  return `<optgroup label="Staff Main">${own.map(opt).join('')}</optgroup>`
+    + groups.map(g => `<optgroup label="${g}">${items.filter(it => it.group === g).map(opt).join('')}</optgroup>`).join('');
 }
 
 // Renders one day as a vertical table (category column on the left, item rows stacked
@@ -1672,23 +2579,40 @@ function renderBuilderGrid() {
 // template (see buildSchoolTemplateSheet in lib/export.js) instead of a horizontal card grid.
 function renderBuilderDayTable(code, day, section, catName) {
   const rows = [];
+  const dayIndex = state.builder.days.findIndex(d => d.date === day.date) + 1;
   section.slots.forEach(slot => {
     const label = catName[slot.categoryCode] || slot.categoryCode.replace(/_/g, ' ');
-    if (slot.isDaily) {
+    const requiredStyle = builderSnackStyle(dayIndex, slot.categoryCode, code);
+    if (slot.sharedFrom) {
+      // KG-LP's AM / PM Snack: Daycare's dish, read-only here.
+      const src = state.builder.sections[slot.sharedFrom];
+      const srcSlot = src?.slots.find(sl => sl.categoryCode === slot.categoryCode);
+      const id = src?.selections[builderSelectionKey(day.date, slot.categoryCode, 0)] || '';
+      const item = srcSlot?.eligibleItems.find(it => String(it.id) === id);
+      rows.push({
+        label,
+        cellHtml: item
+          ? `<span class="item-name">${item.name}</span> <span class="ai-shared" title="Shared dish: choose it on the Daycare tab and it updates here.">from Daycare</span>${builderStyleNoteHtml(item, requiredStyle)}`
+          : `<span class="ai-shared">Shared with Daycare — choose it on the Daycare tab</span>`,
+      });
+    } else if (slot.isDaily) {
       slot.dailyItems.forEach(it => {
         rows.push({ label, cellHtml: `<span class="item-name">${it.name}</span>` });
       });
+    } else if (slot.fixedDaily) {
+      rows.push({ label, cellHtml: `<span class="field-warning">No fixed dish set — add one in the Dish Catalog with "Repeats every day automatically" ticked.</span>` });
     } else {
       for (let idx = 0; idx < slot.count; idx++) {
         const key = builderSelectionKey(day.date, slot.categoryCode, idx);
         const current = state.builder.sections[code].selections[key] || '';
+        const item = requiredStyle && current ? slot.eligibleItems.find(it => String(it.id) === current) : null;
         rows.push({
           label,
           cellHtml: `
-            <select class="builder-select" data-key="${key}">
+            <select class="builder-select" data-key="${key}" data-cat="${slot.categoryCode}" ${requiredStyle ? `data-style="${requiredStyle}" title="${BUILDER_STYLE_LABEL[requiredStyle]} today (Pastry / Cold Kitchen rotation)"` : ''}>
               <option value="">— choose —</option>
-              ${slot.eligibleItems.map(it => `<option value="${it.id}" ${String(it.id) === current ? 'selected' : ''}>${it.name}</option>`).join('')}
-            </select>`,
+              ${builderOptionsHtml(slot.eligibleItems, current, requiredStyle)}
+            </select>${requiredStyle ? `<div class="builder-style-note-slot">${builderStyleNoteHtml(item, requiredStyle)}</div>` : ''}`,
         });
       }
     }
@@ -1724,7 +2648,26 @@ async function fillBuilderSuggestions(code) {
   const statusEl = document.getElementById('bm-status');
   statusEl.textContent = `Auto-filling ${currentBuilderSectionName(code)}…`;
 
-  const { resultDays, warnings } = await window.api.builderFillSuggestions({ sectionCode: code, startDate, numWeekdays });
+  // The other sections' picks in this grid (not saved anywhere yet) stand in for their saved menus, so
+  // Auto-Fill copies the shared dishes from here: KG-LP's snacks from Daycare, MS-UP's lunch from
+  // KG-LP (or the reverse), Staff's shares from the school tabs.
+  syncBuilderSharedSnacks();
+  const gridPicks = {};
+  for (const [sec, { slots, selections }] of Object.entries(state.builder.sections)) {
+    if (sec === code) continue;
+    const byDate = {};
+    for (const day of state.builder.days) {
+      for (const slot of slots) {
+        // KG-LP's snack cells only mirror Daycare's: never feed them back when filling Daycare.
+        if (code === BUILDER_SHARED_SNACKS.source && sec === BUILDER_SHARED_SNACKS.copy && BUILDER_SHARED_SNACKS.categories.includes(slot.categoryCode)) continue;
+        const chosen = slot.isDaily ? slot.dailyItems.map(it => it.id)
+          : Array.from({ length: slot.count }, (_, idx) => selections[builderSelectionKey(day.date, slot.categoryCode, idx)]).filter(Boolean).map(Number);
+        if (chosen.length) ((byDate[day.date] = byDate[day.date] || {})[slot.categoryCode] = chosen);
+      }
+    }
+    if (Object.keys(byDate).length) gridPicks[sec] = byDate;
+  }
+  const { resultDays, warnings } = await window.api.builderFillSuggestions({ sectionCode: code, startDate, numWeekdays, gridPicks });
   const section = state.builder.sections[code];
 
   for (const day of resultDays) {
@@ -1744,11 +2687,12 @@ async function fillBuilderSuggestions(code) {
         const key = builderSelectionKey(day.date, catCode, idx);
         if (key in section.selections) section.selections[key] = String(item.id);
         if (slot && !slot.eligibleItems.find(it => it.id === item.id)) {
-          slot.eligibleItems.push({ id: item.id, name: item.name });
+          slot.eligibleItems.push({ id: item.id, name: item.name, am_snack_style: item.am_snack_style ?? null });
         }
       });
     }
   }
+  syncBuilderSharedSnacks();
 
   renderBuilderGrid();
   updateBuilderCompleteness();
@@ -1766,6 +2710,7 @@ function updateBuilderCompleteness() {
   const statusEl = document.getElementById('bm-status');
   if (!btn) return;
 
+  syncBuilderSharedSnacks();
   const allCodes = state.sections.map(s => s.code);
   const builtCodes = Object.keys(state.builder.sections);
   const missing = allCodes.filter(c => !builtCodes.includes(c));
@@ -1787,6 +2732,7 @@ function updateBuilderCompleteness() {
 }
 
 async function exportBuilderMenu() {
+  syncBuilderSharedSnacks();
   const { label, createdBy, startDate, days, sections } = state.builder;
   const statusEl = document.getElementById('bm-status');
   document.getElementById('bm-export-btn').disabled = true;
@@ -1842,6 +2788,721 @@ async function exportBuilderBlankTemplate() {
 }
 
 // ============================================================
+// AI MENU GENERATOR VIEW
+// The AI invents dishes for a date range, the normal menu rules schedule them into a DRAFT
+// (main.js ai-menu-generate), and the chef reviews it here before anything reaches the Dish
+// Catalog or History. Every change goes through main.js, which re-runs the nut/sesame, seafood and
+// halal check (a hit blocks the change, no override) and the catalog duplicate check; menu rules
+// are re-checked after each change but only warn. Shared dishes (MS-UP's Lunch Main / Starch,
+// KG-LP's AM / PM Snack from Daycare, Staff's shared Main and Breakfast) are read-only copies:
+// change the source and they follow.
+// ============================================================
+const AI_SECTIONS = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF'];
+const AI_SECTION_LABEL = { DAYCARE: 'Daycare', KG_LP: 'KG-LP', MS_UP: 'MS-UP', STAFF: 'Staff' };
+// Mirrors AI_CATEGORIES in lib/aiMenu.js (the categories whose dishes the AI invents).
+const AI_MENU_CATEGORIES = {
+  DAYCARE: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_SALAD', 'SOUP_APPETIZER', 'PM_SNACK'],
+  KG_LP: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_STARCH', 'SOUP_APPETIZER', 'PM_SNACK'],
+  MS_UP: ['AM_SNACK', 'LUNCH_MAIN', 'LUNCH_VEGETABLE', 'LUNCH_STARCH', 'SOUP_APPETIZER', 'PM_SNACK'],
+  STAFF: ['STAFF_BREAKFAST', 'STAFF_APPETIZER', 'STAFF_MAIN', 'STAFF_SWEETS', 'STAFF_LUNCHBOX'],
+};
+const AI_ATTR_OPTIONS = {
+  sauce_type: [['RED', 'Red (tomato)'], ['WHITE', 'White (cream / cheese / yogurt)'], ['ASIAN', 'Asian (soy / teriyaki)'], ['GLAZED', 'Glazed (honey / BBQ)'], ['GRAVY', 'Gravy / stew'], ['DRY', 'Dry (grilled / roasted)']],
+  carb_type: [['RICE', 'Rice'], ['PASTA', 'Pasta'], ['POTATO', 'Potato'], ['OTHER', 'Other grain / bread']],
+  dish_concept: [['EGG', 'Egg'], ['PASTRY', 'Pastry'], ['SANDWICH', 'Sandwich / wrap'], ['CEREAL_DAIRY', 'Cereal / dairy'], ['CHEESE', 'Cheese'], ['OTHER', 'Other']],
+  am_snack_style: [['PASTRY', 'Pastry'], ['COLD_KITCHEN', 'Cold Kitchen']],
+};
+const AI_ATTR_LABEL = { protein_code: 'Protein', sauce_type: 'Sauce style', carb_type: 'Starch type', dish_concept: 'Dish type', am_snack_style: 'Pastry / Cold Kitchen' };
+// Which attributes each category's rules read (required ones are marked *); mirrors REQUIRED_ATTRS
+// in lib/aiMenuGenerate.js.
+const AI_CATEGORY_ATTRS = {
+  AM_SNACK: { required: ['am_snack_style', 'dish_concept'], optional: ['protein_code'] },
+  LUNCH_MAIN: { required: ['protein_code', 'sauce_type'], optional: [] },
+  LUNCH_STARCH: { required: ['carb_type'], optional: [] },
+  PM_SNACK: { required: ['am_snack_style'], optional: [] },
+  STAFF_BREAKFAST: { required: ['dish_concept', 'am_snack_style'], optional: ['protein_code'] },
+  STAFF_MAIN: { required: ['protein_code', 'carb_type'], optional: [] },
+  STAFF_LUNCHBOX: { required: ['protein_code'], optional: [] },
+};
+const AI_RUN_STATUS = {
+  generating: ['Generating…', 'daily'], draft: ['Needs review', 'unverified'], approving: ['Approving…', 'daily'],
+  approved: ['Approved', 'chicken'], discarded: ['Discarded', 'daily'],
+};
+
+function aiEsc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function aiCategoryName(code) {
+  return state.categories.find(c => c.code === code)?.name || code.replace(/_/g, ' ');
+}
+
+// Daycare's Lunch Main is one combined dish, so it also needs its starch type (mirrors the Daycare
+// pool's requiredAttrs in lib/aiMenuGenerate.js).
+function aiAttrsFor(category, sections = []) {
+  const base = AI_CATEGORY_ATTRS[category] || { required: [], optional: ['protein_code'] };
+  if (category === 'LUNCH_MAIN' && sections.includes('DAYCARE')) return { required: [...base.required, 'carb_type'], optional: base.optional };
+  return base;
+}
+
+function renderAiMenuView(main) {
+  return state.aiMenu.view === 'run' ? renderAiMenuRunView(main) : renderAiMenuListView(main);
+}
+
+// ---------- list + generate ----------
+
+async function renderAiMenuListView(main) {
+  main.classList.remove('build-mode');
+  const f = state.aiMenu.form;
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>AI Menu Generator</h1><span class="page-description">The AI invents new dishes for the date range and the usual menu rules schedule them. Nothing reaches the Dish Catalog or History until you review and approve it.</span></div>
+    </div>
+    <div class="generate-controls">
+      <div class="field"><label for="ai-label">Name</label><input id="ai-label" value="${aiEsc(f.label)}" placeholder="e.g. October AI menu" /></div>
+      <div class="field"><label for="ai-created-by">Created by</label><input id="ai-created-by" value="${aiEsc(f.createdBy)}" /></div>
+      <div class="field"><label for="ai-start">Start date</label><input id="ai-start" type="date" value="${aiEsc(f.startDate)}" /></div>
+      <div class="field"><label for="ai-end">End date</label><input id="ai-end" type="date" value="${aiEsc(f.endDate)}" /></div>
+      <button class="primary" id="ai-generate-btn" ${state.aiMenu.generating ? 'disabled' : ''}>${state.aiMenu.generating ? 'Generating…' : 'Generate AI Menu'}</button>
+    </div>
+    <div id="ai-day-count" class="day-count-hint" style="margin:-10px 0 10px;"></div>
+    <div id="ai-progress" class="ai-progress" role="status" aria-live="polite">${aiEsc(state.aiMenu.progress)}</div>
+    <h2 class="ai-subhead">Runs</h2>
+    <div id="ai-runs"><div class="empty-state">Loading…</div></div>
+  `;
+  wireDateRangeFields('ai-start', 'ai-end', 'ai-day-count');
+  for (const [id, key] of [['ai-label', 'label'], ['ai-created-by', 'createdBy'], ['ai-start', 'startDate'], ['ai-end', 'endDate']]) {
+    document.getElementById(id).addEventListener('input', (e) => { state.aiMenu.form[key] = e.target.value; });
+    document.getElementById(id).addEventListener('change', (e) => { state.aiMenu.form[key] = e.target.value; });
+  }
+  document.getElementById('ai-generate-btn').addEventListener('click', startAiMenuGeneration);
+
+  const runs = await window.api.aiMenuListRuns();
+  const el = document.getElementById('ai-runs');
+  if (!el) return;
+  if (!runs.length) {
+    el.innerHTML = `<div class="empty-state"><div class="display">No AI menus yet</div>Choose a date range above and click "Generate AI Menu".</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="table-scroll"><table class="history-table ai-runs-table">
+      <thead><tr><th>Name</th><th>Dates</th><th>School days</th><th>Status</th><th>Created by</th><th>Created</th><th></th></tr></thead>
+      <tbody>${runs.map(r => {
+        const [label, tone] = r.failed ? ['Failed', 'beef'] : r.interrupted ? ['Approval interrupted', 'beef'] : (AI_RUN_STATUS[r.status] || [r.status, 'daily']);
+        const openable = ['draft', 'approved', 'approving', 'discarded'].includes(r.status);
+        return `<tr data-run="${r.id}" class="${openable ? '' : 'ai-run-disabled'}">
+          <td><strong>${aiEsc(r.label)}</strong></td>
+          <td>${r.start_date} → ${r.end_date}</td>
+          <td>${r.num_weekdays}</td>
+          <td><span class="chip ${tone}">${label}</span></td>
+          <td>${aiEsc(r.created_by || '—')}</td>
+          <td>${r.created_at && !isNaN(new Date(r.created_at)) ? new Date(r.created_at).toLocaleString() : '—'}</td>
+          <td>${r.failed || r.status === 'draft' ? `<button class="icon-btn danger" data-discard="${r.id}">Discard</button>` : ''}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  el.querySelectorAll('tr[data-run]').forEach(tr => {
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('[data-discard]') || tr.classList.contains('ai-run-disabled')) return;
+      openAiMenuRun(Number(tr.dataset.run));
+    });
+  });
+  el.querySelectorAll('[data-discard]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Discard this AI menu? Its draft dishes and picks stay in the database but it can no longer be edited or approved.')) return;
+      try { await window.api.aiMenuDiscardRun(Number(btn.dataset.discard)); } catch (err) { alert(err.message); }
+      renderView();
+    });
+  });
+}
+
+async function startAiMenuGeneration() {
+  const f = state.aiMenu.form;
+  if (!f.startDate || !f.endDate) return alert('Please choose a start and end date.');
+  if (f.endDate < f.startDate) return alert('End date must be on or after the start date.');
+  const numWeekdays = await window.api.getSchoolDayCount({ startDate: f.startDate, endDate: f.endDate });
+  if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+
+  state.aiMenu.generating = true;
+  state.aiMenu.progress = 'Starting…';
+  const setProgress = (message) => {
+    state.aiMenu.progress = message;
+    const el = document.getElementById('ai-progress');
+    if (el) el.textContent = message;
+  };
+  const btn = document.getElementById('ai-generate-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+  const unsubscribe = window.api.onAiMenuProgress(({ message }) => setProgress(message));
+  try {
+    const result = await window.api.aiMenuGenerate({
+      label: f.label.trim(), startDate: f.startDate, endDate: f.endDate, createdBy: f.createdBy.trim() || null,
+    });
+    state.aiMenu.generating = false;
+    state.aiMenu.progress = '';
+    showToast(`AI menu ready: ${result.stats.dishes} dishes, ${result.warningCount} note(s) to review.`);
+    if (state.currentView === 'aiMenu') openAiMenuRun(result.runId);
+  } catch (err) {
+    state.aiMenu.generating = false;
+    setProgress(`Generation failed: ${err.message}`);
+    if (state.currentView === 'aiMenu' && state.aiMenu.view === 'list') renderView();
+  } finally {
+    unsubscribe();
+  }
+}
+
+function openAiMenuRun(runId) {
+  state.aiMenu.view = 'run';
+  state.aiMenu.runId = runId;
+  state.aiMenu.data = null;
+  if (!AI_SECTIONS.includes(state.aiMenu.tab) && !['dishes', 'warnings'].includes(state.aiMenu.tab)) state.aiMenu.tab = 'DAYCARE';
+  renderView();
+}
+
+// ---------- one run ----------
+
+async function reloadAiMenuRun({ keepScroll = true } = {}) {
+  const scroller = document.querySelector('.build-scroll');
+  const top = keepScroll && scroller ? scroller.scrollTop : 0;
+  state.aiMenu.data = await window.api.aiMenuGetRun(state.aiMenu.runId);
+  renderAiMenuRunContent();
+  const again = document.querySelector('.build-scroll');
+  if (again) again.scrollTop = top;
+}
+
+async function renderAiMenuRunView(main) {
+  main.classList.add('build-mode');
+  main.innerHTML = `
+    <div class="build-scroll" id="ai-run-scroll"><div class="empty-state">Loading…</div></div>
+    <div id="ai-run-tabs" class="builder-tabs" role="tablist" aria-label="AI menu sections"></div>`;
+  state.aiMenu.data = await window.api.aiMenuGetRun(state.aiMenu.runId);
+  renderAiMenuRunContent();
+}
+
+function aiDishFor(pick) {
+  const d = state.aiMenu.data;
+  if (pick.draft_dish_id) return { kind: 'draft', dish: d.dishes.find(x => x.id === pick.draft_dish_id) };
+  if (pick.item_id) return { kind: 'catalog', item: d.catalogItems[pick.item_id] };
+  return { kind: 'empty' };
+}
+
+function aiIsEditable() {
+  return state.aiMenu.data?.run.status === 'draft';
+}
+
+function renderAiMenuRunContent() {
+  const d = state.aiMenu.data;
+  const scroll = document.getElementById('ai-run-scroll');
+  const tabsEl = document.getElementById('ai-run-tabs');
+  if (!scroll || !d) return;
+  const { run } = d;
+  const [statusLabel, statusTone] = AI_RUN_STATUS[run.status] || [run.status, 'daily'];
+  const served = new Set(d.picks.filter(p => p.draft_dish_id).map(p => p.draft_dish_id));
+  const newCount = d.dishes.filter(x => served.has(x.id) && x.resolution === 'new').length;
+  const linkedCount = d.dishes.filter(x => served.has(x.id) && x.resolution === 'link').length;
+  const approveBlockers = [];
+  if (d.emptySlots) approveBlockers.push(`${d.emptySlots} empty slot(s)`);
+  const sections = run.approve_progress?.sections || {};
+  let actionBtn = '';
+  if (run.status === 'draft') {
+    actionBtn = `<button class="primary" id="ai-approve" ${approveBlockers.length ? 'disabled' : ''} title="${aiEsc(approveBlockers.length ? `Blocked: ${approveBlockers.join(', ')}` : 'Save this menu for real: new dishes join the Dish Catalog, and all five menus go to History')}">Approve</button>`;
+  } else if (run.status === 'approving') {
+    actionBtn = `<button class="primary" id="ai-resume" title="Finishes an approval that was interrupted part-way (nothing is done twice)">Resume approval</button>`;
+  } else if (run.status === 'approved' && Object.keys(sections).length) {
+    actionBtn = `<button class="primary" id="ai-export">Export workbook</button>`;
+  }
+
+  scroll.innerHTML = `
+    <div class="topbar">
+      <div>
+        <button class="link-btn" id="ai-back">← All AI menus</button>
+        <h1>${aiEsc(run.label)}</h1>
+        <span class="page-description">${run.start_date} → ${run.end_date} · ${run.num_weekdays} school days · <span class="chip ${statusTone}">${statusLabel}</span></span>
+      </div>
+      <div class="action-toolbar">
+        ${aiIsEditable() ? '<button class="secondary" id="ai-discard">Discard</button>' : ''}
+        ${actionBtn}
+      </div>
+    </div>
+    ${run.status === 'approved' ? `<div class="ai-approved-banner">Approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}${run.approved_at ? ` on ${aiEsc(new Date(run.approved_at).toLocaleString())}` : ''}. Its dishes are in the Dish Catalog (tagged AI-generated) and all five menus are in History as one "All Sections" entry.
+      <div class="ai-calorie-status">${aiCalorieStatusHtml(run.approve_progress?.calories)}</div></div>` : ''}
+    ${run.status === 'approving' ? `<div class="warning-banner">This menu is being approved${run.approved_by ? ` by ${aiEsc(run.approved_by)}` : ''}. If that was interrupted, "Resume approval" finishes it from where it stopped.</div>` : ''}
+    <div class="ai-summary">
+      <span><strong>${newCount}</strong> new AI dishes</span>
+      <span><strong>${linkedCount}</strong> linked to existing catalog dishes</span>
+      <span class="${d.emptySlots ? 'ai-bad' : ''}"><strong>${d.emptySlots}</strong> empty slots</span>
+      <button class="link-btn" data-go-tab="warnings"><strong>${d.notes.length}</strong> rule note(s) · <strong>${(run.warnings || []).length}</strong> generation note(s)</button>
+      <span class="ai-summary-hint">CEO isn't part of the AI menu — it is generated the usual way when you approve.</span>
+    </div>
+    <div id="ai-tab-content"></div>`;
+
+  tabsEl.innerHTML = [
+    ...AI_SECTIONS.map(s => [s, AI_SECTION_LABEL[s]]),
+    ['dishes', 'All dishes'],
+    ['warnings', `Notes (${d.notes.length + (run.warnings || []).length})`],
+  ].map(([key, label]) => `<button class="nav-btn ${state.aiMenu.tab === key ? 'active' : ''}" role="tab" aria-selected="${state.aiMenu.tab === key}" data-ai-tab="${key}">${aiEsc(label)}</button>`).join('');
+
+  const go = (tab) => { state.aiMenu.tab = tab; renderAiMenuRunContent(); document.getElementById('ai-run-scroll').scrollTop = 0; };
+  tabsEl.querySelectorAll('[data-ai-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.aiTab)));
+  scroll.querySelectorAll('[data-go-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.goTab)));
+  document.getElementById('ai-back').addEventListener('click', () => { state.aiMenu.view = 'list'; state.aiMenu.data = null; renderView(); });
+  document.getElementById('ai-approve')?.addEventListener('click', () => openAiApproveModal(false));
+  document.getElementById('ai-calories-btn')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = 'Estimating calories…';
+    try { await window.api.aiMenuEstimateCalories({ runId: run.id }); } catch (err) { alert(err.message); }
+    reloadAiMenuRun();
+  });
+  aiScheduleCaloriePoll(run);
+  document.getElementById('ai-resume')?.addEventListener('click', () => openAiApproveModal(true));
+  document.getElementById('ai-export')?.addEventListener('click', () => aiExportApproved(run));
+  document.getElementById('ai-discard')?.addEventListener('click', async () => {
+    if (!confirm('Discard this AI menu? It can no longer be edited or approved.')) return;
+    try { await window.api.aiMenuDiscardRun(run.id); } catch (err) { return alert(err.message); }
+    state.aiMenu.view = 'list'; renderView();
+  });
+
+  const content = document.getElementById('ai-tab-content');
+  if (state.aiMenu.tab === 'dishes') renderAiDishesTab(content);
+  else if (state.aiMenu.tab === 'warnings') renderAiNotesTab(content);
+  else renderAiSectionTab(content, state.aiMenu.tab);
+}
+
+function aiDishBadges(dish) {
+  const out = [];
+  if (dish.resolution === 'link') out.push('<span class="chip daily" title="The same dish already exists in the Dish Catalog; that dish is used.">In catalog</span>');
+  else out.push('<span class="chip ai-new">New</span>');
+  if ((dish.safety_scan?.known_risk || []).length) out.push('<span class="chip ai-risk" title="A dish that is traditionally made with nuts or sesame; this kitchen makes it without them.">Made nut/sesame-free (kitchen standard)</span>');
+  if (dish.edited) out.push('<span class="chip ai-edited">Edited</span>');
+  if (dish.cuisine) out.push(`<span class="chip ai-cuisine" title="Made for National Day">${aiEsc(dish.cuisine)}</span>`);
+  return out.join(' ');
+}
+
+function aiAttrChips(a) {
+  if (!a) return '';
+  const out = [];
+  const pc = (a.protein_code || '').toLowerCase();
+  if (pc) out.push(proteinChip(a.protein_code, pc === 'vegetarian' ? 'VEG' : a.protein_code));
+  if (a.am_snack_style) out.push(`<span class="chip ${a.am_snack_style === 'PASTRY' ? 'pastry' : 'cold-kitchen'}">${a.am_snack_style === 'PASTRY' ? 'Pastry' : 'Cold Kitchen'}</span>`);
+  return out.join(' ');
+}
+
+function renderAiSectionTab(container, section) {
+  const d = state.aiMenu.data;
+  const days = [...new Map(d.picks.filter(p => p.section_code === section).map(p => [p.menu_date, p.weekday])).entries()].sort();
+  const notesByDate = new Map();
+  for (const n of d.notes.filter(n => n.section === section)) {
+    if (!notesByDate.has(n.date)) notesByDate.set(n.date, []);
+    notesByDate.get(n.date).push(n);
+  }
+  const editable = aiIsEditable();
+
+  container.innerHTML = days.map(([date, weekday]) => {
+    const picks = d.picks.filter(p => p.section_code === section && p.menu_date === date);
+    // Same row order as SECTION_SLOTS (the order the picks were saved in).
+    const order = [...new Set(picks.map(p => p.category_code))];
+    const rows = [];
+    for (const cat of order) {
+      picks.filter(p => p.category_code === cat).sort((a, b) => a.slot_index - b.slot_index).forEach(p => rows.push({ cat, p }));
+    }
+    const body = rows.map((r, i) => {
+      const first = i === 0 || rows[i - 1].cat !== r.cat;
+      const span = first ? rows.filter(x => x.cat === r.cat).length : 0;
+      const info = aiDishFor(r.p);
+      const aiCat = AI_MENU_CATEGORIES[section].includes(r.cat) || !!r.p.source_section_code;
+      let cell;
+      if (info.kind === 'empty') {
+        cell = `<span class="ai-empty">Empty — choose a dish</span>`;
+      } else if (info.kind === 'draft' && info.dish) {
+        cell = `<span class="item-name">${aiEsc(info.dish.name)}</span> ${aiAttrChips(info.dish)} ${aiDishBadges(info.dish)}`;
+      } else {
+        cell = `<span class="item-name">${aiEsc(info.item?.name || 'Unknown catalog dish')}</span> ${aiCat ? aiAttrChips(info.item) + ' <span class="chip daily">Catalog</span>' : ''}`;
+      }
+      let actions = '';
+      if (r.p.source_section_code) {
+        actions = `<span class="ai-shared" title="Shared dish: change it in ${AI_SECTION_LABEL[r.p.source_section_code]} and it updates here.">from ${AI_SECTION_LABEL[r.p.source_section_code]}</span>`;
+      } else if (editable) {
+        actions = `<button class="icon-btn" data-replace="${r.p.id}">${info.kind === 'empty' ? 'Choose' : 'Replace'}</button>`
+          + (info.kind === 'draft' && info.dish ? ` <button class="icon-btn" data-edit-dish="${info.dish.id}">Edit</button>` : '');
+      }
+      return `<tr>${first ? `<td class="cat-cell" rowspan="${span}">${aiEsc(aiCategoryName(r.cat))}</td>` : ''}
+        <td class="item-cell"><div class="ai-cell"><div>${cell}</div><div class="ai-cell-actions">${actions}</div></div></td></tr>`;
+    }).join('');
+    const dayNotes = notesByDate.get(date) || [];
+    return `<div class="day-table-wrap">
+      <table class="day-table">
+        <thead><tr><th colspan="2"><span>${weekday}</span><span class="date">${date}</span>${d.themes?.[date] ? `<span class="ai-national-day">National Day · ${aiEsc(d.themes[date])}</span>` : ''}${dayNotes.length ? `<span class="ai-note-count">${dayNotes.length} note${dayNotes.length > 1 ? 's' : ''}</span>` : ''}</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+      ${dayNotes.length ? `<ul class="ai-day-notes">${dayNotes.map(n => `<li>${aiEsc(aiCategoryName(n.category))}: ${aiEsc(n.message)}</li>`).join('')}</ul>` : ''}
+    </div>`;
+  }).join('') || '<div class="empty-state">No days in this section.</div>';
+
+  container.querySelectorAll('[data-replace]').forEach(b => b.addEventListener('click', () => {
+    openAiReplaceModal(d.picks.find(p => p.id === Number(b.dataset.replace)));
+  }));
+  container.querySelectorAll('[data-edit-dish]').forEach(b => b.addEventListener('click', () => {
+    openAiDishModal(d.dishes.find(x => x.id === Number(b.dataset.editDish)));
+  }));
+}
+
+function renderAiDishesTab(container) {
+  const d = state.aiMenu.data;
+  const servedCount = new Map();
+  for (const p of d.picks) if (p.draft_dish_id) servedCount.set(p.draft_dish_id, (servedCount.get(p.draft_dish_id) || 0) + 1);
+  const cats = [...new Set(d.dishes.map(x => x.category_code))];
+  const filter = state.aiMenu.dishFilter;
+  container.innerHTML = `
+    <div class="ai-dish-toolbar">
+      <input id="ai-dish-search" type="search" placeholder="Search dishes or ingredients" value="${aiEsc(filter.q)}" aria-label="Search dishes" />
+      <select id="ai-dish-cat" aria-label="Category"><option value="">All categories</option>${cats.map(c => `<option value="${c}" ${filter.cat === c ? 'selected' : ''}>${aiEsc(aiCategoryName(c))}</option>`).join('')}</select>
+      <label><input type="checkbox" id="ai-dish-served" ${filter.servedOnly ? 'checked' : ''} /> Only dishes on the menu</label>
+    </div>
+    <div class="table-scroll"><table class="history-table ai-dish-table">
+      <thead><tr><th>Dish</th><th>Category</th><th>Sections</th><th>Served</th><th>Key ingredients</th><th></th></tr></thead>
+      <tbody id="ai-dish-rows"></tbody>
+    </table></div>`;
+
+  const draw = () => {
+    const q = filter.q.trim().toLowerCase();
+    const rows = d.dishes.filter(x => (!filter.cat || x.category_code === filter.cat)
+      && (!filter.servedOnly || servedCount.get(x.id))
+      && (!q || x.name.toLowerCase().includes(q) || x.key_ingredients.join(' ').toLowerCase().includes(q)));
+    document.getElementById('ai-dish-rows').innerHTML = rows.map(x => `
+      <tr class="${servedCount.get(x.id) ? '' : 'ai-unserved'}">
+        <td><strong>${aiEsc(x.name)}</strong><div>${aiAttrChips(x)} ${aiDishBadges(x)}</div></td>
+        <td>${aiEsc(aiCategoryName(x.category_code))}</td>
+        <td>${x.section_codes.map(s => AI_SECTION_LABEL[s] || s).join(', ')}</td>
+        <td>${servedCount.get(x.id) || '<span class="ai-muted">not on the menu</span>'}</td>
+        <td class="ai-ingredients">${aiEsc(x.key_ingredients.join(', '))}</td>
+        <td>${aiIsEditable() ? `<button class="icon-btn" data-edit-dish="${x.id}">Edit</button>` : ''}</td>
+      </tr>`).join('') || '<tr><td colspan="6" class="ai-muted">No dishes match.</td></tr>';
+    document.querySelectorAll('#ai-dish-rows [data-edit-dish]').forEach(b => b.addEventListener('click', () => {
+      openAiDishModal(d.dishes.find(x => x.id === Number(b.dataset.editDish)));
+    }));
+  };
+  document.getElementById('ai-dish-search').addEventListener('input', (e) => { filter.q = e.target.value; draw(); });
+  document.getElementById('ai-dish-cat').addEventListener('change', (e) => { filter.cat = e.target.value; draw(); });
+  document.getElementById('ai-dish-served').addEventListener('change', (e) => { filter.servedOnly = e.target.checked; draw(); });
+  draw();
+}
+
+function renderAiNotesTab(container) {
+  const d = state.aiMenu.data;
+  const gen = d.run.warnings || [];
+  const safety = gen.filter(w => w.kind === 'safety');
+  const other = gen.filter(w => w.kind !== 'safety');
+  const bySection = AI_SECTIONS.map(s => [s, d.notes.filter(n => n.section === s)]).filter(([, list]) => list.length);
+  container.innerHTML = `
+    <h2 class="ai-subhead">Menu rules (${d.notes.length})</h2>
+    <p class="ai-muted">Re-checked after every change. These are warnings — the menu can still be approved.</p>
+    ${bySection.length ? bySection.map(([s, list]) => `
+      <h3 class="ai-subsubhead">${AI_SECTION_LABEL[s]}</h3>
+      <ul class="ai-note-list">${list.map(n => `<li><span class="ai-note-date">${n.date}</span> ${aiEsc(aiCategoryName(n.category))}: ${aiEsc(n.message)}</li>`).join('')}</ul>`).join('')
+      : '<div class="empty-state">Every day follows the menu rules.</div>'}
+    <h2 class="ai-subhead">Rejected by the safety check at generation (${safety.length})</h2>
+    <p class="ai-muted">These AI dishes were never added to the menu: they matched the nut / sesame, seafood (student sections) or halal check.</p>
+    ${safety.length ? `<ul class="ai-note-list">${safety.map(w => `<li><strong>${aiEsc(w.name)}</strong> (${aiEsc(aiCategoryName(w.category))}, ${(w.sections || []).map(s => AI_SECTION_LABEL[s] || s).join(' + ')}): ${aiEsc(w.reason)}</li>`).join('')}</ul>` : '<div class="empty-state">None.</div>'}
+    <h2 class="ai-subhead">Other generation notes (${other.length})</h2>
+    ${other.length ? `<ul class="ai-note-list">${other.map(w => `<li>${aiEsc(w.message || (w.kind === 'duplicate_retired' ? `"${w.name}" matched the retired catalog dish "${w.matched_name}" and was dropped` : w.name || w.kind))}</li>`).join('')}</ul>` : '<div class="empty-state">None.</div>'}`;
+}
+
+// ---------- modals ----------
+
+function aiOpenModal(html, { wide = false } = {}) {
+  const previousFocus = document.activeElement;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal ai-modal ${wide ? 'ai-modal-wide' : ''}" role="dialog" aria-modal="true">${html}</div>`;
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); previousFocus?.focus?.(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.modal').setAttribute('aria-labelledby', 'ai-modal-title');
+  setTimeout(() => overlay.querySelector('input, select, textarea, button')?.focus(), 0);
+  return { overlay, close };
+}
+
+// The message box lives in the modal's pinned action bar, so it is always on screen.
+function aiShowBlocked(el, blocked) {
+  el.innerHTML = aiBlockedHtml(blocked);
+}
+
+function aiBlockedHtml(blocked) {
+  return `<div class="ai-blocked" role="alert"><strong>Not saved.</strong> ${aiEsc(blocked.reason)}</div>`;
+}
+
+function aiAttrFields(category, values, prefix, sections) {
+  const { required, optional } = aiAttrsFor(category, sections);
+  return [...required, ...optional].map(attr => {
+    const opts = attr === 'protein_code'
+      ? state.proteinTypes.map(p => [p.code, p.name])
+      : AI_ATTR_OPTIONS[attr];
+    const req = required.includes(attr);
+    return `<div class="field"><label for="${prefix}-${attr}">${AI_ATTR_LABEL[attr]}${req ? ' *' : ''}</label>
+      <select id="${prefix}-${attr}" data-attr="${attr}">
+        <option value="">${req ? '— choose —' : '— none —'}</option>
+        ${opts.map(([code, name]) => `<option value="${code}" ${values?.[attr] === code ? 'selected' : ''}>${aiEsc(name)}</option>`).join('')}
+      </select></div>`;
+  }).join('');
+}
+
+function aiReadDishForm(root) {
+  const fields = {
+    name: root.querySelector('[data-f="name"]').value.trim(),
+    description: root.querySelector('[data-f="description"]').value.trim(),
+    key_ingredients: root.querySelector('[data-f="key_ingredients"]').value.split(/\n|,/).map(s => s.trim()).filter(Boolean),
+  };
+  root.querySelectorAll('select[data-attr]').forEach(sel => { fields[sel.dataset.attr] = sel.value || null; });
+  return fields;
+}
+
+function aiDishFormHtml(category, dish, prefix, sections = dish?.section_codes || []) {
+  return `
+    <div class="field"><label for="${prefix}-name">Dish name *</label><input id="${prefix}-name" data-f="name" value="${aiEsc(dish?.name || '')}" /></div>
+    <div class="field"><label for="${prefix}-desc">Description</label><textarea id="${prefix}-desc" data-f="description" rows="2">${aiEsc(dish?.description || '')}</textarea></div>
+    <div class="field"><label for="${prefix}-ing">Key ingredients * (one per line)</label><textarea id="${prefix}-ing" data-f="key_ingredients" rows="4">${aiEsc((dish?.key_ingredients || []).join('\n'))}</textarea></div>
+    <div class="ai-attr-grid">${aiAttrFields(category, dish, prefix, sections)}</div>`;
+}
+
+function openAiDishModal(dish) {
+  if (!dish) return;
+  const d = state.aiMenu.data;
+  const servedIn = d.picks.filter(p => p.draft_dish_id === dish.id);
+  const linkedItem = dish.dup_match_item_id ? d.catalogItems[dish.dup_match_item_id] : null;
+  const { overlay, close } = aiOpenModal(`
+    <h2 id="ai-modal-title">Edit dish</h2>
+    <p class="ai-muted">${aiEsc(aiCategoryName(dish.category_code))} · served ${servedIn.length} time(s) · ${dish.section_codes.map(s => AI_SECTION_LABEL[s] || s).join(', ')}. Changes apply everywhere this dish is served.</p>
+    ${dish.resolution === 'link' ? `<div class="warning-banner">This is the existing catalog dish "${aiEsc(linkedItem?.name || dish.name)}" — the catalog version is served as it is. Rename it to make it a new dish instead.</div>` : ''}
+    <div id="ai-dish-form">${aiDishFormHtml(dish.category_code, dish, 'ai-ed')}</div>
+    <div class="actions"><div id="ai-dish-error" class="ai-action-msg"></div><button class="secondary" id="ai-ed-cancel">Cancel</button><button class="primary" id="ai-ed-save">Save</button></div>`);
+  overlay.querySelector('#ai-ed-cancel').addEventListener('click', close);
+  overlay.querySelector('#ai-ed-save').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#ai-ed-save');
+    btn.disabled = true;
+    try {
+      const res = await window.api.aiMenuUpdateDish({ runId: state.aiMenu.runId, dishId: dish.id, fields: aiReadDishForm(overlay.querySelector('#ai-dish-form')) });
+      if (!res.ok) { aiShowBlocked(overlay.querySelector('#ai-dish-error'), res.blocked); btn.disabled = false; return; }
+      close();
+      showToast(res.linked ? `Saved — "${res.dish.name}" is already in the Dish Catalog, so that dish is used.` : res.unlinked ? 'Saved as a new dish (no longer the catalog dish).' : 'Dish saved.');
+      await reloadAiMenuRun();
+    } catch (err) {
+      aiShowBlocked(overlay.querySelector('#ai-dish-error'), { reason: err.message });
+      btn.disabled = false;
+    }
+  });
+}
+
+// The post-Approve calorie step's status (approve_progress.calories), written by main.js.
+function aiCalorieStatusHtml(c) {
+  const btn = (label) => `<button class="link-btn" id="ai-calories-btn">${label}</button>`;
+  if (!c) return `Calories: not estimated yet for this run's new dishes. ${btn('Estimate calories')}`;
+  if (c.status === 'running') return 'Estimating calories for this run\u2019s new dishes in the background…';
+  if (c.status === 'failed') return `Calorie estimate failed: ${aiEsc(c.error || 'unknown error')}. The approval is unaffected. ${btn('Try again')}`;
+  const extra = [c.flagged ? `${c.flagged} flagged unverified` : '', c.stillMissing ? `${c.stillMissing} still without a value` : ''].filter(Boolean).join(', ');
+  return `${c.estimated} of ${c.dishes} new dish(es) have calories${extra ? ` (${extra})` : ''}.${c.stillMissing ? ` ${btn('Try the rest again')}` : ''}`;
+}
+
+// While the background calorie step runs, re-check every few seconds (only while this run is on screen).
+let aiCaloriePollTimer = null;
+function aiScheduleCaloriePoll(run) {
+  clearTimeout(aiCaloriePollTimer);
+  if (run.status !== 'approved' || run.approve_progress?.calories?.status !== 'running') return;
+  aiCaloriePollTimer = setTimeout(() => {
+    if (state.currentView === 'aiMenu' && state.aiMenu.view === 'run' && state.aiMenu.runId === run.id) reloadAiMenuRun();
+  }, 5000);
+}
+
+async function aiExportApproved(run) {
+  try {
+    const res = await window.api.exportAllSectionsToExcel({ menuIdsBySection: run.approve_progress?.sections || {}, label: run.label });
+    if (res?.success) showToast(`Exported to ${res.path}`);
+  } catch (err) { alert(err.message); }
+}
+
+// The permanent step: confirm what will happen, run it with progress, then show the outcome.
+function openAiApproveModal(resume) {
+  const d = state.aiMenu.data;
+  const servedIds = new Set(d.picks.filter(p => p.draft_dish_id).map(p => p.draft_dish_id));
+  const served = d.dishes.filter(x => servedIds.has(x.id));
+  const toCreate = served.filter(x => x.resolution === 'new' && !x.resolved_item_id).length;
+  const toLink = served.filter(x => x.resolution === 'link' && !x.resolved_item_id).length;
+  const { overlay, close } = aiOpenModal(`
+    <h2 id="ai-modal-title">${resume ? 'Resume approval' : 'Approve this menu'}</h2>
+    <div id="ai-approve-body">
+      <p>${resume ? 'This finishes an approval that stopped part-way. Steps already done are skipped, so nothing is created or saved twice.' : 'This makes the menu permanent:'}</p>
+      <ul class="ai-note-list">
+        <li><strong>${toCreate}</strong> new dish${toCreate === 1 ? '' : 'es'} added to the Dish Catalog, tagged AI-generated</li>
+        <li><strong>${toLink}</strong> dish${toLink === 1 ? '' : 'es'} use${toLink === 1 ? 's' : ''} the existing catalog dish of the same name</li>
+        <li>Daycare, KG-LP, MS-UP and Staff saved to History as one "All Sections" entry, with CEO generated now by the usual engine</li>
+      </ul>
+      <p class="ai-muted">Every dish is safety-checked again first; anything that fails stops the approval before anything is saved.${d.notes.length ? ` ${d.notes.length} menu rule note(s) remain — they don't block approval.` : ''}</p>
+      ${resume ? '' : '<label class="ai-confirm"><input type="checkbox" id="ai-approve-ok" /> I have reviewed this menu and want to save it permanently</label>'}
+      <div id="ai-approve-progress" class="ai-progress" role="status" aria-live="polite"></div>
+    </div>
+    <div class="actions"><div id="ai-approve-error" class="ai-action-msg"></div><button class="secondary" id="ai-ap-cancel">Cancel</button><button class="primary" id="ai-ap-go" ${resume ? '' : 'disabled'}>${resume ? 'Resume' : 'Approve'}</button></div>`);
+  const go = overlay.querySelector('#ai-ap-go');
+  const cancel = overlay.querySelector('#ai-ap-cancel');
+  cancel.addEventListener('click', close);
+  overlay.querySelector('#ai-approve-ok')?.addEventListener('change', (e) => { go.disabled = !e.target.checked; });
+  go.addEventListener('click', async () => {
+    go.disabled = true; cancel.disabled = true;
+    const progressEl = overlay.querySelector('#ai-approve-progress');
+    const unsubscribe = window.api.onAiMenuProgress(({ message }) => { progressEl.textContent = message; });
+    try {
+      const res = await window.api.aiMenuApprove({ runId: state.aiMenu.runId });
+      const body = overlay.querySelector('#ai-approve-body');
+      if (res.ok) {
+        body.innerHTML = `<p><strong>Approved.</strong> ${res.created ?? 0} new dish(es) added to the Dish Catalog, ${res.linked ?? 0} linked to existing ones${res.portionsAdded ? `, ${res.portionsAdded} section portion(s) added` : ''}. All five menus are in History.</p>
+          <p class="ai-muted">Calories for the new dishes are being estimated in the background now; the approved run shows when they're done.</p>
+          ${(res.ceoWarnings || []).length ? `<p class="ai-muted">CEO menu notes: ${res.ceoWarnings.map(aiEsc).join('; ')}</p>` : ''}`;
+        overlay.querySelector('.actions').innerHTML = `<button class="secondary" id="ai-ap-close">Close</button><button class="primary" id="ai-ap-export">Export workbook</button>`;
+        overlay.querySelector('#ai-ap-close').addEventListener('click', () => { close(); reloadAiMenuRun(); });
+        overlay.querySelector('#ai-ap-export').addEventListener('click', async () => {
+          await aiExportApproved({ label: d.run.label, approve_progress: { sections: res.menuIdsBySection } });
+        });
+      } else {
+        const b = res.blocked;
+        body.innerHTML = `<p><strong>Not approved${res.handedBack ? ' — the menu is a draft again' : ''}.</strong> Nothing permanent was written. Fix these first:</p>
+          <ul class="ai-note-list">
+            ${b.emptySlots ? `<li>${b.emptySlots} empty slot(s)</li>` : ''}
+            ${b.safety.map(x => `<li><strong>${aiEsc(x.name)}</strong> (${aiEsc(aiCategoryName(x.category))}): ${aiEsc(x.reason)}</li>`).join('')}
+            ${b.retired.map(x => `<li><strong>${aiEsc(x.name)}</strong> now matches the retired catalog dish "${aiEsc(x.matched)}" — rename it or reactivate that dish</li>`).join('')}
+          </ul>`;
+        overlay.querySelector('.actions').innerHTML = `<button class="primary" id="ai-ap-close">Close</button>`;
+        overlay.querySelector('#ai-ap-close').addEventListener('click', () => { close(); reloadAiMenuRun(); });
+      }
+    } catch (err) {
+      aiShowBlocked(overlay.querySelector('#ai-approve-error'), { reason: `${err.message} If it stopped part-way, "Resume approval" finishes it.` });
+      cancel.disabled = false;
+      cancel.textContent = 'Close';
+      cancel.onclick = () => { close(); reloadAiMenuRun(); };
+    } finally {
+      unsubscribe();
+    }
+  });
+}
+
+function aiPropagationNote(pick) {
+  if (pick.section_code === 'KG_LP' && ['LUNCH_MAIN', 'LUNCH_STARCH'].includes(pick.category_code)) {
+    return `Also changes MS-UP (identical ${pick.category_code === 'LUNCH_MAIN' ? 'Lunch Main' : 'Lunch Starch'}) and Staff Main.`;
+  }
+  if (pick.section_code === 'MS_UP' && pick.category_code === 'LUNCH_VEGETABLE') return 'Also changes Staff Main (it carries MS-UP’s Lunch Vegetable).';
+  if (pick.category_code === 'AM_SNACK') return 'Also changes Staff Breakfast (it carries every school AM Snack).';
+  return '';
+}
+
+async function openAiReplaceModal(pick) {
+  if (!pick) return;
+  const info = aiDishFor(pick);
+  const currentName = info.kind === 'draft' ? info.dish?.name : info.kind === 'catalog' ? info.item?.name : null;
+  const isAiCategory = AI_MENU_CATEGORIES[pick.section_code].includes(pick.category_code);
+  // Categories the AI doesn't handle (Milk, Fruit Bar, Staff Salad...) stay catalog-only.
+  const tabs = isAiCategory
+    ? [['unused', 'Unused AI dishes'], ['catalog', 'Dish Catalog'], ['ask', 'Ask AI'], ['write', 'Write a new dish']]
+    : [['catalog', 'Dish Catalog']];
+  const { overlay, close } = aiOpenModal(`
+    <h2 id="ai-modal-title">${currentName ? 'Replace dish' : 'Choose a dish'}</h2>
+    <p class="ai-muted">${AI_SECTION_LABEL[pick.section_code]} · ${aiEsc(aiCategoryName(pick.category_code))} · ${pick.weekday} ${pick.menu_date}${currentName ? ` · now: <strong>${aiEsc(currentName)}</strong>` : ''}</p>
+    ${aiPropagationNote(pick) ? `<p class="ai-muted">${aiPropagationNote(pick)}</p>` : ''}
+    <div class="mode-toggle" role="tablist" style="margin-bottom:14px;">${tabs.map(([k, l], i) => `<button type="button" role="tab" class="mode-toggle-btn ${i === 0 ? 'active' : ''}" data-rtab="${k}">${l}</button>`).join('')}</div>
+    <div id="ai-replace-body"><div class="empty-state">Loading…</div></div>
+    <div class="actions"><div id="ai-replace-error" class="ai-action-msg"></div><button class="secondary" id="ai-rep-cancel">Cancel</button><button class="primary" id="ai-rep-primary" hidden>Use this dish</button></div>`, { wide: true });
+  overlay.querySelector('#ai-rep-cancel').addEventListener('click', close);
+  const body = overlay.querySelector('#ai-replace-body');
+  const errorEl = overlay.querySelector('#ai-replace-error');
+
+  let options = null;
+  try {
+    options = await window.api.aiMenuReplacementOptions({ runId: state.aiMenu.runId, pickId: pick.id });
+  } catch (err) {
+    body.innerHTML = aiBlockedHtml({ reason: err.message });
+    return;
+  }
+
+  const apply = async (replacement, btn) => {
+    errorEl.innerHTML = '';
+    if (btn) btn.disabled = true;
+    try {
+      const res = await window.api.aiMenuReplacePick({ runId: state.aiMenu.runId, pickId: pick.id, replacement });
+      if (!res.ok) { aiShowBlocked(errorEl, res.blocked); if (btn) btn.disabled = false; return; }
+      close();
+      showToast(res.linked ? 'That dish is already in the Dish Catalog — the catalog dish is used.' : res.reused ? 'That dish was already in this menu — it is used here too.' : `Replaced${res.updatedPicks > 1 ? ` (${res.updatedPicks} places, shared copies included)` : ''}.`);
+      await reloadAiMenuRun();
+    } catch (err) {
+      aiShowBlocked(errorEl, { reason: err.message });
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  const listHtml = (rows, kind) => `
+    <input type="search" class="ai-rep-search" placeholder="Search" aria-label="Search" />
+    <ul class="ai-option-list">${rows.map(r => `
+      <li data-q="${aiEsc(`${r.name} ${(r.key_ingredients || []).join(' ')}`.toLowerCase())}">
+        <div><strong>${aiEsc(r.name)}</strong> ${aiAttrChips(r)} ${kind === 'unused' ? aiDishBadges(r) : ''}${r.usedInThisSection ? ' <span class="ai-muted">already on this menu</span>' : ''}
+          ${r.key_ingredients ? `<div class="ai-ingredients">${aiEsc(r.key_ingredients.join(', '))}</div>` : ''}</div>
+        <button class="icon-btn" data-use="${r.id}">Use</button>
+      </li>`).join('') || '<li class="ai-muted">Nothing to choose from here.</li>'}</ul>`;
+  const wireList = (kind) => {
+    body.querySelector('.ai-rep-search')?.addEventListener('input', (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      body.querySelectorAll('.ai-option-list li[data-q]').forEach(li => { li.hidden = q && !li.dataset.q.includes(q); });
+    });
+    body.querySelectorAll('[data-use]').forEach(b => b.addEventListener('click', () => {
+      apply(kind === 'unused' ? { draftDishId: Number(b.dataset.use) } : { itemId: Number(b.dataset.use) }, b);
+    }));
+  };
+
+  // The pinned action bar's primary button is only used by "Write a new dish" (lists use per-row buttons).
+  const primary = overlay.querySelector('#ai-rep-primary');
+  const show = async (tab) => {
+    errorEl.innerHTML = '';
+    primary.hidden = true;
+    primary.onclick = null;
+    overlay.querySelectorAll('[data-rtab]').forEach(b => b.classList.toggle('active', b.dataset.rtab === tab));
+    if (tab === 'unused') {
+      body.innerHTML = `<p class="ai-muted">Dishes the AI made for this menu that aren't served in ${AI_SECTION_LABEL[pick.section_code]} yet. Already safety-checked.${options.cuisine ? ` National Day (${aiEsc(options.cuisine)}) dishes are listed first.` : ''}</p>${listHtml(options.unusedDishes, 'unused')}`;
+      wireList('unused');
+    } else if (tab === 'catalog') {
+      body.innerHTML = `<p class="ai-muted">Active Dish Catalog dishes in this category that are set up for ${AI_SECTION_LABEL[pick.section_code]}.</p>${listHtml(options.catalogItems, 'catalog')}`;
+      wireList('catalog');
+    } else if (tab === 'ask') {
+      body.innerHTML = `<p class="ai-muted">The AI suggests three new dishes for this slot, keeping what the menu rules need here (e.g. a chicken main stays chicken)${options.cuisine ? `, all ${aiEsc(options.cuisine)} for National Day` : ''}. Each one is safety-checked before you see it.</p>
+        <button class="primary" id="ai-ask-btn">Suggest 3 dishes</button><div id="ai-ask-results" aria-live="polite"></div>`;
+      body.querySelector('#ai-ask-btn').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        const out = body.querySelector('#ai-ask-results');
+        btn.disabled = true; btn.textContent = 'Asking the AI…';
+        try {
+          const res = await window.api.aiMenuSuggest({ runId: state.aiMenu.runId, pickId: pick.id });
+          out.innerHTML = `<ul class="ai-option-list">${res.candidates.map((c, i) => `
+            <li><div><strong>${aiEsc(c.name)}</strong> ${aiAttrChips(c)}${c.knownRisk?.length ? ' <span class="chip ai-risk">Made nut/sesame-free (kitchen standard)</span>' : ''}${c.linkedTo ? ` <span class="chip daily">In catalog as "${aiEsc(c.linkedTo)}"</span>` : ''}
+              ${c.description ? `<div>${aiEsc(c.description)}</div>` : ''}<div class="ai-ingredients">${aiEsc(c.key_ingredients.join(', '))}</div></div>
+              <button class="icon-btn" data-cand="${i}">Use</button></li>`).join('') || '<li class="ai-muted">No usable suggestions came back — try again.</li>'}</ul>
+            ${res.rejected.length ? `<p class="ai-muted">${res.rejected.length} suggestion(s) failed the safety check and were dropped: ${res.rejected.map(r => aiEsc(`${r.name} (${r.reason})`)).join('; ')}</p>` : ''}`;
+          out.querySelectorAll('[data-cand]').forEach(b => b.addEventListener('click', () => {
+            apply({ newDish: res.candidates[Number(b.dataset.cand)], origin: 'ai_suggest' }, b);
+          }));
+          btn.textContent = 'Suggest 3 more';
+        } catch (err) {
+          out.innerHTML = aiBlockedHtml({ reason: err.message });
+          btn.textContent = 'Try again';
+        }
+        btn.disabled = false;
+      });
+    } else if (tab === 'write') {
+      body.innerHTML = `<p class="ai-muted">Your own dish. It goes through the same nut / sesame, seafood and halal check (a hit blocks it), and if the Dish Catalog already has it, the catalog dish is used.</p>
+        <div id="ai-write-form">${aiDishFormHtml(pick.category_code, null, 'ai-wr', [pick.section_code])}</div>`;
+      primary.hidden = false;
+      primary.onclick = () => apply({ newDish: aiReadDishForm(body.querySelector('#ai-write-form')), origin: 'chef' }, primary);
+    }
+  };
+  overlay.querySelectorAll('[data-rtab]').forEach(b => b.addEventListener('click', () => show(b.dataset.rtab)));
+  show(tabs[0][0]);
+}
+
+// ============================================================
 // EXPORT ALL SECTIONS VIEW
 // ============================================================
 async function renderExportAllView(main) {
@@ -1872,12 +3533,20 @@ async function renderExportAllView(main) {
       <button class="primary" id="ea-generate-btn">Generate &amp; Export All Sections</button>
     </div>
     <div id="ea-day-count" class="day-count-hint" style="margin:-10px 0 14px;"></div>
+    <div id="ea-mix"></div>
     <div id="ea-result" style="margin-top:16px;"></div>
   `;
 
   wireDateRangeFields('ea-start', 'ea-end', 'ea-day-count');
 
-  document.getElementById('ea-generate-btn').addEventListener('click', async () => {
+  const eaBtn = document.getElementById('ea-generate-btn');
+  const updateEaBtn = () => { eaBtn.textContent = mixActive() ? 'Generate & Export All Sections with Created By mix' : 'Generate & Export All Sections'; };
+  const eaMixHost = document.getElementById('ea-mix');
+  renderMixPanel(eaMixHost, () => mixScope('ea-start', 'ea-end', MIX_SECTION_ORDER, true), updateEaBtn);
+  updateEaBtn();
+  for (const id of ['ea-start', 'ea-end']) document.getElementById(id).addEventListener('change', () => eaMixHost.refreshMix());
+
+  eaBtn.addEventListener('click', async () => {
     const label = document.getElementById('ea-label').value.trim() || 'Untitled Menu';
     const createdBy = document.getElementById('ea-created-by').value.trim() || null;
     const startDate = document.getElementById('ea-start').value;
@@ -1887,11 +3556,16 @@ async function renderExportAllView(main) {
 
     const numWeekdays = await window.api.getSchoolDayCount({ startDate, endDate });
     if (numWeekdays < 1) return alert('That date range has no school days (Sun-Thu) in it.');
+    if (mixActive() && mixTotal() !== 100) return alert(`The Created By mix adds up to ${mixTotal()}%. Make it 100%, or turn it off.`);
 
     const resultEl = document.getElementById('ea-result');
     resultEl.textContent = 'Generating all 5 sections and exporting…';
 
-    const result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy });
+    let result;
+    setMenuPlannerBusy(true);
+    try {
+      result = await window.api.generateAndExportAll({ label, startDate, numWeekdays, createdBy, createdByMix: mixPayload() });
+    } finally { setMenuPlannerBusy(false); }
 
     if (!result.success) {
       resultEl.textContent = result.cancelled ? '' : 'Export failed.';
@@ -1913,6 +3587,7 @@ async function renderExportAllView(main) {
         <div style="color:var(--neutral); font-size:13px;">
           No repeat warnings -- every section had enough variety for the full period.
         </div>`}
+      ${mixReportHtml(result.mixReportBySection)}
     `;
   });
 }
@@ -2383,6 +4058,8 @@ function resetDrilldownScreens() {
     state[ns.stateKey].formId = null;
     resetRecipeFormState(ns);
   });
+  state.aiMenu.view = 'list';
+  state.aiMenu.data = null;
   state.materials.view = 'list';
   state.materials.formId = null;
   state.materials.pendingPhoto = null;
@@ -7781,6 +9458,29 @@ const MATERIAL_CATEGORIES = {
   cutter: { label: 'Cutter' },
 };
 
+// Which shape types each category offers in the Materials form, with the label that reads right for it
+// (a "Muffin cutter" or a "Rectangular / Tray" cutter made no sense). Same list is checked by main.js
+// save-material (MATERIAL_CATEGORY_SHAPES there) -- keep the two in step. An existing material saved
+// before this rule keeps its shape as an extra option (see materialShapeOptions).
+const MATERIAL_CATEGORY_SHAPES = {
+  tray_pan: { round: 'Round', rectangular: 'Rectangular / Square', muffin_tray: 'Muffin / Multi-Cavity Tray' },
+  cutter: { round: 'Round', rectangular: 'Square / Rectangle', triangle: 'Triangle' },
+};
+function materialShapeLabel(category, shapeType) {
+  return MATERIAL_CATEGORY_SHAPES[category]?.[shapeType] || MATERIAL_SHAPE_PRESETS[shapeType]?.label || shapeType;
+}
+// [key, label] pairs for the Shape Type dropdown. `keepShape` (the saved shape of the material being
+// edited) stays listed even when it isn't one of the category's shapes, so opening an older material
+// never silently changes it.
+function materialShapeOptions(category, keepShape) {
+  const allowed = MATERIAL_CATEGORY_SHAPES[category] || {};
+  const opts = Object.entries(allowed);
+  if (keepShape && !allowed[keepShape] && MATERIAL_SHAPE_PRESETS[keepShape]) {
+    opts.push([keepShape, `${MATERIAL_SHAPE_PRESETS[keepShape].label} (not a usual ${MATERIAL_CATEGORIES[category]?.label.toLowerCase() || ''} shape)`]);
+  }
+  return opts;
+}
+
 // Display-only grouping label for the Materials list -- see MATERIAL_CATEGORIES' own comment for
 // why this is derived here rather than stored as its own column. Cutters are one flat group
 // (matching how they were requested -- no shape breakdown), trays/pans split by shape_type so
@@ -7851,17 +9551,17 @@ function renderMaterialDimensionFields(container, shapeType, existingValues) {
   const preset = MATERIAL_SHAPE_PRESETS[shapeType];
   container.innerHTML = preset.fields.map(f => `
     <div class="field" style="max-width:150px;">
-      <label>${f.label}</label>
+      <label for="mf-dim-${f.key}">${f.label}</label>
       <input id="mf-dim-${f.key}" type="number" min="0" step="${f.step}" value="${existingValues?.[f.key] ?? ''}" />
     </div>
   `).join('');
 }
 
-function readMaterialDims(shapeType) {
+function readMaterialDims(shapeType, root = document) {
   const preset = MATERIAL_SHAPE_PRESETS[shapeType];
   const dims = {};
   preset.fields.forEach(f => {
-    const el = document.getElementById(`mf-dim-${f.key}`);
+    const el = root.querySelector(`#mf-dim-${f.key}`);
     const raw = el ? el.value.trim() : '';
     dims[f.key] = raw === '' ? null : parseFloat(raw);
   });
@@ -7871,8 +9571,8 @@ function readMaterialDims(shapeType) {
 // Always sends every possible dimension column, nulling out whichever ones don't belong to the
 // CURRENT shape -- so switching a material from e.g. Muffin Tray to Round before saving doesn't
 // leave stale cup_* values behind in the row.
-function buildMaterialDimensionPayload(shapeType) {
-  const current = readMaterialDims(shapeType);
+function buildMaterialDimensionPayload(shapeType, root = document) {
+  const current = readMaterialDims(shapeType, root);
   const payload = {};
   Object.keys(MATERIAL_DIMENSION_DB_KEYS).forEach(key => { payload[key] = current[key] ?? null; });
   return payload;
@@ -8589,7 +10289,10 @@ function renderRecipeOnFireView(main) {
 
         <div id="rof-setup-block">
         <div class="field" style="display:none; margin-bottom:14px;" id="rof-process-field">
-          <label>Process(es) going into this tray <span title="Check more than one when separate processes (e.g. a biga and a final dough) get combined into one dough before baking. Leave a process unchecked if it's a separate component (e.g. a filling) that isn't going into this tray." style="cursor:help; color:var(--neutral);">ⓘ</span></label>
+          <div class="rof-process-head">
+            <label>Process(es) going into this tray <span title="Check more than one when separate processes (e.g. a biga and a final dough) get combined into one dough before baking, or choose In layers when they are stacked (e.g. a pastry base with a filling on top). Leave a process unchecked if it isn't going into this tray." style="cursor:help; color:var(--neutral);">ⓘ</span></label>
+            <span id="rof-layout-slot"></span>
+          </div>
           <div id="rof-process-checks" style="display:flex; flex-direction:column; gap:6px; margin-top:4px;"></div>
         </div>
 
@@ -8624,7 +10327,11 @@ function renderRecipeOnFireView(main) {
   const setupBlockEl = document.getElementById('rof-setup-block');
   const recipeCompactEl = document.getElementById('rof-recipe-compact');
 
-  const materialsPromise = window.api.listMaterials();
+  // Reloaded each time Setup or Trim opens (and taken from the dialog after "+ Create new …"), so a
+  // material added meanwhile -- by her in the dialog, or by a colleague in Materials -- is in the list.
+  let materialsPromise = window.api.listMaterials();
+  const reloadMaterials = () => { materialsPromise = window.api.listMaterials(); };
+  const NEW_MATERIAL = '__new'; // the "+ Create new …" option's value in the tray / cutter dropdowns
   const wasteTypesPromise = window.api.listWasteTypes();
 
   let source = 'book';
@@ -8639,6 +10346,27 @@ function renderRecipeOnFireView(main) {
   // several separate processes, e.g. a biga + a final dough) has one wastage picture, not several
   // independent ones stacked together.
   let combinedWastes = [];
+
+  // ---- Layered tray (Sheet & Trim only) --------------------------------------------------------------
+  // With two or more processes ticked she chooses how they go in: 'mixed' (one dough -- everything above,
+  // unchanged) or 'layers' (stacked in the tray, bottom first: e.g. a puff pastry base pre-baked alone, then
+  // a filling poured on top up to a height). The arithmetic is renderer/rof/layers.js (pure); this keeps the
+  // choices and shows the plan. Session-only, like the rest of this screen. Phase L1: the plan only -- the
+  // pre-bake / fill / bake / trim steps for layers come later, so Continue waits in layers mode.
+  let doughLayout = 'mixed';       // 'mixed' | 'layers'
+  let layerOrder = [];             // process localIds (strings), bottom first
+  const layerCfg = new Map();      // localId -> { density, prebake, fillKind: 'all' | 'height', targetCm, wastes }
+  let layerTraysManual = null;     // her tray count, or null = from the bottom layer's Fill Weight (else 1)
+  let layerPlan = null;            // the last planLayers() result
+  let layerOpenId = null;          // the one open layer card (null = open one waiting for a height; '' = all folded)
+  let processListOpen = false;     // layers mode folds the process checklist to one line; "Change" opens it
+  // The pre-bake and the final bake each keep their own oven settings, doneness and rise correction (see
+  // useLayerBake); layerFinalRise is the final bake's rise correction, which the plan's after-bake heights use.
+  let layerBakeSlots = { prebake: null, final: null };
+  let activeLayerBake = null;
+  let layerFinalRise = 1;
+  let prebakeSheetState = null;    // { rise, bake } of the base when the pre-bake came out (restored after "Bake again")
+  const layersActive = () => doughLayout === 'layers' && selectedProcesses().length >= 2;
 
   // ---- Step-wizard state -----------------------------------------------------------------------
   // One continuous session over shared state (processes / wastes / tray / whatever is in the game view),
@@ -8675,8 +10403,13 @@ function renderRecipeOnFireView(main) {
   let cutterMaterials = [];      // cutter-category Materials
   let armedCutterId = null;      // which cutter Material follows the pointer, if any
   let lastCutterId = null;       // last cutter chosen (auto-arrange uses it even after the pointer is freed)
-  let cutterList = [];           // cutters currently on the sheet, as reported by the game
+  let cutterList = [];           // cutters currently on the sheet, as reported by the game (or a knife grid's pieces)
   let trimNote = '';
+  // Trim step: 'cutter' (stamp / arrange cutters from Materials) or 'knife' (a centred grid of straight cuts; no
+  // material involved). knifeSpec = { across, down, cut }: the piece size in cm, and whether she pressed Cut
+  // (dotted preview -> solid lines; One portion / Export PDF wait for it). The sizes last for the screen visit.
+  let trimMode = 'cutter';
+  let knifeSpec = null;
   // Frozen when "Continue ->" is clicked on Setup: every later step computes off THIS snapshot, never
   // off live tray inputs, since those controls are gone once the Setup panel is replaced.
   let bakeSnapshot = null; // { material, dims, footprint, netWeight }
@@ -8714,7 +10447,7 @@ function renderRecipeOnFireView(main) {
             rofGame.setSfx({ pickup: playPickupSound, place: playPlaceSound, refuse: playRefuseSound, arrange: playArrangeSound, bakeAmbience: startBakeAmbience, ding: playDingSound });
             rofGame.on('placement', (state) => { placeNote = ''; updatePlaceSummary(state); });
             rofGame.on('cutters', (list) => { cutterList = list; trimNote = ''; updateTrimSummary(); });
-            rofGame.on('armed', (spec) => { armedCutterId = spec ? spec.materialId : null; syncCutterCards(); });
+            rofGame.on('armed', (spec) => { armedCutterId = spec ? spec.materialId : null; if (spec) lastCutterId = spec.materialId; syncCutterPicker(); });
             rofGame.on('portion', ({ open }) => syncPortionBtn(open));
             resolve(rofGame);
           } catch (err) { reject(err); }
@@ -8756,6 +10489,8 @@ function renderRecipeOnFireView(main) {
     placeSession = null; placeCount = null; placeNote = '';
     placeGrams = null; placeGramsUser = false;
     cutterList = []; armedCutterId = null; trimNote = ''; sheetInfo = null;
+    if (knifeSpec) knifeSpec.cut = false;
+    layerBakeSlots = { prebake: null, final: null }; activeLayerBake = null; layerFinalRise = 1; prebakeSheetState = null;
     riseScale = 1;
     bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
   }
@@ -8765,6 +10500,11 @@ function renderRecipeOnFireView(main) {
     workingProcesses = [];
     selectedProcessLocalIds = new Set();
     combinedWastes = [];
+    doughLayout = 'mixed'; layerOrder = []; layerCfg.clear(); layerTraysManual = null; layerPlan = null; layerOpenId = null; processListOpen = false;
+    layerBakeSlots = { prebake: null, final: null }; activeLayerBake = null; layerFinalRise = 1; prebakeSheetState = null;
+    document.getElementById('rof-process-collapsed')?.remove();
+    const procLabel = document.querySelector('#rof-process-field .rof-process-head label');
+    if (procLabel) procLabel.hidden = false;
     rofStep = 'setup';
     reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
@@ -8773,6 +10513,8 @@ function renderRecipeOnFireView(main) {
     processField.style.display = 'none';
     processChecksEl.innerHTML = '';
     summaryEl.innerHTML = '';
+    const layoutSlot = document.getElementById('rof-layout-slot');
+    if (layoutSlot) layoutSlot.innerHTML = '';
     traySection.style.display = 'none';
     previewEmptyEl.style.display = '';
     resetGameSession();
@@ -8794,12 +10536,37 @@ function renderRecipeOnFireView(main) {
   // reaches the real recipe.
   function renderProcessSummary() {
     const procs = selectedProcesses();
-    if (procs.length === 0) { summaryEl.innerHTML = ''; combinedWastes = []; return; }
+    if (procs.length === 0) { summaryEl.innerHTML = ''; combinedWastes = []; wireLayoutToggle(); return; }
+    if (layersActive()) { combinedWastes = []; renderLayerSummary(procs); return; }
     // One flat wastage list for the whole combined dough, not one per process -- see
     // combinedWastes' own declaration above for why. Fresh localIds so this copy is independent
     // of each process's own (untouched) proc.wastes, which stays available to reseed from the
     // next time the checked SET changes.
     combinedWastes = procs.flatMap(p => p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })));
+    // Two or more processes mixed into one dough: the same figures as a compact two-column list, so Setup fits
+    // 1280x800 unscrolled (the large per-process lines and a two-line wastage label pushed it to 805 px). The span ids
+    // are the ones refreshComputedNumbers fills, so nothing about the numbers changes; one process keeps the box below.
+    if (procs.length > 1) {
+      summaryEl.innerHTML = `
+        <div class="computed-value-box rof-mix-summary">
+          ${procs.map(p => `<div class="rof-mix-row"><span dir="auto">${escHtml(p.name || '(untitled process)')}</span><span><span id="rof-total-${p.localId}"></span> g</span></div>`).join('')}
+          <div class="rof-mix-foot">
+            <details class="rof-waste-details">
+              <summary title="One dough, one wastage picture: the wastes of every ticked process, applied once to the combined total.">Wastage (combined) <span id="rof-waste-count"></span></summary>
+              <div id="rof-wastes-combined" style="margin-top:6px;"></div>
+              <select class="builder-select" data-rof-add-waste="combined" style="margin-top:6px; max-width:220px; font-size:12px;">
+                <option value="">+ Add Waste…</option>
+              </select>
+            </details>
+            <div class="rof-mix-net"><span class="rof-mix-total" title="Combined total quantity"><span id="rof-combined-total"></span> g →</span> Net <span id="rof-net-combined"></span> g</div>
+          </div>
+        </div>
+      `;
+      wireLayoutToggle();
+      renderWasteRowsFor();
+      refreshComputedNumbers();
+      return;
+    }
     summaryEl.innerHTML = `
       <div class="computed-value-box" style="max-width:640px; margin:4px 0 18px;">
         ${procs.map(p => `
@@ -8816,8 +10583,364 @@ function renderRecipeOnFireView(main) {
         <div><strong>Net Weight:</strong> <span id="rof-net-combined"></span> g</div>
       </div>
     `;
+    wireLayoutToggle();
     renderWasteRowsFor();
     refreshComputedNumbers();
+  }
+
+  // ---- Layered tray: Setup ------------------------------------------------------------------------------
+  function layoutToggleHtml() {
+    const on = doughLayout === 'layers';
+    return `
+      <div class="rof-layout-row">
+        <div class="mode-toggle rof-mini-toggle" id="rof-layout-toggle" role="group" aria-label="How do these processes go into the tray?">
+          <button type="button" class="mode-toggle-btn ${on ? '' : 'active'}" data-rof-layout="mixed" aria-pressed="${!on}" title="Mixed into one dough (e.g. a biga and a final dough)">One dough</button>
+          <button type="button" class="mode-toggle-btn ${on ? 'active' : ''}" data-rof-layout="layers" aria-pressed="${on}" title="Stacked in the tray (e.g. a pastry base with a filling on top)">In layers</button>
+        </div>
+      </div>`;
+  }
+  // Draws the Mixed / In layers choice beside the "Process(es) going into this tray" label (no extra row), only
+  // when two or more processes are ticked.
+  function wireLayoutToggle() {
+    const slot = document.getElementById('rof-layout-slot');
+    if (!slot) return;
+    slot.innerHTML = selectedProcesses().length > 1 ? layoutToggleHtml() : '';
+    slot.querySelectorAll('[data-rof-layout]').forEach(b => b.addEventListener('click', () => {
+      if (doughLayout === b.dataset.rofLayout) return;
+      doughLayout = b.dataset.rofLayout;
+      if (doughLayout === 'layers') { rofMode = 'sheet'; processListOpen = false; } // layers are Sheet & Trim only
+      renderProcessSummary();
+      if (rofStep === 'setup') renderTrayStepPanel();
+    }));
+    syncProcessListCollapse();
+  }
+  // In layers mode the process checklist folds into one line (the layer cards below name every process), so the
+  // stack and its plan fit on screen; "Change" opens it again.
+  function syncProcessListCollapse() {
+    let bar = document.getElementById('rof-process-collapsed');
+    const head = document.querySelector('#rof-process-field .rof-process-head');
+    const label = head?.querySelector('label');
+    const fold = layersActive() && !processListOpen;
+    processChecksEl.hidden = fold;
+    if (label) label.hidden = fold; // the folded line takes the label's place on the head row
+    if (!layersActive()) { bar?.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'rof-process-collapsed';
+      bar.className = 'rof-process-collapsed';
+      head.insertBefore(bar, document.getElementById('rof-layout-slot'));
+    }
+    const n = selectedProcesses().length;
+    bar.innerHTML = fold
+      ? `<span>${n} of ${workingProcesses.length} processes</span><button type="button" class="rof-link-btn" id="rof-process-toggle" aria-expanded="false" aria-controls="rof-process-checks">Change</button>`
+      : `<button type="button" class="rof-link-btn" id="rof-process-toggle" aria-expanded="true" aria-controls="rof-process-checks">Done</button>`;
+    bar.querySelector('#rof-process-toggle').addEventListener('click', () => {
+      processListOpen = !processListOpen;
+      syncProcessListCollapse();
+      document.getElementById('rof-process-toggle')?.focus();
+    });
+  }
+  // The rise estimate reads flour-based doughs; with no flour it falls back to a standard DOUGH rise, which is
+  // wrong for a filling (egg / cheese / vegetables set and puff a little). So a flourless layer uses the
+  // filling estimate from layers.js instead.
+  const riseRowsOf = (p) => p.ingredientRows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit }));
+  function layerRiseModel(p) {
+    const m = window.RofGame.estimateRise(riseRowsOf(p));
+    if (m.identified) return m;
+    return { ...m, hMul: window.RofGame.layers.FILLING_H_MUL, wMul: 1, proofShare: 0.05,
+      notes: ['No flour: a filling -- it sets and puffs a little (about +10%) rather than rising like a dough.'] };
+  }
+  const layerHMul = (p) => layerRiseModel(p).hMul;
+  const hasFlour = (p) => window.RofGame ? window.RofGame.estimateRise(riseRowsOf(p)).identified : true;
+  // Keeps layerOrder / layerCfg in step with the ticked processes: new ones go on top (in recipe order), each
+  // with a fresh session copy of its own wastage and a density default (dough if flour is found, else filling).
+  function syncLayers(procs) {
+    const ids = procs.map(p => String(p.localId));
+    layerOrder = layerOrder.filter(id => ids.includes(id)).concat(ids.filter(id => !layerOrder.includes(id)));
+    const L = window.RofGame?.layers;
+    procs.forEach(p => {
+      const id = String(p.localId);
+      if (layerCfg.has(id)) return;
+      layerCfg.set(id, {
+        density: hasFlour(p) ? (L ? L.DENSITY_DOUGH : 1.05) : (L ? L.DENSITY_FILLING : 1.0),
+        prebake: false, fillKind: 'all', targetCm: '',
+        wastes: p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })),
+        riseScale: 1,          // the pre-bake's rise slider (bottom layer)
+        measuredCm: '',        // her measured height after the pre-bake (bottom layer)
+        measuredForGrams: null, // ...for this many grams per tray; a different amount makes it stale
+      });
+    });
+    return layerOrder.map(id => procs.find(p => String(p.localId) === id));
+  }
+  // The short line a folded layer card shows.
+  function layerSummaryText(p, i) {
+    const c = layerCfg.get(String(p.localId));
+    const qty = `${roundNice(sumIngredientQuantities(p.ingredientRows))} g`;
+    if (i === 0) return `${qty}${c.prebake ? ' · pre-bake' : ''}`;
+    return `${qty} · ${c.fillKind === 'height' ? (parseFloat(c.targetCm) > 0 ? `up to ${parseFloat(c.targetCm)} cm` : 'up to … cm') : 'all of it'}`;
+  }
+  // One card per layer, top first (as they sit in the tray). Folded, a card is one line: its number, name, a short
+  // summary and the move buttons; opened (one at a time), it has the density (est., editable), its own wastage, and
+  // either "Pre-bake alone first" (bottom) or how much goes in (above): all of it, or up to a height.
+  function renderLayerSummary(procs) {
+    const ordered = syncLayers(procs), n = ordered.length;
+    // A layer waiting for a height opens by itself.
+    if (layerOpenId == null) {
+      const waiting = ordered.find((p, i) => { const c = layerCfg.get(String(p.localId)); return i > 0 && c.fillKind === 'height' && !(parseFloat(c.targetCm) > 0); });
+      if (waiting) layerOpenId = String(waiting.localId);
+    }
+    summaryEl.innerHTML = `
+      <div class="rof-layers" role="list" aria-label="Layers, top first, as they sit in the tray">
+        ${ordered.map((p, i) => [p, i]).reverse().map(([p, i]) => {
+          const id = String(p.localId), c = layerCfg.get(id), open = layerOpenId === id;
+          const name = escHtml(p.name || '(untitled process)');
+          return `
+          <div class="rof-layer ${open ? 'open' : ''}" role="listitem" data-layer="${id}">
+            <div class="rof-layer-head">
+              <button type="button" class="rof-layer-toggle" data-layer-toggle aria-expanded="${open}" aria-controls="rof-layer-body-${id}">
+                <span class="rof-layer-num" aria-hidden="true">${i + 1}</span>
+                <span class="rof-layer-name" dir="auto" title="${name}">${name}</span>
+                <span class="rof-layer-sum">${escHtml(layerSummaryText(p, i))}</span>
+                ${i === 0 ? '<span class="rof-sr-only">, bottom layer</span>' : ''}
+              </button>
+              <button type="button" class="icon-btn" data-layer-move="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${name} down" title="Move down">↓</button>
+              <button type="button" class="icon-btn" data-layer-move="1" ${i === n - 1 ? 'disabled' : ''} aria-label="Move ${name} up" title="Move up">↑</button>
+            </div>
+            <div class="rof-layer-line" id="rof-layer-body-${id}" ${open ? '' : 'hidden'}>
+              <label class="rof-layer-density">Density <input type="number" min="0.1" max="3" step="0.01" value="${c.density}" data-layer-density aria-label="Density of ${name}, g per cm³" /> g/cm³ <span class="rof-layer-est">est.</span></label>
+              ${i === 0
+                ? `<label class="rof-layer-check"><input type="checkbox" data-layer-prebake ${c.prebake ? 'checked' : ''} /> Pre-bake alone first</label>`
+                : `<span class="rof-layer-fill">
+                     <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
+                       <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? '' : 'active'}" data-layer-fill="all" aria-pressed="${c.fillKind !== 'height'}">All of it</button>
+                       <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? 'active' : ''}" data-layer-fill="height" aria-pressed="${c.fillKind === 'height'}">Up to a height</button>
+                     </span>
+                     ${c.fillKind === 'height' ? `<input type="number" min="0.1" step="0.1" value="${c.targetCm}" data-layer-target class="rof-layer-target" aria-label="Height from the tray floor, cm" placeholder="cm" /> cm` : ''}
+                   </span>`}
+              <details class="rof-waste-details rof-layer-wastes">
+                <summary>Wastage (${c.wastes.length || 'none'})</summary>
+                <div data-layer-waste-rows></div>
+                <select class="builder-select" data-layer-add-waste style="margin-top:6px; max-width:220px; font-size:12px;"><option value="">+ Add Waste…</option></select>
+              </details>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`;
+    wireLayoutToggle();
+    summaryEl.querySelectorAll('.rof-layer').forEach(card => {
+      const id = card.dataset.layer, c = layerCfg.get(id);
+      const refreshSum = () => {
+        const i = layerOrder.indexOf(id), p = selectedProcesses().find(x => String(x.localId) === id);
+        const el = card.querySelector('.rof-layer-sum');
+        if (el && p) el.textContent = layerSummaryText(p, i);
+      };
+      card.querySelector('[data-layer-toggle]').addEventListener('click', () => {
+        layerOpenId = layerOpenId === id ? '' : id; // '' = all folded on purpose (null would re-open a waiting layer)
+        renderLayerSummary(selectedProcesses());
+        summaryEl.querySelector(`[data-layer="${id}"] [data-layer-toggle]`)?.focus();
+      });
+      card.querySelectorAll('[data-layer-move]').forEach(b => b.addEventListener('click', () => {
+        const i = layerOrder.indexOf(id), j = i + Number(b.dataset.layerMove);
+        if (j < 0 || j >= layerOrder.length) return;
+        [layerOrder[i], layerOrder[j]] = [layerOrder[j], layerOrder[i]];
+        renderLayerSummary(selectedProcesses());
+        const same = summaryEl.querySelector(`[data-layer="${id}"] [data-layer-move="${b.dataset.layerMove}"]`);
+        (same && !same.disabled ? same : summaryEl.querySelector(`[data-layer="${id}"] [data-layer-move="${-Number(b.dataset.layerMove)}"]`))?.focus();
+      }));
+      card.querySelector('[data-layer-density]').addEventListener('input', (e) => { c.density = e.target.value; updateLayerPlan(); });
+      card.querySelector('[data-layer-prebake]')?.addEventListener('change', (e) => { c.prebake = e.target.checked; refreshSum(); renderStepHeader(); updateLayerPlan(); });
+      card.querySelectorAll('[data-layer-fill]').forEach(b => b.addEventListener('click', () => {
+        if (c.fillKind === b.dataset.layerFill) return;
+        c.fillKind = b.dataset.layerFill;
+        renderLayerSummary(selectedProcesses());
+        summaryEl.querySelector(`[data-layer="${id}"] ${c.fillKind === 'height' ? '[data-layer-target]' : `[data-layer-fill="all"]`}`)?.focus();
+      }));
+      card.querySelector('[data-layer-target]')?.addEventListener('input', (e) => { c.targetCm = e.target.value; refreshSum(); updateLayerPlan(); });
+      renderLayerWasteRows(card, c);
+    });
+    updateSetupPreview();
+  }
+  // A layer's own wastage rows: edit the %, remove, or add one from the catalog -- session-only, like the
+  // mixed dough's (renderWasteRowsFor); the recipe itself is never changed.
+  function renderLayerWasteRows(card, c) {
+    const rowsEl = card.querySelector('[data-layer-waste-rows]');
+    const summary = card.querySelector('.rof-layer-wastes summary');
+    if (summary) summary.textContent = `Wastage (${c.wastes.length || 'none'})`;
+    rowsEl.innerHTML = c.wastes.length
+      ? c.wastes.map(w => `
+        <div class="rof-waste-row">
+          <span class="rof-waste-name">${escHtml(w.name || 'Waste')}</span>
+          <input type="number" min="0" max="100" step="0.1" value="${w.percent ?? 0}" class="process-waste-percent" data-lw-input="${w.localId}" aria-label="${escHtml(w.name || 'Waste')} %" />
+          <button type="button" class="icon-btn danger" data-lw-remove="${w.localId}" title="Remove for this tray session only">✕</button>
+          <span class="rof-waste-note">${w.originalPercent != null ? `% (recipe default: ${w.originalPercent}%)` : '% (added this session)'}</span>
+        </div>`).join('')
+      : '<div style="font-size:12px; color:var(--neutral);">None applied.</div>';
+    rowsEl.querySelectorAll('[data-lw-input]').forEach(input => input.addEventListener('input', () => {
+      const w = c.wastes.find(x => x.localId === Number(input.dataset.lwInput));
+      if (w) w.percent = input.value;
+      updateLayerPlan();
+    }));
+    rowsEl.querySelectorAll('[data-lw-remove]').forEach(btn => btn.addEventListener('click', () => {
+      c.wastes = c.wastes.filter(x => x.localId !== Number(btn.dataset.lwRemove));
+      renderLayerWasteRows(card, c);
+      updateLayerPlan();
+    }));
+    const sel = card.querySelector('[data-layer-add-waste]');
+    wasteTypesPromise.then((types) => {
+      if (!sel.isConnected) return;
+      sel.innerHTML = '<option value="">+ Add Waste…</option>' + types.filter(t => !c.wastes.some(w => w.wasteTypeId === t.id))
+        .map(t => `<option value="${t.id}">${escHtml(t.name)} (${t.default_percent}%)</option>`).join('');
+      sel.onchange = () => {
+        const t = types.find(x => String(x.id) === sel.value);
+        sel.value = '';
+        if (!t) return;
+        c.wastes.push({ localId: ++_recipeRowLocalIdCounter, wasteTypeId: t.id, name: t.name, percent: t.default_percent });
+        renderLayerWasteRows(card, c);
+        updateLayerPlan();
+      };
+    });
+  }
+
+  // The layer plan for the current choices and tray (layers.js planLayers), with what the screens around it need:
+  // the ordered processes and where the tray count came from. Null without a (sheet) tray. A measured pre-bake
+  // height counts only for the amount of base it was measured on.
+  function computeLayerPlan() {
+    const material = bakeSnapshot?.material, fp = bakeSnapshot?.footprint;
+    if (!layersActive() || !material || !fp || material.shape_type === 'muffin_tray') return null;
+    const procs = syncLayers(selectedProcesses());
+    const L = window.RofGame.layers;
+    const base = procs[0], baseCfg = layerCfg.get(String(base.localId));
+    const baseFillWeight = base.materialId != null && String(base.materialId) === String(material.id) ? Number(base.materialFillWeightGrams) || null : null;
+    const baseFillElsewhere = !baseFillWeight && base.materialId != null && Number(base.materialFillWeightGrams) > 0;
+    const run = (measured) => L.planLayers({
+      tray: { areaCm2: fp.areaCm2, usableHeightCm: fp.usableHeightCm },
+      trays: { fillWeightGrams: baseFillWeight, manualCount: layerTraysManual },
+      layers: procs.map((p, i) => {
+        const c = layerCfg.get(String(p.localId));
+        return {
+          key: String(p.localId), name: p.name || '(untitled process)',
+          totalGrams: sumIngredientQuantities(p.ingredientRows), wastes: c.wastes, density: parseFloat(c.density),
+          prebake: i === 0 && c.prebake,
+          measuredHeightCm: i === 0 ? measured : null,
+          fill: i === 0 || c.fillKind !== 'height' ? { kind: 'all' } : { kind: 'height', targetCm: parseFloat(c.targetCm) },
+          // The pre-bake's own correction for a pre-baked base; the final bake's for everything that rises in it.
+          hMul: layerHMul(p) * (i === 0 && c.prebake ? (Number(c.riseScale) || 1) : layerFinalRise),
+        };
+      }),
+    });
+    let plan = run(null);
+    const measured = parseFloat(baseCfg.measuredCm);
+    const baseRaw = plan.layers[0]?.rawPerTray;
+    const measuredStale = measured > 0 && baseCfg.measuredForGrams != null && baseRaw != null && Math.abs(baseRaw - baseCfg.measuredForGrams) > 0.5;
+    if (measured > 0 && !measuredStale) plan = run(measured);
+    return { plan, procs, base, baseCfg, baseFillWeight, baseFillElsewhere, measuredStale };
+  }
+
+  // The plan under the tray picker: trays in the batch, then per layer what goes in each tray and to what
+  // height, what's left unused (or short), the assembled height and the estimated height after baking.
+  function updateLayerPlan() {
+    const el = document.getElementById('rof-fill-summary');
+    if (!el || !layersActive()) return;
+    const material = bakeSnapshot?.material;
+    if (!material || !bakeSnapshot?.footprint) { el.innerHTML = ''; layerPlan = null; syncLayerContinue(); return; }
+    if (material.shape_type === 'muffin_tray') {
+      layerPlan = null;
+      el.innerHTML = '<div class="computed-value-box rof-layer-plan"><div class="rof-leftover">Layers need a sheet tray -- a muffin tray has a portion per cup already.</div></div>';
+      syncLayerContinue();
+      return;
+    }
+    const r = computeLayerPlan();
+    layerPlan = r.plan;
+    const L = window.RofGame.layers, P = window.RofGame.portions;
+    const plan = r.plan, g = (v) => `${P.fmtGrams(v)} g`, cm = (v) => `${Math.round(v * 100) / 100} cm`;
+    if (!el.querySelector('#rof-layer-trays')) {
+      el.innerHTML = `
+        <div class="computed-value-box rof-layer-plan">
+          <div class="rof-layer-trays"><label for="rof-layer-trays">Trays</label>
+            <input id="rof-layer-trays" type="number" min="1" step="1" />
+            <span id="rof-layer-trays-src"></span></div>
+          <div id="rof-layer-plan-body" role="status" aria-live="polite"></div>
+        </div>`;
+      el.querySelector('#rof-layer-trays').addEventListener('input', (e) => {
+        const v = Math.floor(Number(e.target.value));
+        layerTraysManual = v >= 1 ? v : null;
+        updateLayerPlan();
+      });
+    }
+    const traysIn = el.querySelector('#rof-layer-trays');
+    if (document.activeElement !== traysIn) traysIn.value = plan.trays || '';
+    const auto = L.trayCount({ baseRawGrams: plan.layers[0]?.availableRawTotal || 0, fillWeightGrams: r.baseFillWeight });
+    const src = el.querySelector('#rof-layer-trays-src');
+    src.textContent = plan.traySource === 'manual' ? 'your count'
+      : plan.traySource === 'fillWeight' ? `from Fill Weight (${g(r.baseFillWeight)})`
+      : r.baseFillElsewhere ? 'Fill Weight is for another tray' : 'no Fill Weight saved';
+    src.title = plan.traySource === 'manual'
+      ? (auto.source === 'fillWeight' ? `The bottom layer's Fill Weight gives ${auto.count}. Clear the box to use it.` : 'Clear the box to go back to 1.')
+      : plan.traySource === 'fillWeight' ? `${g(plan.layers[0].availableRawTotal)} of ${escHtml(r.base.name || 'the bottom layer')} at ${g(r.baseFillWeight)} per tray, split evenly.`
+      : 'Type how many trays this batch fills.';
+    const body = el.querySelector('#rof-layer-plan-body');
+    if (!plan.ok) {
+      body.innerHTML = plan.errors.map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('');
+      syncLayerContinue();
+      return;
+    }
+    // One line per layer, top first like the cards: name | raw grams per tray | where it sits. Then the whole tray.
+    body.innerHTML = `
+      <div class="rof-plan-grid" role="table" aria-label="Each layer per tray: raw grams and the height it sits at">
+        ${[...plan.layers].reverse().map(row => `
+          <div class="rof-plan-r" role="row"><span role="cell" class="rof-plan-name" dir="auto" title="${escHtml(row.name)}">${escHtml(row.name)}</span>
+            <span role="cell">${g(row.rawPerTray)}</span>
+            <span role="cell" title="${row.prebake ? `${cmFmt(row.rawHeightCm)} raw before the pre-bake` : ''}">${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}${row.prebake ? (row.measured ? ' measured' : ' <span class="rof-layer-est">est.</span>') : ''}</span></div>`).join('')}
+        <div class="rof-plan-r rof-plan-t" role="row"><span role="cell">Per tray (raw)</span><span role="cell" title="${g(plan.finishedPerTrayGrams)} after Baking Waste">${g(plan.rawPerTrayGrams)}</span>
+          <span role="cell">${cm(plan.assembledHeightCm)} <span class="rof-layer-est" title="Estimated height after the final bake">(≈${cm(plan.finalHeightEstCm)} baked)</span></span></div>
+      </div>
+      ${plan.layers.map(row => layerUseHtml(row, plan.trays, { compact: true })).join('')}
+      ${r.measuredStale ? '<div class="rof-leftover rof-layer-note">The measured pre-bake height was for a different amount of base -- using the estimate.</div>' : ''}
+      ${plan.warnings.filter(w => !/short by/.test(w)).map(w => `<div class="rof-leftover rof-layer-note">${escHtml(w)}</div>`).join('')}`;
+    syncLayerContinue();
+  }
+  const cmFmt = (v) => `${Math.round(v * 100) / 100} cm`;
+  // A layer's height in the plan: a pre-baked base shows its raw and pre-baked heights; the rest, where they sit.
+  function layerHeightText(row) {
+    return row.prebake
+      ? `${cmFmt(row.rawHeightCm)} raw, pre-baked to ${cmFmt(row.assemblyHeightCm)} ${row.measured ? '(measured)' : '<span class="rof-layer-est">est.</span>'}`
+      : `${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}`;
+  }
+  // For a layer filled up to a height: what's not used, or how short it is (and how far it does reach).
+  // `compact` (Setup's plan): a short filling in one line, the full sentence on hover -- the Fill step, where she sets
+  // the height, says it in full. Keeps Setup inside 1280x800.
+  function layerUseHtml(row, n, { compact = false } = {}) {
+    if (!(row.fill.kind === 'height' && row.index > 0)) return '';
+    const g = (v) => `${window.RofGame.portions.fmtGrams(v)} g`;
+    if (row.shortTotal > 0 && compact) {
+      const full = `Short by ${g(row.shortTotal)}: the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed. ${n === 1
+        ? `All of it reaches ${cmFmt(row.heightIfAllUsedCm)}.`
+        : `It fills ${row.fullTraysAtTarget} of ${n} trays to ${cmFmt(row.targetCm)}, or all ${n} to ${cmFmt(row.heightIfAllUsedCm)}.`}`;
+      return `<div class="rof-leftover rof-layer-note rof-layer-note-1" title="${escHtml(full)}">Short by ${g(row.shortTotal)} &middot; ${n === 1
+        ? `all of it reaches ${cmFmt(row.heightIfAllUsedCm)}`
+        : `${row.fullTraysAtTarget}/${n} trays full, or all at ${cmFmt(row.heightIfAllUsedCm)}`}</div>`;
+    }
+    if (row.shortTotal > 0) {
+      return `<div class="rof-leftover rof-layer-note">Short by ${g(row.shortTotal)}: the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed. ${n === 1
+        ? `All of it reaches ${cmFmt(row.heightIfAllUsedCm)}.`
+        : `It fills ${row.fullTraysAtTarget} of ${n} trays to ${cmFmt(row.targetCm)}, or all ${n} to ${cmFmt(row.heightIfAllUsedCm)}.`}</div>`;
+    }
+    if (row.notUsedTotal > 0) {
+      // Named only when more than one layer is filled to a height (else the plan's one such layer is clear).
+      const named = (layerPlan?.layers || []).filter(x => x.fill.kind === 'height' && x.index > 0).length > 1;
+      return `<div class="rof-layer-note">${named ? `<span dir="auto">${escHtml(row.name)}</span> not used` : 'Not used'}: <strong>${g(row.notUsedTotal)}</strong> of ${g(row.availableRawTotal)} <span class="rof-layer-est">· all of it: ${cmFmt(row.heightIfAllUsedCm)}</span></div>`;
+    }
+    return '';
+  }
+  // Continue in layers mode: to the Pre-bake when the bottom layer is pre-baked, else straight to Fill.
+  function syncLayerContinue() {
+    const btn = document.getElementById('rof-continue-btn');
+    if (!btn || !layersActive()) return;
+    const bottom = layerOrder[0] && layerCfg.get(layerOrder[0]);
+    const ok = !!(layerPlan && layerPlan.ok);
+    btn.disabled = !ok;
+    btn.textContent = bottom?.prebake ? 'Pre-bake →' : 'Fill →';
+    btn.title = ok ? '' : 'Fix the plan first.';
   }
 
   // Rebuilds the combined waste rows -- called on structural change only (initial summary render,
@@ -8954,8 +11077,12 @@ function renderRecipeOnFireView(main) {
 
     const netWeight = compoundWasteYield(combinedTotalQuantity(procs), combinedWastes);
     bakeSnapshot = { material, dims, footprint, netWeight };
-    fillSummaryEl.innerHTML = ''; // Net Weight is already shown in the summary above
-    if (continueBtn) continueBtn.disabled = false;
+    if (layersActive()) {
+      updateLayerPlan(); // the layer plan fills #rof-fill-summary; Continue waits (see syncLayerContinue)
+    } else {
+      fillSummaryEl.innerHTML = ''; // Net Weight is already shown in the summary above
+      if (continueBtn) { continueBtn.disabled = false; continueBtn.title = ''; }
+    }
     // A muffin tray has a portion per cup already, so there is no sheet to trim.
     const sheetBtn = document.querySelector('#rof-mode-toggle [data-rof-mode="sheet"]');
     if (sheetBtn) {
@@ -8984,6 +11111,7 @@ function renderRecipeOnFireView(main) {
     materialSelect.innerHTML = [
       `<option value="">— Select a tray —</option>`,
       ...trayMaterials.map(m => `<option value="${m.id}">${m.code} — ${m.name} (${formatMaterialDimensions(m)})</option>`),
+      `<option value="${NEW_MATERIAL}">+ Create new tray…</option>`,
     ].join('');
     // Restore the chef's own last pick for this session (surviving a checkbox toggle or an
     // "<- Edit Setup" round-trip) before falling back to a linked process's own tray/pan (its own
@@ -9011,7 +11139,14 @@ function renderRecipeOnFireView(main) {
     { key: 'place', label: '2. Shape & Place' },
     { key: 'bake', label: '3. Bake' },
   ];
-  const rofStepLabels = () => (rofMode === 'shape' ? ROF_STEP_LABELS_SHAPE : ROF_STEP_LABELS_SHEET);
+  // Layers (Sheet & Trim): Setup -> Pre-bake (when the bottom layer is pre-baked) -> Fill -> Bake -> Trim.
+  function layerStepLabels() {
+    const bottom = layerOrder[0] && layerCfg.get(layerOrder[0]);
+    const keys = ['setup', ...(bottom?.prebake ? ['prebake'] : []), 'fill', 'bake', 'trim'];
+    const NAME = { setup: 'Setup', prebake: 'Pre-bake', fill: 'Fill', bake: 'Bake', trim: 'Trim' };
+    return keys.map((key, i) => ({ key, label: `${i + 1}. ${NAME[key]}` }));
+  }
+  const rofStepLabels = () => (rofMode === 'shape' ? ROF_STEP_LABELS_SHAPE : layersActive() ? layerStepLabels() : ROF_STEP_LABELS_SHEET);
 
   function renderStepHeader() {
     const stepsEl = document.getElementById('rof-steps');
@@ -9048,6 +11183,7 @@ function renderRecipeOnFireView(main) {
       renderTrayStepPanel();
       return;
     }
+    if (target === 'bake' && layersActive() && rofStep !== 'trim') { startLayerBakeFlow(); return; } // forward from 'fill' -- same as "Bake ->"
     if (target === 'bake') {
       if (rofStep === 'trim') { // backward, Sheet & Trim -- same as "<- Back to Bake"
         rofGame.disarmCutter(); rofGame.clearCutters();
@@ -9058,7 +11194,9 @@ function renderRecipeOnFireView(main) {
       enterBakeStep(); // forward from 'place', Shape & Place -- same as "Bake ->"
       return;
     }
-    if (target === 'trim') { goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
+    if (target === 'prebake') { backToPrebake(); return; }                   // backward from 'fill' -- same as "<- Pre-bake"
+    if (target === 'fill') { if (rofStep === 'bake') backToFill(); else startFillFlow({ fromPrebake: true }); return; } // "<- Fill" / "Fill ->"
+    if (target === 'trim') { if (layersActive() && !prepareLayerTrim()) return; goToRofStep('trim'); renderTrayStepPanel(); } // forward from 'bake' -- same as "Trim ->"
   }
 
   function renderTrayStepPanel() {
@@ -9070,8 +11208,10 @@ function renderRecipeOnFireView(main) {
     panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', stepLabel.replace(/^\d+\.\s*/, ''));
     if (rofStep === 'setup') renderSetupPanel(panel);
     else if (rofStep === 'place') renderPlaceStepPanel(panel);
-    else if (rofStep === 'bake') renderBakeStepPanel(panel);
+    else if (rofStep === 'bake' || rofStep === 'prebake') renderBakeStepPanel(panel);
+    else if (rofStep === 'fill') renderFillStepPanel(panel);
     else if (rofStep === 'trim') renderTrimStepPanel(panel);
+    if (rofStep !== 'fill' && !(rofStep === 'bake' && layersActive())) showLayerStack(null); // the layers' cross-section: Fill and the stack's bake
     syncPreviewMode();
     syncRecipeBlock();
   }
@@ -9080,7 +11220,7 @@ function renderRecipeOnFireView(main) {
     panel.innerHTML = `
       <div class="generate-controls" style="margin-bottom:12px;">
         <div class="field" style="max-width:none;">
-          <label>Tray / Pan</label>
+          <label for="rof-material-select" id="rof-material-label">Tray / Pan</label>
           <select id="rof-material-select" class="builder-select">
             <option value="">— Select a tray —</option>
           </select>
@@ -9098,10 +11238,20 @@ function renderRecipeOnFireView(main) {
       <button type="button" class="primary" id="rof-continue-btn" style="margin-top:4px;" disabled>Continue →</button>
     `;
     const hintEl = document.getElementById('rof-mode-hint');
+    const layered = layersActive();
+    if (layered) {
+      // Layers are Sheet & Trim only (for now): the method has one answer, and the step pills already read
+      // Pre-bake / Fill / Bake / Trim, so the Method field steps aside.
+      rofMode = 'sheet';
+      document.getElementById('rof-mode-toggle').closest('.field').hidden = true;
+      // ...and the tray picker's label is read out but not shown ("— Select a tray —" says what it is), so the stack
+      // and its plan fit beside the stage.
+      document.getElementById('rof-material-label').classList.add('rof-sr-only');
+    }
     const showModeHint = () => {
       hintEl.textContent = rofMode === 'shape'
-        ? 'Pieces placed by hand, baked as placed.'
-        : 'One sheet, baked whole, then cut into portions.';
+          ? 'Pieces placed by hand, baked as placed.'
+          : 'One sheet, baked whole, then cut into portions.';
     };
     showModeHint();
     panel.querySelectorAll('[data-rof-mode]').forEach(btn => btn.addEventListener('click', () => {
@@ -9110,12 +11260,30 @@ function renderRecipeOnFireView(main) {
       showModeHint();
       renderStepHeader();
     }));
-    document.getElementById('rof-material-select').addEventListener('change', () => {
-      lastMaterialId = document.getElementById('rof-material-select').value || null;
+    document.getElementById('rof-material-select').addEventListener('change', (e) => {
+      if (e.target.value === NEW_MATERIAL) { createTrayInline(e.target); return; }
+      lastMaterialId = e.target.value || null;
       updateSetupPreview();
     });
-    document.getElementById('rof-continue-btn').addEventListener('click', () => (rofMode === 'shape' ? startPlacementFlow() : startSheetFlow()));
+    document.getElementById('rof-continue-btn').addEventListener('click', () => {
+      if (rofMode === 'shape') startPlacementFlow();
+      else if (!layered) startSheetFlow();
+      else if (layerCfg.get(layerOrder[0])?.prebake) startPrebakeFlow();
+      else startFillFlow({ fromPrebake: false });
+    });
+    reloadMaterials();
     populateMaterialSelect();
+  }
+
+  // "+ Create new tray…": the dropdown goes back to what it showed (the option never stays picked), the
+  // Materials dialog opens with Category fixed to Tray / Pan, and a saved tray becomes the chosen one.
+  async function createTrayInline(select) {
+    select.value = lastMaterialId && trayMaterials.some(m => String(m.id) === String(lastMaterialId)) ? String(lastMaterialId) : '';
+    const res = await openMaterialCreateModal({ category: 'tray_pan' });
+    if (!res) return;
+    if (res.materials) materialsPromise = Promise.resolve(res.materials); else reloadMaterials();
+    lastMaterialId = String(res.id);
+    await populateMaterialSelect(); // selects lastMaterialId and redraws the tray preview
   }
 
   // Back to Setup from anywhere in a session (drops the pieces / sheet / cutters, keeps the tray).
@@ -9142,9 +11310,11 @@ function renderRecipeOnFireView(main) {
     const procs = selectedProcesses();
     const detail = inSetup || !bakeSnapshot
       ? RECIPE_SOURCE_LABELS[source]
-      : `${procs.map(p => p.name || '(untitled process)').join(' + ')} &middot; Net ${roundNice(bakeSnapshot.netWeight)} g`;
+      : layersActive()
+        ? `In layers: ${layerOrder.map(id => procs.find(p => String(p.localId) === id)).filter(Boolean).map(p => escHtml(p.name || '(untitled process)')).join(', then ')}`
+        : `${procs.map(p => p.name || '(untitled process)').join(' + ')} &middot; Net ${roundNice(bakeSnapshot.netWeight)} g`;
     recipeCompactEl.innerHTML = `
-      <div class="rof-compact-text"><strong>${selectedRecipe.name}</strong><span>${detail}</span></div>
+      <div class="rof-compact-text"><strong>${selectedRecipe.name}</strong><span class="rof-compact-detail" title="${escHtml(detail.replace(/<[^>]+>/g, '').replace(/&middot;/g, '·').replace(/&amp;/g, '&'))}">${detail}</span></div>
       <button type="button" class="secondary" id="rof-compact-change">Change</button>`;
     document.getElementById('rof-compact-change').addEventListener('click', () => {
       recipeEditing = true;
@@ -9408,9 +11578,9 @@ function renderRecipeOnFireView(main) {
   // ---- Oven temperature and bake time (session-only; printed on the PDF) ------------------------------
   const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const methodTextOfSelected = () => selectedProcesses().map(p => collectTextListFieldValue(p, makeProcessMethodCfg(p))).filter(Boolean).join('\n');
-  function prefillBakeParams() {
+  function prefillBakeParams(methodText = methodTextOfSelected()) {
     if (bakeParams.touched) return; // the chef's own entry is never overwritten
-    const r = window.RofGame.parseBakeParams(methodTextOfSelected());
+    const r = window.RofGame.parseBakeParams(methodText);
     bakeParams = {
       temp: r.temp ? r.temp.value : '', unit: r.temp ? r.temp.unit : 'C', time: r.time ? r.time.value : '',
       source: r.temp || r.time ? 'method' : '', confirmed: !(r.temp || r.time), snippet: r.snippet || '', touched: false,
@@ -9477,13 +11647,22 @@ function renderRecipeOnFireView(main) {
     bakeState = 'baking';
     renderTrayStepPanel();
     playIgniteSound();
-    bakeCtl = rofGame.playBake({ doneness: bakeDoneness, model: effectiveRiseModel(), onProgress: updateBakeProgress });
+    let layered = null;
+    if (rofStep === 'bake' && layersActive()) {
+      const r = computeLayerPlan();
+      layered = r && {
+        baseFixed: !!r.baseCfg.prebake,
+        fills: r.procs.slice(1).map(p => ({ key: String(p.localId), hMul: layerHMul(p) * riseScale, brownSpeed: layerRiseModel(p).brownSpeed })),
+      };
+    }
+    bakeCtl = rofGame.playBake({ doneness: bakeDoneness, model: effectiveRiseModel(), onProgress: updateBakeProgress, layered });
     await bakeCtl.promise;
     bakeCtl = null;
     bakeState = 'done';
     lastAnnouncedPhase = null;
     rofGame.announce('Baked.');
-    if (rofStep === 'bake') renderTrayStepPanel();
+    if (rofStep === 'prebake') onPrebakeDone();
+    if (rofStep === 'bake' || rofStep === 'prebake') renderTrayStepPanel();
   }
   const BAKE_PHASE_LABEL = { proof: 'Proofing', oven: 'In the oven', out: 'Coming out' };
   let lastAnnouncedPhase = null;
@@ -9505,6 +11684,12 @@ function renderRecipeOnFireView(main) {
   // raw dough it started from is that weight put back through the Baking Waste: portion / (1 - baking %). Every waste row named
   // like "baking" counts (they combine, each taking its % off what is left); a recipe without one has no baking loss to add back.
   function bakingLoss() {
+    // A layered tray: each layer's own Baking Waste is already in the stack's baked grams; the stack as a whole went
+    // in at rawGrams and came out at sessionGrams.
+    if (sheetInfo?.layered) {
+      const retention = sheetInfo.rawGrams > 0 ? sheetInfo.sessionGrams / sheetInfo.rawGrams : 1;
+      return { found: retention < 0.9999, retention, usable: retention > 0.001, layered: true };
+    }
     const rows = combinedWastes.filter(w => /baking/i.test(w.name || ''));
     if (rows.length === 0) return { found: false };
     const retention = rows.reduce((acc, w) => acc * (1 - Math.min(Math.max(parseFloat(w.percent) || 0, 0), 100) / 100), 1);
@@ -9516,7 +11701,7 @@ function renderRecipeOnFireView(main) {
     return [
       { key: 'weight', label: 'Portion weight (finished)', value: `${P.fmtGrams(finishedGrams)} g` },
       b.found && b.usable
-        ? { key: 'raw', label: 'Raw dough before baking', value: `${P.fmtGrams(finishedGrams / b.retention)} g`, est: true }
+        ? { key: 'raw', label: b.layered ? 'Raw before baking (all layers)' : 'Raw dough before baking', value: `${P.fmtGrams(finishedGrams / b.retention)} g`, est: true }
         : { key: 'raw', label: 'Before baking', value: 'no Baking Waste' },
     ];
   }
@@ -9544,6 +11729,11 @@ function renderRecipeOnFireView(main) {
       speech: `One portion, ${name}. ${P.fmtGrams(grams)} grams finished. About ${cmSpeech(m.lengthCm)} ${m.round ? 'across' : 'long'}${m.round ? '' : `, ${cmSpeech(m.widthCm)} wide`}, ${cmSpeech(m.heightCm)} tall, estimated.`,
     };
   }
+  // What a group of cut pieces is called: the cutter's catalog name, or "Knife cut" for a knife grid.
+  const cutName = (key) => (String(key) === 'knife' ? 'Knife cut' : (cutterMaterials.find(c => String(c.id) === String(key)) || {}).name || 'Cutter');
+  // Whether the cut is final enough for One portion / Export PDF: any cutter placed, or a knife grid that was Cut.
+  const cutsReady = () => cutterList.length > 0 && (trimMode !== 'knife' || !!knifeSpec?.cut);
+  const notReadyText = () => (trimMode === 'knife' ? 'Cut the tray first' : 'Place a cutter first');
   function cutGroups() {
     const groups = new Map();
     for (const c of cutterList) {
@@ -9552,25 +11742,45 @@ function renderRecipeOnFireView(main) {
     }
     return [...groups.values()];
   }
+  // One piece cut by a cutter of this shape from the current sheet: its measured sizes and finished grams
+  // (its share of the tray's area, of the grams in this tray -- the sheet is uniform). Used by the portion
+  // view and by the Trim panel's readout for the chosen cutter, before any is placed.
+  function cutPortionFor(shapeType, dims) {
+    const model = effectiveRiseModel(), fp = bakeSnapshot.footprint;
+    // A layered tray: the piece is the whole stack -- its assembled height rising to the estimated baked height (the
+    // `hMul` that does exactly that), drawn as one slab per layer; its grams are its share of the stack's baked grams.
+    const lay = !!sheetInfo.layered;
+    const thicknessCm = lay ? sheetInfo.thicknessCm : sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+    const desc = { kind: 'cut', shapeType, dims, thicknessCm, hMul: lay ? sheetInfo.stackHMul : model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
+    if (lay) desc.layers = sheetInfo.layers.map(l => ({ heightCm: l.finalH, kind: l.kind, color: l.color, topColor: l.topColor }));
+    const m = window.RofGame.measurePortion(desc);
+    return { desc, m, grams: (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams };
+  }
   function portionDescSheet(key) {
     if (!bakeSnapshot || !sheetInfo || !rofGame || cutterList.length === 0) return null;
     const groups = cutGroups();
     const g = groups.find(x => x.key === String(key)) || groups.find(x => x.key === String(lastCutterId)) || groups.sort((a, b) => b.n - a.n)[0];
-    const model = effectiveRiseModel(), P = window.RofGame.portions, fp = bakeSnapshot.footprint;
-    const thicknessCm = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
-    const desc = { kind: 'cut', shapeType: g.data.shapeType, dims: g.data.dims, thicknessCm, hMul: model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
-    const m = window.RofGame.measurePortion(desc);
-    const grams = (m.areaCm2 / fp.areaCm2) * sheetInfo.sessionGrams;
-    const mat = cutterMaterials.find(x => String(x.id) === g.key);
+    const P = window.RofGame.portions;
+    const { desc, m, grams } = cutPortionFor(g.data.shapeType, g.data.dims);
     const rows = portionWeightRows(grams);
     if (g.data.shapeType === 'round') rows.push({ label: 'Diameter', value: cmText(m.diameterCm) });
     else if (g.data.shapeType === 'rectangular') rows.push({ label: 'Length', value: cmText(m.lengthCm) }, { label: 'Width', value: cmText(m.widthCm) });
     else rows.push({ label: 'Base', value: cmText(m.baseCm) }, { label: 'Height', value: cmText(m.triHeightCm) });
-    rows.push({ label: 'Thickness', value: cmText(m.heightCm, true), est: true });
-    rows.push({ label: 'Before rising', value: `${Math.round(m.rawHeightCm * 100) / 10} mm` });
+    if (sheetInfo.layered) {
+      // Each layer's height (estimated after the bake), the whole piece, and the stack as it was assembled.
+      // A pre-baked base she measured is exact (it doesn't rise again); every other layer's height is an estimate.
+      sheetInfo.layers.forEach(l => rows.push(l.prebake && l.measured
+        ? { label: l.name, value: cmText(l.finalH), note: 'measured' }
+        : { label: l.name, value: cmText(l.finalH, true), est: true }));
+      rows.push({ label: 'Total height', value: cmText(m.heightCm, true), est: true });
+      rows.push({ label: 'Assembled', value: cmText(m.rawHeightCm) });
+    } else {
+      rows.push({ label: 'Thickness', value: cmText(m.heightCm, true), est: true });
+      rows.push({ label: 'Before rising', value: `${Math.round(m.rawHeightCm * 100) / 10} mm` });
+    }
     rows.push({ label: 'Area', value: `${roundNice(m.areaCm2)} cm²` });
-    const choices = groups.length > 1 ? groups.map(x => ({ key: x.key, label: (cutterMaterials.find(c => String(c.id) === x.key) || {}).name || 'Cutter' })) : null;
-    const name = mat ? mat.name : 'Cut piece';
+    const choices = groups.length > 1 ? groups.map(x => ({ key: x.key, label: cutName(x.key) })) : null;
+    const name = cutName(g.key);
     return {
       ...desc, measures: m, weightGrams: grams, title: 'One portion', subtitle: `${name} · ${doneLabelOf(bakeDoneness)}`, rows,
       tray: trayCard(`${g.n} of ${cutterList.length} pieces cut`),
@@ -9614,7 +11824,8 @@ function renderRecipeOnFireView(main) {
     const pctOf = (w) => { const v = parseFloat(w.percent); return isNaN(v) ? 0 : v; };
     const fmtPct = (v) => `${Math.round(v * 10) / 10}%`;
     const desc = portionDesc();
-    if (!desc) throw new Error(sheetMode ? 'Place a cutter first.' : 'Nothing to print yet.');
+    if (!desc) throw new Error(sheetMode ? `${notReadyText()}.` : 'Nothing to print yet.');
+    if (sheetMode && sheetInfo?.layered) return buildLayerPdfData(desc);
 
     // Dough and wastage: every waste on the recipe, each against the running total just before it.
     const dough = [{ label: 'Process', value: procs.map(p => p.name || '(untitled process)').join(' + ') }, { label: 'Total quantity', value: g(total) }];
@@ -9632,13 +11843,12 @@ function renderRecipeOnFireView(main) {
     if (sheetMode) {
       const groups = cutGroups();
       const thick = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
-      make = { title: 'Sheet & cutters', rows: [
+      make = { title: trimMode === 'knife' ? 'Sheet & knife cuts' : 'Sheet & cutters', rows: [
         { label: 'Net Weight on this tray', value: g(sheetInfo.sessionGrams), note: sheetInfo.sessions > 1 ? `This batch needs ${sheetInfo.sessions} trays; the figures below are for one.` : '' },
         { label: 'Sheet thickness', value: `${Math.round(thick * 100) / 10} mm`, note: `about ${window.RofGame.fmtCm(desc.measures.heightCm, true)} once baked (est.)` },
         ...groups.map(x => {
-          const mat = cutterMaterials.find(c => String(c.id) === x.key);
           const area = cutterUnitAreaCm2(x.data.shapeType, x.data.dims);
-          return { label: `${x.n} × ${mat ? mat.name : 'Cutter'}`, value: `${g((area / fp.areaCm2) * sheetInfo.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
+          return { label: `${x.n} × ${cutName(x.key)}`, value: `${g((area / fp.areaCm2) * sheetInfo.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
         }),
         { label: 'Pieces cut', value: String(cutterList.length) },
         { label: 'Tray used by pieces', value: `${Math.round((trimScrap().covered / fp.areaCm2) * 100)}%` },
@@ -9705,6 +11915,87 @@ function renderRecipeOnFireView(main) {
       ],
     };
   }
+  // The PDF for a layered tray. Same page and footnotes as the single dough; the Dough section becomes Layers (each
+  // layer's grams per tray raw and baked, its own wastage, how much of it went in -- "not used" stays its own line,
+  // never waste), the stack's heights, the cut, one portion, the waste figures side by side, and both bakes.
+  function buildLayerPdfData(desc) {
+    const P = window.RofGame.portions, g = (n) => `${P.fmtGrams(n)} g`, cm = (v) => window.RofGame.fmtCm(v);
+    const est = (v) => window.RofGame.fmtCm(v, true);
+    const fmtPct = (v) => `${Math.round(v * 10) / 10}%`;
+    const info = sheetInfo, plan = info.plan, fp = bakeSnapshot.footprint, m = bakeSnapshot.material;
+    const n = plan.trays;
+    const layers = [];
+    [...info.layers].reverse().forEach((l, idx) => {
+      const row = plan.layers.find(x => x.key === l.key) || {};
+      const cfg = layerCfg.get(row.key) || {};
+      const where = row.index === 0 ? `bottom${row.prebake ? ', pre-baked alone first' : ''}` : row.fill?.kind === 'height' ? `up to ${cm(row.targetCm)}` : 'all of it';
+      layers.push({ label: `${l.name} (${where})`, value: `${g(l.rawPerTray)} raw → ${g(l.finishedPerTray)} baked`,
+        note: (cfg.wastes || []).length ? (cfg.wastes || []).map(w => `${w.name || 'Waste'} ${fmtPct(parseFloat(w.percent) || 0)}`).join(', ') : 'no wastage' });
+      if (row.notUsedTotal > 0) layers.push({ label: `${l.name}, not used`, value: g(row.notUsedTotal), emphasis: true, note: `of ${g(row.availableRawTotal)} in the recipe, for ${n} tray${n === 1 ? '' : 's'}; not waste` });
+      if (row.shortTotal > 0) layers.push({ label: `${l.name}, short`, value: g(row.shortTotal), emphasis: true, note: `the recipe has ${g(row.availableRawTotal)} for ${g(row.neededTotal)} needed` });
+    });
+    layers.push({ label: 'Per tray', value: `${g(plan.rawPerTrayGrams)} raw → ${g(plan.finishedPerTrayGrams)} baked`, note: n > 1 ? `This batch fills ${n} trays; the figures are for one.` : '' });
+
+    const tray = [{ label: 'Tray', value: m.name }, { label: 'Size', value: formatMaterialDimensions(m) }];
+    if (fp.areaCm2) tray.push({ label: 'Interior area', value: `${Math.round(fp.areaCm2)} cm²` });
+    if (fp.usableHeightCm) tray.push({ label: 'Usable height', value: `${roundNice(fp.usableHeightCm)} cm` });
+
+    const groups = cutGroups();
+    const make = { title: trimMode === 'knife' ? 'Stack & knife cuts' : 'Stack & cutters', rows: [
+      { label: 'Assembled height', value: cm(plan.assembledHeightCm), note: info.layers.map(l => `${l.name} ${cm(l.rawH)}`).join(' · ') },
+      { label: 'After the final bake', value: est(plan.finalHeightEstCm), est: true },
+      ...groups.map(x => {
+        const area = cutterUnitAreaCm2(x.data.shapeType, x.data.dims);
+        return { label: `${x.n} × ${cutName(x.key)}`, value: `${g((area / fp.areaCm2) * info.sessionGrams)} each`, note: cutterPieceSizeLabel(x.data.shapeType, x.data.dims) };
+      }),
+      { label: 'Pieces cut', value: String(cutterList.length) },
+      { label: 'Tray used by pieces', value: `${Math.round((trimScrap().covered / fp.areaCm2) * 100)}%` },
+    ] };
+
+    const portionRows = desc.rows.map(r => (r.key === 'weight'
+      ? { label: 'Portion weight (baked, all layers)', value: r.value }
+      : r.key === 'raw' ? { ...r, note: 'the portion\u2019s share of the stack\u2019s raw grams' } : { ...r }));
+
+    // Waste: each layer's own Baking Waste (planned, recipe) and the scrap measured from the cut -- separate bases.
+    const waste = [];
+    info.layers.forEach((l) => {
+      const bw = ((layerCfg.get(l.key) || {}).wastes || []).filter(w => /baking/i.test(w.name || ''));
+      waste.push(bw.length
+        ? { label: `Baking Waste, ${l.name} (recipe)`, value: `${bw.map(w => fmtPct(parseFloat(w.percent) || 0)).join(' + ')} · ${g(l.rawPerTray - l.finishedPerTray)}`, note: `of its ${g(l.rawPerTray)} per tray` }
+        : { label: `Baking Waste, ${l.name}`, value: 'not in this process' });
+    });
+    const sc = trimScrap();
+    waste.push({ label: 'Scrap, measured (cut layout)', value: `${g(sc.grams)} · ${fmtPct(sc.pct)}`, emphasis: true, note: `of the ${g(info.sessionGrams)} baked stack on this tray` });
+
+    // Both bakes: the pre-bake's settings were set aside when she left it (layerBakeSlots.prebake); the final bake's are live.
+    const bakeRows = (label, params, doneness) => [
+      { label: `${label}: oven`, value: params?.temp ? `${params.temp} °${params.unit}` : 'not set' },
+      { label: `${label}: time`, value: params?.time ? `${params.time} min` : 'not set' },
+      { label: `${label}: doneness`, value: doneLabelOf(doneness || 'golden') },
+    ];
+    const pre = info.layers[0]?.prebake ? layerBakeSlots.prebake : null;
+    const baking = [...(pre ? bakeRows('Pre-bake', pre.params, pre.doneness) : []), ...bakeRows(pre ? 'Final bake' : 'Bake', bakeParams, bakeDoneness)];
+    const unconfirmed = [pre?.params, bakeParams].some(bp => bp && bp.source === 'method' && !bp.confirmed);
+
+    const cap = rofGame.capturePortion(desc);
+    return {
+      title: selectedRecipe.name, subtitle: `In layers: ${info.layers.map(l => l.name).join(', then ')} · Sheet & Trim`,
+      dateText: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      image: cap ? { dataUrl: cap.dataUrl } : null,
+      sections: [
+        { title: 'Layers', rows: layers }, { title: 'Tray', rows: tray },
+        make, { title: 'One portion', rows: portionRows },
+        { title: 'Waste', rows: waste, note: 'Planned (recipe) and measured are different figures with different bases; shown side by side, never combined. Filling not used is not waste.' },
+        { title: 'Baking', rows: baking, note: unconfirmed ? 'Oven and time were read from the recipe method and have not been confirmed.' : '' },
+      ],
+      footnotes: [
+        'est. = estimated from the rise model, not measured.',
+        'Weights are baked (finished) weights: each layer through its own Baking Waste. Raw is what goes into the tray, before baking.',
+        'Heights are from the tray floor, as a ruler shows them when the tray is assembled.',
+        'Generated by Menu Board · Recipe on Fire.',
+      ],
+    };
+  }
   async function exportRofPdf() {
     const btn = document.getElementById('rof-export-pdf-btn'), status = document.getElementById('rof-export-status');
     if (!btn || btn.disabled) return;
@@ -9718,7 +12009,7 @@ function renderRecipeOnFireView(main) {
     } catch (err) {
       say(`Could not export the PDF: ${err.message}`);
     } finally {
-      btn.disabled = rofMode === 'sheet' && cutterList.length === 0;
+      btn.disabled = rofMode === 'sheet' && !cutsReady();
     }
   }
 
@@ -9763,6 +12054,8 @@ function renderRecipeOnFireView(main) {
 
   function renderBakeStepPanel(panel) {
     const sheetMode = rofMode === 'sheet';
+    const pre = rofStep === 'prebake'; // Layers: the bottom layer baked alone first (same panel, its own dough)
+    const lay = rofStep === 'bake' && layersActive(); // Layers: the whole stack's final bake
     const doneLabel = { light: 'Light', golden: 'Golden', dark: 'Dark' }[bakeDoneness];
     if (bakeState === 'baking') {
       panel.innerHTML = `
@@ -9775,7 +12068,7 @@ function renderRecipeOnFireView(main) {
     }
     const ready = bakeState === 'ready';
     panel.innerHTML = `
-      ${ready ? '' : `<h3 style="margin-bottom:8px;">Baked · ${doneLabel}</h3>`}
+      ${ready ? (pre ? '<h3 style="margin-bottom:6px;">Pre-bake the base alone</h3>' : lay ? '<h3 style="margin-bottom:6px;">Bake the stack</h3>' : '') : `<h3 style="margin-bottom:8px;">${pre ? 'Pre-baked' : 'Baked'} · ${doneLabel}</h3>`}
       ${ready ? `<ul class="rof-rise-notes">${(riseModel?.notes || []).map(n => `<li>${n}</li>`).join('')}</ul>
       <div class="rof-row-field">
         <label for="rof-rise-slider">Rise <span id="rof-rise-val">${Math.round(riseScale * 100)}%</span></label>
@@ -9789,13 +12082,15 @@ function renderRecipeOnFireView(main) {
         </div>
       </div>` : ''}
       ${bakeParamsHtml()}
-      <div id="rof-place-summary">${sheetMode ? sheetSummaryHtml() : ''}</div>
+      <div id="rof-place-summary">${pre ? prebakeSummaryHtml(ready) : lay ? layerBakeSummaryHtml(ready) : sheetMode ? sheetSummaryHtml() : ''}</div>
       ${ready || sheetMode ? '' : '<div class="rof-export-status" id="rof-export-status" role="status"></div>'}
       <div class="rof-actions">
-        <button type="button" class="secondary" id="rof-edit-place-btn">${sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
-        ${ready ? '<button type="button" class="primary" id="rof-start-bake-btn">Start baking</button>'
+        <button type="button" class="secondary" id="rof-edit-place-btn">${lay ? '← Fill' : sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
+        ${ready ? `<button type="button" class="primary" id="rof-start-bake-btn">${pre ? 'Start pre-bake' : 'Start baking'}</button>`
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
-                   ${sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
+                   ${pre ? '<button type="button" class="primary" id="rof-fill-btn">Fill →</button>'
+                   : lay ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
+                   : sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                                : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
     panel.querySelectorAll('[data-doneness]').forEach(btn => btn.addEventListener('click', () => {
@@ -9815,10 +12110,16 @@ function renderRecipeOnFireView(main) {
         hint.hidden = riseScale === 1;
       };
       refresh();
-      slider.addEventListener('input', () => { riseScale = slider.value / 100; refresh(); });
-      document.getElementById('rof-rise-reset').addEventListener('click', () => { riseScale = 1; slider.value = 100; refresh(); });
+      // The pre-bake's slider belongs to the bottom layer: it moves that layer's estimated height in the plan.
+      const keep = () => {
+        if (pre) { const c = layerCfg.get(layerOrder[0]); if (c) c.riseScale = riseScale; }
+        if (lay) { layerFinalRise = riseScale; refreshLayerBakeView(); }
+      };
+      slider.addEventListener('input', () => { riseScale = slider.value / 100; keep(); refresh(); });
+      document.getElementById('rof-rise-reset').addEventListener('click', () => { riseScale = 1; slider.value = 100; keep(); refresh(); });
     }
     document.getElementById('rof-edit-place-btn').addEventListener('click', () => {
+      if (lay) { backToFill(); return; }
       if (sheetMode) { backToSetup(); return; }
       rofGame.resetBake();
       bakeState = 'ready';
@@ -9831,12 +12132,374 @@ function renderRecipeOnFireView(main) {
     document.getElementById('rof-export-pdf-btn')?.addEventListener('click', exportRofPdf);
     document.getElementById('rof-start-bake-btn')?.addEventListener('click', startBake);
     document.getElementById('rof-bake-again-btn')?.addEventListener('click', () => {
-      rofGame.resetBake();
+      if (lay) restoreAssembled(); else rofGame.resetBake();
       bakeState = 'ready';
       renderTrayStepPanel();
     });
-    document.getElementById('rof-trim-btn')?.addEventListener('click', () => { goToRofStep('trim'); renderTrayStepPanel(); });
+    document.getElementById('rof-trim-btn')?.addEventListener('click', () => {
+      if (lay && !prepareLayerTrim()) return;
+      goToRofStep('trim'); renderTrayStepPanel();
+    });
+    if (pre && !ready) wirePrebakeMeasure();
+    if (lay) refreshLayerBakeView();
+    document.getElementById('rof-fill-btn')?.addEventListener('click', () => startFillFlow({ fromPrebake: true }));
     if (!sheetMode) updatePlaceSummary();
+  }
+
+  // ---- Layers: the Pre-bake step -------------------------------------------------------------------
+  // The bottom layer alone, as one sheet: its own rise estimate, its own method's oven settings, the same bake.
+  // Afterwards her measured height (optional) replaces the estimate: the base on screen is set to it, and the
+  // plan for the layers on top (Setup, and Fill next) is worked out from it.
+  let prebakeInfo = null; // { name, gramsPerTray, rawHeightCm, trays } for the base being pre-baked
+  function startPrebakeFlow() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok || !r.baseCfg.prebake) return;
+    const row = r.plan.layers[0];
+    riseModel = layerRiseModel(r.base);
+    useLayerBake('prebake', () => {
+      riseScale = Number(r.baseCfg.riseScale) || 1;
+      prefillBakeParams(collectTextListFieldValue(r.base, makeProcessMethodCfg(r.base)) || '');
+    });
+    prebakeInfo = { name: r.base.name || '(untitled process)', gramsPerTray: row.rawPerTray, rawHeightCm: row.rawHeightCm, trays: r.plan.trays };
+    sheetInfo = null;
+    bakeState = 'ready';
+    goToRofStep('prebake');
+    renderTrayStepPanel();
+    ensureRofGame().then((game) => {
+      if (rofStep !== 'prebake') return;
+      const fp = bakeSnapshot.footprint;
+      // Drawn like the single sheet: at least 3 mm so it reads, at most 70% of the rim.
+      game.beginSheet({ thicknessCm: Math.max(0.3, Math.min(row.rawHeightCm, fp.usableHeightCm * 0.7)) });
+      game.setSheetGrams(row.rawPerTray);
+    });
+  }
+  function prebakeSummaryHtml(ready) {
+    if (!prebakeInfo) return '';
+    const P = window.RofGame.portions, n = prebakeInfo.trays;
+    return `
+      <div class="computed-value-box" style="margin:10px 0; font-weight:normal; font-size:12.5px;">
+        <div><strong>${escHtml(prebakeInfo.name)}</strong> alone &middot; ${P.fmtGrams(prebakeInfo.gramsPerTray)} g per tray &middot; ${cmFmt(prebakeInfo.rawHeightCm)} raw</div>
+        ${ready ? `<div style="margin-top:3px; color:var(--neutral);">${n === 1 ? 'One tray' : `Each of ${n} trays`}; the other layers go on top once it's out.</div>` : ''}
+      </div>`;
+  }
+  // After the pre-bake: the estimate, her measurement, and what it means for the layer above.
+  function prebakeMeasureHtml() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return '';
+    const row = r.plan.layers[0], c = r.baseCfg;
+    const est = window.RofGame.layers.bakedHeight(row.rawHeightCm, layerHMul(r.base) * (Number(c.riseScale) || 1));
+    return `
+      <div class="rof-measure">
+        <div>Estimated after the pre-bake: <strong>${cmFmt(est)}</strong> <span class="rof-layer-est">est.</span></div>
+        <div class="rof-measure-row">
+          <label for="rof-measured-base">Measured height</label>
+          <input id="rof-measured-base" type="number" min="0.05" step="0.05" value="${r.measuredStale ? '' : escHtml(String(c.measuredCm ?? ''))}" placeholder="cm" aria-describedby="rof-measure-help" /> cm
+        </div>
+        <div id="rof-measure-help" class="rof-measure-help">Optional. Measure the baked base with a ruler; the layers on top are planned from it.</div>
+        <div id="rof-measure-effect" class="rof-measure-effect" role="status" aria-live="polite">${prebakeEffectHtml(r)}</div>
+      </div>`;
+  }
+  // What the base height means for the next layer up: how much of it each tray takes, and what's left or short.
+  function prebakeEffectHtml(r) {
+    const row = r.plan.layers[1];
+    if (!row) return '';
+    const g = (v) => `${window.RofGame.portions.fmtGrams(v)} g`;
+    const base = r.plan.layers[0];
+    const head = `On ${base.measured ? 'this measured' : 'the estimated'} ${cmFmt(base.assemblyHeightCm)} base: <strong dir="auto">${escHtml(row.name)}</strong> `;
+    return row.fill.kind === 'height'
+      ? `${head}${g(row.rawPerTray)} per tray to reach ${cmFmt(row.targetCm)}.${layerUseHtml(row, r.plan.trays)}`
+      : `${head}all of it, ${g(row.rawPerTray)} per tray, up to ${cmFmt(row.topCm)}.`;
+  }
+  function wirePrebakeMeasure() {
+    const box = document.getElementById('rof-place-summary');
+    if (!box) return;
+    box.insertAdjacentHTML('beforeend', prebakeMeasureHtml());
+    const input = document.getElementById('rof-measured-base');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      const c = layerCfg.get(layerOrder[0]);
+      const v = parseFloat(input.value);
+      c.measuredCm = v > 0 ? input.value : '';
+      c.measuredForGrams = v > 0 && prebakeInfo ? prebakeInfo.gramsPerTray : null;
+      const r = computeLayerPlan();
+      if (r && r.plan.ok) document.getElementById('rof-measure-effect').innerHTML = prebakeEffectHtml(r);
+      showPrebakeHeight();
+    });
+  }
+  // The base on screen at her measured height (or back to the estimate's rise when the field is cleared).
+  function showPrebakeHeight() {
+    if (!rofGame || !prebakeInfo) return;
+    const c = layerCfg.get(layerOrder[0]);
+    const measured = parseFloat(c?.measuredCm);
+    const L = window.RofGame.layers;
+    const rise = measured > 0
+      ? L.riseForHeight(prebakeInfo.rawHeightCm, measured)
+      : layerHMul(selectedProcesses().find(p => String(p.localId) === layerOrder[0])) * (Number(c?.riseScale) || 1);
+    rofGame.setDoughState(prebakeSheetState ? { rise, bake: prebakeSheetState.bake } : { rise });
+  }
+  // The bake just finished: a measurement she typed before stays and is shown.
+  function onPrebakeDone() {
+    const st = rofGame?.getSheet();
+    prebakeSheetState = st ? { rise: st.rise, bake: st.bake } : null;
+    showPrebakeHeight();
+  }
+  // Swaps the active bake's settings (oven, doneness, rise correction) out and `which` bake's in; a bake seen for
+  // the first time starts from defaults and `init` (which pre-fills them). Layers only.
+  function useLayerBake(which, init) {
+    if (activeLayerBake) layerBakeSlots[activeLayerBake] = { params: bakeParams, doneness: bakeDoneness, rise: riseScale };
+    activeLayerBake = which;
+    const slot = which && layerBakeSlots[which];
+    if (slot) { bakeParams = slot.params; bakeDoneness = slot.doneness; riseScale = slot.rise; return; }
+    bakeParams = { temp: '', unit: 'C', time: '', source: '', confirmed: true, snippet: '', touched: false };
+    bakeDoneness = 'golden';
+    riseScale = 1;
+    init?.();
+  }
+  // The stack as it was assembled: layers back to their assembled heights and colour (game.resetBake), and a
+  // pre-baked base back to how it came out of the pre-bake.
+  function restoreAssembled() {
+    if (!rofGame) return;
+    rofGame.resetBake();
+    if (layerCfg.get(layerOrder[0])?.prebake) showPrebakeHeight();
+  }
+
+  // ---- Layers: the final bake --------------------------------------------------------------------------
+  // The whole stack in the oven, each layer on its own terms: a pre-baked base keeps its height and browns a little
+  // more; everything else rises by its own estimate (a filling sets and puffs a little; a raw dough base rises like a
+  // dough) and browns at its own speed. Same Bake panel; its own oven settings, doneness and rise correction.
+  function startLayerBakeFlow() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return;
+    useLayerBake('final', () => {
+      // The oven settings from the methods of the layers that bake now, top layer first (where they usually are).
+      const baking = r.procs.filter((p, i) => !(i === 0 && r.baseCfg.prebake)).reverse();
+      prefillBakeParams(baking.map(p => collectTextListFieldValue(p, makeProcessMethodCfg(p))).filter(Boolean).join('\n'));
+    });
+    layerFinalRise = riseScale;
+    riseModel = { ...layerRiseModel(r.base), notes: layerBakeNotes(r) };
+    bakeState = 'ready';
+    goToRofStep('bake');
+    renderTrayStepPanel();
+  }
+  // One line per layer: what it does in this bake and the height it ends at (est.).
+  function layerBakeNotes(r) {
+    return r.plan.layers.map((row) => {
+      const p = r.procs.find(x => String(x.localId) === row.key);
+      const name = `<strong dir="auto">${escHtml(row.name)}</strong>`;
+      if (row.prebake) return `${name}: already baked -- stays at ${cmFmt(row.assemblyHeightCm)}${row.measured ? ' (measured)' : ''}, browns a little more.`;
+      const m = layerRiseModel(p);
+      // The rise estimate's own verdict ("strong rise", "only a little steam spring"...), or a filling's.
+      const verdict = m.notes.find(n => n.startsWith('→'))?.slice(2) || (/steam spring/.test(m.notes[0] || '') ? 'only a little steam spring' : 'rises');
+      const what = m.identified ? verdict : 'sets and puffs a little (a filling)';
+      return `${name}: ${escHtml(what)} -- ${cmFmt(row.rawHeightCm)} → ${cmFmt(row.finalHeightEstCm)} <span class="rof-layer-est">est.</span>`;
+    });
+  }
+  // The rise correction moved: the notes' heights, the summary and the cross-section follow.
+  function refreshLayerBakeView() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return;
+    const notes = document.querySelector('#rof-step-panel .rof-rise-notes');
+    if (notes) notes.innerHTML = layerBakeNotes(r).map(n => `<li>${n}</li>`).join('');
+    const sum = document.getElementById('rof-place-summary');
+    if (sum) sum.innerHTML = layerBakeSummaryHtml(bakeState === 'ready');
+    showLayerStack(r, { baked: bakeState === 'done' });
+  }
+  function layerBakeSummaryHtml(ready) {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return '';
+    const plan = r.plan, P = window.RofGame.portions, g = (v) => `${P.fmtGrams(v)} g`;
+    const rim = bakeSnapshot.footprint.usableHeightCm;
+    return `
+      <div class="computed-value-box" style="margin:10px 0; font-weight:normal; font-size:12.5px; line-height:1.55;">
+        ${ready
+          ? `<div>Stack <strong>${cmFmt(plan.assembledHeightCm)}</strong> → about ${cmFmt(plan.finalHeightEstCm)} after the bake <span class="rof-layer-est">est.</span></div>
+             <div>${g(plan.rawPerTrayGrams)} per tray going in</div>`
+          : `<div>Baked stack about <strong>${cmFmt(plan.finalHeightEstCm)}</strong> <span class="rof-layer-est">est.</span></div>
+             <div>${g(plan.finishedPerTrayGrams)} per tray after Baking Waste</div>`}
+        ${plan.finalHeightEstCm > rim + 1e-9 ? `<div class="rof-leftover">About ${cmFmt(plan.finalHeightEstCm)} is above the tray's ${cmFmt(rim)} usable height.</div>` : ''}
+      </div>`;
+  }
+  // Leaving the final bake for Fill: the stack goes back to how it was assembled.
+  function backToFill() {
+    restoreAssembled();
+    useLayerBake(null);
+    goToRofStep('fill');
+    renderTrayStepPanel();
+  }
+
+  // ---- Layers: Trim -------------------------------------------------------------------------------------
+  // Trim cuts through the whole stack. The Trim step, the cutter / knife readouts, the portion view and the PDF all
+  // read sheetInfo; for a layered tray it describes the stack: its baked grams per tray (every layer through its own
+  // Baking Waste -- finished weights, like everywhere else), its raw grams, the assembled and estimated baked heights,
+  // and each layer's height and colours for the portion's slab.
+  const mixHex = (a, b, t) => `#${new window.THREE.Color(a).lerp(new window.THREE.Color(b), t).getHexString()}`;
+  function prepareLayerTrim() {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok || !rofGame) return false;
+    const plan = r.plan, L = window.RofGame.layers;
+    const top = rofGame.getFills();
+    sheetInfo = {
+      layered: true,
+      sessionGrams: plan.finishedPerTrayGrams, rawGrams: plan.rawPerTrayGrams, sessions: plan.trays,
+      thicknessCm: plan.assembledHeightCm, finalCm: plan.finalHeightEstCm,
+      stackHMul: L.riseForHeight(plan.assembledHeightCm, plan.finalHeightEstCm),
+      layers: plan.layers.map((row, i) => {
+        const p = r.procs.find(x => String(x.localId) === row.key);
+        const look = window.RofGame.fillingLook(riseRowsOf(p));
+        const dough = i === 0 || hasFlour(p);
+        return {
+          key: row.key, name: row.name, finalH: row.finalHeightEstCm, rawH: row.assemblyHeightCm, kind: dough ? 'dough' : 'filling',
+          color: look.base, topColor: i === plan.layers.length - 1 && !dough ? mixHex(look.base, '#9a6534', 0.4) : look.base,
+          rawPerTray: row.rawPerTray, finishedPerTray: row.finishedPerTray, prebake: row.prebake, measured: row.measured,
+        };
+      }),
+      plan,
+    };
+    rofGame.setSheetGrams(plan.finishedPerTrayGrams);
+    return top.length > 0;
+  }
+
+  // ---- Layers: the Fill step -----------------------------------------------------------------------
+  // Each layer above the base is poured on the one below: all of it, or up to a height (from the tray floor, what a
+  // ruler shows). The screen shows the stack as it is assembled (raw fillings on the pre-baked -- or raw -- base) and
+  // the grams each tray takes; the layers glide to a new height as she types. Same choices as Setup's layer cards
+  // (one layerCfg), so the two always agree. The final bake is the next phase (L4), so Bake -> waits.
+  function startFillFlow({ fromPrebake }) {
+    const r = computeLayerPlan();
+    if (!r || !r.plan.ok) return;
+    useLayerBake(null); // keeps the pre-bake's settings for when she comes back to it
+    goToRofStep('fill');
+    renderTrayStepPanel();
+    ensureRofGame().then((game) => {
+      if (rofStep !== 'fill') return;
+      if (!fromPrebake || !game.getSheet()) {
+        // No pre-bake: the base goes in raw, drawn like any sheet (at least 3 mm so it reads, at most 70% of the rim).
+        const row = r.plan.layers[0], fp = bakeSnapshot.footprint;
+        game.beginSheet({ thicknessCm: Math.max(0.3, Math.min(row.rawHeightCm, fp.usableHeightCm * 0.7)) });
+        game.setSheetGrams(row.rawPerTray);
+      }
+      showFillLayers({ pour: true });
+    });
+  }
+  // The layers above the base, on screen at their assembly heights.
+  function showFillLayers({ pour }) {
+    const r = computeLayerPlan();
+    if (!rofGame || !r || !r.plan.ok) return;
+    const procOf = (key) => r.procs.find(p => String(p.localId) === key);
+    rofGame.setFillLayers(r.plan.layers.slice(1).map(row => ({
+      key: row.key, heightCm: row.assemblyHeightCm, look: window.RofGame.fillingLook(riseRowsOf(procOf(row.key))),
+    })), { pour });
+  }
+  function backToPrebake() {
+    if (rofStep === 'bake') restoreAssembled();
+    if (rofGame) rofGame.setFillLayers([]);
+    useLayerBake('prebake');
+    goToRofStep('prebake');
+    bakeState = 'done';
+    renderTrayStepPanel();
+    showPrebakeHeight();
+  }
+  function renderFillStepPanel(panel) {
+    if (rofGame) rofGame.setInteractive(true);
+    const r = computeLayerPlan();
+    const pre = !!r?.baseCfg.prebake;
+    const uppers = r ? r.procs.slice(1) : [];
+    panel.innerHTML = `
+      <h3 style="margin-bottom:4px;">Fill</h3>
+      <div class="rof-fill-hint">Each layer goes on the one below. Heights are from the tray floor, as a ruler shows them.</div>
+      <div class="rof-fill-layers">
+        ${uppers.map((p) => {
+          const id = String(p.localId), c = layerCfg.get(id), name = escHtml(p.name || '(untitled process)');
+          return `
+          <div class="rof-fill-layer" data-fill-layer="${id}">
+            <div class="rof-fill-head">
+              <strong class="rof-fill-name" dir="auto" title="${name}">${name}</strong>
+              <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
+                <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? '' : 'active'}" data-fill-kind="all" aria-pressed="${c.fillKind !== 'height'}">All of it</button>
+                <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? 'active' : ''}" data-fill-kind="height" aria-pressed="${c.fillKind === 'height'}">Up to</button>
+              </span>
+              ${c.fillKind === 'height' ? `<input type="number" min="0.1" step="0.1" value="${escHtml(String(c.targetCm ?? ''))}" data-fill-target class="rof-layer-target" aria-label="${name}: height from the tray floor, cm" placeholder="cm" /> cm` : ''}
+            </div>
+            <div class="rof-fill-line" data-fill-line role="status" aria-live="polite"></div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="computed-value-box rof-fill-total" id="rof-fill-total" role="status" aria-live="polite"></div>
+      <div class="rof-actions">
+        <button type="button" class="secondary" id="rof-fill-back-btn">${pre ? '← Pre-bake' : '← Edit Setup'}</button>
+        <button type="button" class="primary" id="rof-fill-bake-btn">Bake →</button>
+      </div>`;
+    panel.querySelectorAll('[data-fill-layer]').forEach(box => {
+      const id = box.dataset.fillLayer, c = layerCfg.get(id);
+      box.querySelectorAll('[data-fill-kind]').forEach(b => b.addEventListener('click', () => {
+        if (c.fillKind === b.dataset.fillKind) return;
+        c.fillKind = b.dataset.fillKind;
+        renderFillStepPanel(panel);
+        panel.querySelector(`[data-fill-layer="${id}"] ${c.fillKind === 'height' ? '[data-fill-target]' : '[data-fill-kind="all"]'}`)?.focus();
+        showFillLayers({ pour: true });
+      }));
+      box.querySelector('[data-fill-target]')?.addEventListener('input', (e) => {
+        c.targetCm = e.target.value;
+        refreshFillNumbers();
+        showFillLayers({ pour: true });
+      });
+    });
+    document.getElementById('rof-fill-back-btn').addEventListener('click', () => (pre ? backToPrebake() : backToSetup()));
+    document.getElementById('rof-fill-bake-btn').addEventListener('click', startLayerBakeFlow);
+    refreshFillNumbers();
+  }
+  // The cross-section (rof/stack.js) in the stage's top-left corner: each layer to scale in its colour, the rim, and
+  // the estimated height after the bake. `r` = computeLayerPlan() result; null hides it.
+  const BASE_COLOR = { raw: '#ecd7a3', baked: '#c9924e' };
+  function showLayerStack(r, { baked = false } = {}) {
+    let el = document.getElementById('rof-stack');
+    if (!r || !r.plan.ok) { if (el) el.hidden = true; return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'rof-stack';
+      el.className = 'rof-stack';
+      gameWrapEl.appendChild(el);
+    }
+    const procOf = (key) => r.procs.find(p => String(p.localId) === key);
+    // Before the bake: the assembled stack, with the after-bake estimate dashed. After it: the estimated baked heights.
+    el.innerHTML = window.RofGame.stackSvg({
+      title: baked ? 'BAKED (EST.)' : 'CROSS-SECTION',
+      rimCm: bakeSnapshot.footprint.usableHeightCm,
+      finalCm: baked ? null : r.plan.finalHeightEstCm,
+      layers: r.plan.layers.map((row, i) => ({
+        name: row.name, heightCm: baked ? row.finalHeightEstCm : row.assemblyHeightCm,
+        color: i === 0 ? (row.prebake || baked ? BASE_COLOR.baked : BASE_COLOR.raw) : window.RofGame.fillingLook(riseRowsOf(procOf(row.key))).base,
+        note: i === 0 ? (row.prebake ? (row.measured ? 'measured' : 'pre-baked') : baked ? 'est.' : 'raw') : baked ? 'est.' : '',
+      })),
+    });
+    el.hidden = false;
+  }
+  // Each layer's line (grams per tray, where it sits, what's left or short) and the stack's total.
+  function refreshFillNumbers() {
+    const r = computeLayerPlan();
+    const totalEl = document.getElementById('rof-fill-total');
+    if (!r || !totalEl) return;
+    const plan = r.plan, P = window.RofGame.portions, g = (v) => `${P.fmtGrams(v)} g`;
+    if (!plan.ok) {
+      document.querySelectorAll('[data-fill-line]').forEach(el => { el.innerHTML = ''; });
+      totalEl.innerHTML = plan.errors.map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('');
+      const bb = document.getElementById('rof-fill-bake-btn');
+      if (bb) { bb.disabled = true; bb.title = 'Fix the heights first.'; }
+      return;
+    }
+    plan.layers.slice(1).forEach(row => {
+      const el = document.querySelector(`[data-fill-layer="${row.key}"] [data-fill-line]`);
+      if (el) el.innerHTML = `${g(row.rawPerTray)} per tray &middot; ${cmFmt(row.bottomCm)} → ${cmFmt(row.topCm)}${layerUseHtml(row, plan.trays)}`;
+    });
+    const base = plan.layers[0];
+    const bb = document.getElementById('rof-fill-bake-btn');
+    if (bb) { bb.disabled = false; bb.title = ''; }
+    showLayerStack(r);
+    totalEl.innerHTML = `
+      <div>Base: <span dir="auto">${escHtml(base.name)}</span> ${cmFmt(base.assemblyHeightCm)} ${base.prebake ? (base.measured ? 'pre-baked, measured' : 'pre-baked <span class="rof-layer-est">est.</span>') : 'raw'}</div>
+      <div>Assembled <strong>${cmFmt(plan.assembledHeightCm)}</strong> &middot; about ${cmFmt(plan.finalHeightEstCm)} after the bake <span class="rof-layer-est">est.</span></div>
+      <div>${plan.trays === 1 ? 'One tray' : `${plan.trays} trays`} &middot; ${g(plan.rawPerTrayGrams)} per tray</div>
+      ${plan.warnings.filter(w => !/short by/.test(w)).map(w => `<div class="rof-leftover">${escHtml(w)}</div>`).join('')}`;
   }
 
   // ---- Sheet & Trim: the Trim step -----------------------------------------------------------------
@@ -9844,18 +12507,86 @@ function renderRecipeOnFireView(main) {
     cutterMaterials = (await materialsPromise).filter(m => m.category === 'cutter');
     return cutterMaterials;
   }
-  function syncCutterCards() {
-    document.querySelectorAll('[data-cutter]').forEach(b => { const on = String(b.dataset.cutter) === String(armedCutterId); b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); });
+  // The chosen cutter is lastCutterId (kept after Escape puts it down, so the readout and Auto-arrange still
+  // use it); armedCutterId is whether it is in hand right now for stamping.
+  const chosenCutter = () => cutterMaterials.find(x => String(x.id) === String(lastCutterId)) || null;
+  function syncCutterPicker() {
+    const sel = document.getElementById('rof-cutter-select');
+    if (sel) sel.value = chosenCutter() ? String(lastCutterId) : '';
+    const hand = document.getElementById('rof-cutter-hand-btn');
+    if (hand) {
+      const on = armedCutterId != null;
+      hand.disabled = !chosenCutter();
+      hand.classList.toggle('active', on);
+      hand.setAttribute('aria-pressed', String(on));
+    }
+    updateCutterInfo();
   }
-  function armCutterById(id) {
-    const m = cutterMaterials.find(x => String(x.id) === String(id));
-    if (!m) return;
-    if (String(armedCutterId) === String(id)) { rofGame.disarmCutter(); return; } // click the armed card again to put it down
+  function armCutter(m, { focus = false } = {}) {
     lastCutterId = m.id;
     rofGame.armCutter({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id });
-    // Move focus to the stage so the arrow keys position the cutter and Enter stamps it.
-    rofGame.focusStage();
-    rofGame.announce(`${m.name} picked. Arrow keys move it, Enter stamps it, Escape puts it down.`);
+    // From the button, focus moves to the stage so the arrow keys position the cutter and Enter stamps it.
+    // Not from the dropdown: the arrow keys there are still choosing a cutter.
+    if (focus) rofGame.focusStage();
+    rofGame.announce(`${m.name} picked. Click the sheet to stamp it, or use Auto-arrange. Escape puts it down.`);
+  }
+  function onCutterSelect(id) {
+    if (id === NEW_MATERIAL) { createCutterInline(); return; }
+    const m = cutterMaterials.find(x => String(x.id) === String(id));
+    if (!m) { lastCutterId = null; rofGame.disarmCutter(); syncCutterPicker(); return; }
+    armCutter(m);
+  }
+  // The cutter dropdown's options: every cutter, then "+ Create new cutter…" (there even with no cutters yet).
+  function fillCutterSelect() {
+    const sel = document.getElementById('rof-cutter-select');
+    if (!sel) return;
+    sel.innerHTML = `<option value="">${cutterMaterials.length ? 'Choose a cutter…' : 'No cutters yet'}</option>`
+      + cutterMaterials.map(m => `<option value="${m.id}">${escHtml(m.name)} (${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))})</option>`).join('')
+      + `<option value="${NEW_MATERIAL}">+ Create new cutter…</option>`;
+    sel.disabled = false;
+  }
+  // "+ Create new cutter…": the cutter in hand is put down, the dropdown goes back to the chosen cutter, and
+  // the Materials dialog opens with Category fixed to Cutter. A saved cutter is chosen and in hand at once,
+  // with its one-portion readout -- nothing to close or reopen.
+  async function createCutterInline() {
+    if (armedCutterId != null) rofGame.disarmCutter();
+    syncCutterPicker(); // puts the dropdown back on the chosen cutter (or the placeholder)
+    const res = await openMaterialCreateModal({ category: 'cutter' });
+    if (!res) return;
+    if (res.materials) materialsPromise = Promise.resolve(res.materials); else reloadMaterials();
+    await ensureCutterMaterials();
+    if (!document.getElementById('rof-cutter-select')) return; // left Trim meanwhile
+    fillCutterSelect();
+    const m = cutterMaterials.find(x => String(x.id) === String(res.id));
+    if (m) armCutter(m); else syncCutterPicker();
+  }
+  function toggleCutterInHand() {
+    const m = chosenCutter();
+    if (!m) return;
+    if (armedCutterId != null) rofGame.disarmCutter();
+    else armCutter(m, { focus: true });
+  }
+  // What ONE piece from the chosen cutter would weigh, and how many Auto-arrange would cut, before anything
+  // is placed -- so a cutter can be reconsidered before it goes across the tray. Same arithmetic as the
+  // portion view (cutPortionFor, portionWeightRows) and the same packer as Auto-arrange (planCutters).
+  function updateCutterInfo() {
+    const el = document.getElementById('rof-cutter-info');
+    if (!el || !bakeSnapshot || !sheetInfo) return;
+    const c = chosenCutter();
+    if (!c) { el.innerHTML = ''; el.hidden = true; return; }
+    el.hidden = false;
+    const P = window.RofGame.portions, dims = materialDimsFromRow(c), fp = bakeSnapshot.footprint;
+    const { m, grams } = cutPortionFor(c.shape_type, dims);
+    if (!(m.areaCm2 > 0)) { el.innerHTML = '<div class="rof-cutter-info-line">This cutter has no size set -- check it in Materials.</div>'; return; }
+    const [weight, raw] = portionWeightRows(grams);
+    const n = rofGame.planCutters({ shapeType: c.shape_type, dims, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
+    const scrapPct = fp.areaCm2 > 0 ? Math.max(0, 1 - (n * m.areaCm2) / fp.areaCm2) * 100 : 0;
+    el.innerHTML = `
+      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} ${sheetInfo.layered ? 'raw, all layers' : 'raw dough'} (est.)` : 'no Baking Waste'}</div>
+      <div class="rof-cutter-info-line">${cutterPieceSizeLabel(c.shape_type, dims)} &middot; about ${cmText(m.heightCm, true)} thick (est.)</div>
+      <div class="rof-cutter-info-line">${n > 0
+        ? `Auto-arrange would cut <strong>${n}</strong> on this tray &middot; scrap about ${P.fmtGrams(scrapPct)}%`
+        : '<span class="rof-leftover">Too big for this tray -- Auto-arrange would cut none.</span>'}</div>`;
   }
 
   // Per-piece weight, count, utilization and waste -- the same area math as before, driven by however
@@ -9872,11 +12603,22 @@ function renderRecipeOnFireView(main) {
   function updateTrimSummary() {
     const el = document.getElementById('rof-trim-summary');
     if (!el || !bakeSnapshot || !sheetInfo) return;
+    const ready = cutsReady();
     const pbtn = document.getElementById('rof-portion-btn');
-    if (pbtn) { pbtn.disabled = cutterList.length === 0; pbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
+    if (pbtn) { pbtn.disabled = !ready; pbtn.title = ready ? '' : notReadyText(); }
     const xbtn = document.getElementById('rof-export-pdf-btn');
-    if (xbtn) { xbtn.disabled = cutterList.length === 0; xbtn.title = cutterList.length === 0 ? 'Place a cutter first' : ''; }
+    if (xbtn) { xbtn.disabled = !ready; xbtn.title = ready ? '' : notReadyText(); }
+    if (trimMode === 'knife') updateKnifeInfo();
     const { footprint } = bakeSnapshot, grams = sheetInfo.sessionGrams;
+    // Knife, not cut yet: the readout above already has every number; say the lines are only a preview.
+    if (trimMode === 'knife') {
+      // The readout above already has every number (portion, pieces, trim); this just says where things stand.
+      const covered = trimScrap().covered;
+      el.innerHTML = `<div class="computed-value-box" style="margin:10px 0;"><div style="color:var(--neutral); font-size:12.5px;">${ready
+        ? `<strong style="color:var(--ink);">Cut:</strong> ${cutterList.length} pieces &middot; ${Math.round((covered / footprint.areaCm2) * 100)}% of the tray used`
+        : 'Dotted lines are a preview: nothing is cut until you press Cut.'}</div></div>`;
+      return;
+    }
     if (cutterList.length === 0) {
       el.innerHTML = `<div class="computed-value-box" style="margin:12px 0;"><div style="color:var(--neutral); font-size:12.5px;">${trimNote || 'No cutters placed yet.'}</div></div>`;
       return;
@@ -9893,10 +12635,10 @@ function renderRecipeOnFireView(main) {
     const util = footprint.areaCm2 > 0 ? Math.round((covered / footprint.areaCm2) * 100) : 0;
     const scrap = trimScrap();
     el.innerHTML = `
-      <div class="computed-value-box" style="margin:12px 0;">
+      <div class="computed-value-box" style="margin:6px 0; padding:8px 12px;">
         ${[...groups.values()].map(g => `<div style="font-size:13px; margin-bottom:2px;"><strong>${g.n}</strong> × ${cutterPieceSizeLabel(g.data.shapeType, g.data.dims)} &middot; ${roundNice((g.area / footprint.areaCm2) * grams)} g each</div>`).join('')}
-        <div style="margin-top:8px; padding-top:6px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);"><strong>${cutterList.length}</strong> pieces &nbsp;·&nbsp; <strong>${util}%</strong> utilization</div>
-        <div class="rof-leftover" style="margin-top:4px; font-size:12.5px;">Scrap: ${window.RofGame.portions.fmtGrams(scrap.grams)} g &middot; ${window.RofGame.portions.fmtGrams(scrap.pct)}% of the dough on this tray</div>
+        <div style="margin-top:5px; padding-top:4px; border-top:1px solid var(--line); font-size:12px; color:var(--neutral);"><strong>${cutterList.length}</strong> pieces &nbsp;·&nbsp; <strong>${util}%</strong> utilization</div>
+        <div class="rof-leftover" style="margin-top:4px; font-size:12.5px;">Scrap: ${window.RofGame.portions.fmtGrams(scrap.grams)} g &middot; ${window.RofGame.portions.fmtGrams(scrap.pct)}% of the ${sheetInfo.layered ? 'stack' : 'dough'} on this tray</div>
       </div>`;
   }
 
@@ -9905,7 +12647,7 @@ function renderRecipeOnFireView(main) {
   const TRIM_MARGIN_CM = 0.3, TRIM_GAP_CM = 0.2;
   function autoArrangeCutters() {
     const m = cutterMaterials.find(x => String(x.id) === String(armedCutterId ?? lastCutterId));
-    if (!m) { trimNote = 'Pick a cutter first.'; updateTrimSummary(); return; }
+    if (!m) { trimNote = 'Choose a cutter first.'; updateTrimSummary(); return; }
     const res = rofGame.autoArrangeCutters({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
     playArrangeSound();
     rofGame.disarmCutter(); // arranging is a finished action; putting the cutter down also lets you hover the scrap
@@ -9913,40 +12655,165 @@ function renderRecipeOnFireView(main) {
     rofGame.announce(`${res.count} cutters arranged. Scrap ${Math.round(sc.grams)} grams, ${Math.round(sc.pct)} percent of the dough.`);
   }
 
+  // ---- Trim by Knife --------------------------------------------------------------------------------
+  // A centred grid of straight cuts (renderer/rof/knifeGrid.js): two numbers, the piece size across and down.
+  // The dotted lines are a preview; Cut makes them solid and final (One portion / Export PDF), Edit cuts
+  // unlocks them. Every piece is one portion, weighed exactly like a cutter piece (cutPortionFor).
+  const KNIFE_MIN_CM = 1, KNIFE_MAX_CM = 100;
+  // Starting size: the square that gives the recipe's portion weight, when it has one; else 5 x 5 cm.
+  function knifeDefaultCm() {
+    const pw = Number(selectedRecipe?.portion_weight_grams);
+    const fp = bakeSnapshot.footprint;
+    if (pw > 0 && sheetInfo.sessionGrams > 0) {
+      const side = Math.sqrt((pw * fp.areaCm2) / sheetInfo.sessionGrams);
+      return Math.min(20, Math.max(2, Math.round(side * 2) / 2));
+    }
+    return 5;
+  }
+  let knifePlan = null; // the game's last grid plan (counts, leftover strips)
+  function applyKnifeGrid() {
+    if (!rofGame || !knifeSpec) return;
+    knifePlan = rofGame.setKnifeGrid({ acrossCm: knifeSpec.across, downCm: knifeSpec.down, solid: knifeSpec.cut });
+    updateTrimSummary(); // the game reported the pieces synchronously
+  }
+  const cmNice = (v) => `${Math.round(v * 10) / 10} cm`;
+  // The readout above Cut: one portion (the same rows the cutter readout and the portion view use), the grid,
+  // and the trim -- the edge strips that don't make a whole piece, split evenly on opposite sides.
+  function updateKnifeInfo() {
+    const el = document.getElementById('rof-knife-info');
+    const cutBtn = document.getElementById('rof-knife-cut-btn');
+    if (!el || !knifeSpec) return;
+    const plan = knifePlan;
+    if (cutBtn && !knifeSpec.cut) cutBtn.disabled = !(plan && plan.fits);
+    if (!plan || !plan.fits) {
+      el.innerHTML = '<div class="rof-cutter-info-line"><span class="rof-leftover">Too big for this tray: no whole piece fits.</span></div>';
+      return;
+    }
+    const P = window.RofGame.portions, dims = { lengthCm: knifeSpec.across, widthCm: knifeSpec.down };
+    const { m, grams } = cutPortionFor('rectangular', dims);
+    const [weight, raw] = portionWeightRows(grams);
+    const W = plan.cols * plan.across + 2 * plan.leftover.across, H = plan.rows * plan.down + 2 * plan.leftover.down;
+    const rect = bakeSnapshot.material.shape_type === 'rectangular';
+    const sides = [];
+    if (plan.leftover.across >= 0.05) sides.push(`${cmNice(plan.leftover.across)} strip left and right`);
+    if (plan.leftover.down >= 0.05) sides.push(`${cmNice(plan.leftover.down)} top and bottom`);
+    const sc = trimScrap();
+    const trimText = sc.grams < 0.05
+      ? 'No trim: the pieces fill the tray exactly.'
+      : `Trim: ${rect ? (sides.join(', ') || 'none') : 'the edges outside the whole pieces'} &middot; ${P.fmtGrams(sc.grams)} g (${P.fmtGrams(sc.pct)}%)`;
+    el.innerHTML = `
+      <div class="rof-cutter-info-grams">One portion: <strong>${weight.value}</strong> finished &middot; ${raw.est ? `${raw.value} ${sheetInfo.layered ? 'raw, all layers' : 'raw dough'} (est.)` : 'no Baking Waste'}</div>
+      <div class="rof-cutter-info-line">${cutterPieceSizeLabel('rectangular', dims)} &middot; about ${cmText(m.heightCm, true)} thick (est.)</div>
+      <div class="rof-cutter-info-line"><strong>${plan.count}</strong> pieces${rect ? ` (${plan.cols} across × ${plan.rows} down) &middot; tray inside ${Math.round(W * 10) / 10} × ${Math.round(H * 10) / 10} cm` : ''}</div>
+      <div class="rof-cutter-info-line${sc.grams < 0.05 ? '' : ' rof-leftover'}">${trimText}</div>`;
+  }
+  function syncKnifeControls() {
+    const cut = !!knifeSpec?.cut;
+    ['rof-knife-across', 'rof-knife-down'].forEach(id => { const i = document.getElementById(id); if (i) i.disabled = cut; });
+    const btn = document.getElementById('rof-knife-cut-btn');
+    if (btn) {
+      btn.textContent = cut ? 'Edit cuts' : 'Cut';
+      btn.className = cut ? 'secondary' : 'primary';
+      btn.disabled = !cut && !(knifePlan && knifePlan.fits);
+    }
+  }
+  function onKnifeSize() {
+    const read = (id) => parseFloat(document.getElementById(id)?.value);
+    const a = read('rof-knife-across'), d = read('rof-knife-down');
+    const ok = (v) => v >= KNIFE_MIN_CM && v <= KNIFE_MAX_CM;
+    if (!ok(a) || !ok(d)) return; // half-typed: keep the last valid grid until the number is complete
+    knifeSpec.across = a; knifeSpec.down = d;
+    applyKnifeGrid();
+    syncKnifeControls();
+  }
+  function toggleKnifeCut() {
+    if (!knifeSpec) return;
+    knifeSpec.cut = !knifeSpec.cut;
+    rofGame.setKnifeSolid(knifeSpec.cut);
+    if (knifeSpec.cut) { playArrangeSound(); rofGame.announce(`Cut. ${knifePlan ? knifePlan.count : 0} pieces.`); }
+    else rofGame.announce('Editing the cuts. The lines are a preview again.');
+    syncKnifeControls();
+    updateTrimSummary();
+  }
+  // Cutter <-> Knife. A tray is cut one way or the other, so switching clears what is on it.
+  function setTrimMode(mode) {
+    if (mode === trimMode) return;
+    trimMode = mode;
+    if (mode === 'knife') {
+      rofGame.disarmCutter();
+      if (!knifeSpec) { const s0 = knifeDefaultCm(); knifeSpec = { across: s0, down: s0, cut: false }; }
+      knifeSpec.cut = false;
+    } else {
+      rofGame.clearCutters(); // drops the knife grid
+      if (knifeSpec) knifeSpec.cut = false;
+    }
+    renderTrimStepPanel(document.getElementById('rof-step-panel'));
+  }
+
   async function renderTrimStepPanel(panel) {
     if (rofGame) rofGame.setInteractive(true); // the bake switches input off; cutters need it back
-    panel.innerHTML = `
-      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Pick a cutter, then click the sheet to stamp it. Drag to move one, scroll to turn it, Delete removes it. Right-drag turns the view.</div>
-      <div class="rof-shape-cards" id="rof-cutter-cards"><div style="font-size:12px; color:var(--neutral);">Loading cutters…</div></div>
-      <div style="display:flex; gap:8px; margin-bottom:6px;">
+    const knifeMode = trimMode === 'knife';
+    const tools = knifeMode ? `
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Set the piece size; the dotted lines show where the knife goes, centred on the tray. Cut when it looks right.</div>
+      <div class="rof-knife-row">
+        <div class="field"><label for="rof-knife-across">Across (cm)</label><input id="rof-knife-across" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${knifeSpec.across}" /></div>
+        <div class="field"><label for="rof-knife-down">Down (cm)</label><input id="rof-knife-down" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${knifeSpec.down}" /></div>
+        <button type="button" class="primary" id="rof-knife-cut-btn">Cut</button>
+      </div>
+      <div class="rof-cutter-info" id="rof-knife-info" role="status"></div>` : `
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Choose a cutter, then click the sheet to stamp it or use Auto-arrange. Drag to move one, scroll to turn it, Delete removes it.</div>
+      <div class="rof-cutter-pick">
+        <label for="rof-cutter-select" class="rof-sr-only">Cutter</label>
+        <div class="rof-cutter-row">
+          <select id="rof-cutter-select" disabled><option value="">Loading cutters…</option></select>
+          <button type="button" class="secondary" id="rof-cutter-hand-btn" aria-pressed="false" disabled title="Take the cutter in hand to stamp it on the sheet">Place by hand</button>
+        </div>
+        <div class="rof-cutter-info" id="rof-cutter-info" role="status" hidden></div>
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:2px;">
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
+      </div>`;
+    panel.innerHTML = `
+      <div class="mode-toggle rof-trim-mode" role="group" aria-label="Trim with">
+        <button type="button" class="mode-toggle-btn ${knifeMode ? '' : 'active'}" data-trim-mode="cutter" aria-pressed="${!knifeMode}">Cutter</button>
+        <button type="button" class="mode-toggle-btn ${knifeMode ? 'active' : ''}" data-trim-mode="knife" aria-pressed="${knifeMode}">Trim by Knife</button>
       </div>
+      ${tools}
       <div id="rof-trim-summary"></div>
       <div class="rof-export-status" id="rof-export-status" role="status"></div>
       <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn" disabled>Export PDF</button></div>`;
     wirePortionBtn();
+    panel.querySelectorAll('[data-trim-mode]').forEach(b => b.addEventListener('click', () => setTrimMode(b.dataset.trimMode)));
     document.getElementById('rof-export-pdf-btn').addEventListener('click', exportRofPdf);
     rofGame.setScrapHighlight(true);
-    document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
-    document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
     document.getElementById('rof-back-bake-btn').addEventListener('click', () => {
       rofGame.disarmCutter(); rofGame.clearCutters();
+      if (knifeSpec) knifeSpec.cut = false;
       goToRofStep('bake'); bakeState = 'done';
       renderTrayStepPanel();
     });
+
+    if (knifeMode) {
+      ['rof-knife-across', 'rof-knife-down'].forEach(id => document.getElementById(id).addEventListener('input', onKnifeSize));
+      document.getElementById('rof-knife-cut-btn').addEventListener('click', toggleKnifeCut);
+      // Coming (back) to Trim with no grid on the tray: lay it out again (as a preview).
+      if (!cutterList.some(c => String(c.data.materialId) === 'knife')) { knifeSpec.cut = false; applyKnifeGrid(); }
+      syncKnifeControls();
+      updateTrimSummary();
+      return;
+    }
+
+    document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
+    document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
+    reloadMaterials();
     await ensureCutterMaterials();
-    const cards = document.getElementById('rof-cutter-cards');
-    if (!cards) return; // moved on while the list loaded
-    cards.innerHTML = cutterMaterials.length === 0
-      ? '<div style="font-size:12.5px; color:var(--neutral);">No cutters yet -- add one in Materials.</div>'
-      : cutterMaterials.map(m => `
-        <button type="button" class="rof-shape-card" data-cutter="${m.id}" aria-pressed="false">
-          <span class="rof-shape-name">${m.name}</span>
-          <span class="rof-shape-meta">${cutterPieceSizeLabel(m.shape_type, materialDimsFromRow(m))}</span>
-        </button>`).join('');
-    cards.querySelectorAll('[data-cutter]').forEach(b => b.addEventListener('click', () => armCutterById(b.dataset.cutter)));
-    syncCutterCards();
+    const sel = document.getElementById('rof-cutter-select');
+    if (!sel) return; // moved on while the list loaded
+    fillCutterSelect();
+    sel.addEventListener('change', () => onCutterSelect(sel.value));
+    document.getElementById('rof-cutter-hand-btn').addEventListener('click', toggleCutterInHand);
+    syncCutterPicker();
     updateTrimSummary();
   }
 
@@ -10147,7 +13014,7 @@ async function renderMaterialsListView(main) {
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${label}</td>` : ''}
             <td>${m.code}</td>
             <td>${m.name}</td>
-            <td>${MATERIAL_SHAPE_PRESETS[m.shape_type]?.label || m.shape_type}</td>
+            <td>${materialShapeLabel(m.category, m.shape_type)}</td>
             <td>${formatMaterialDimensions(m)}</td>
             <td>${formatMaterialWeight(m)}</td>
             <td style="text-align:right">
@@ -10200,10 +13067,6 @@ async function renderMaterialFormView(main) {
     if (material.photo_path) existingPhotoDataUrl = await window.api.getMaterialPhoto(material.photo_path);
   }
 
-  const currentPhotoSrc = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-  const initialShape = material?.shape_type || 'round';
-  const initialCategory = material?.category || 'tray_pan';
-
   main.innerHTML = `
     <div class="topbar">
       <div><h1>${editing ? 'Edit Material' : 'New Material'}</h1>
@@ -10211,23 +13074,66 @@ async function renderMaterialFormView(main) {
       </div>
       <button class="secondary" id="mf-back-btn">← Back to Materials</button>
     </div>
+    <div id="mf-form-root"></div>
+    <button class="primary" id="mf-save-btn">${editing ? 'Save Changes' : 'Save Material'}</button>
+    <span id="mf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
+  `;
 
+  // The photo being picked lives in state.materials (reset whenever the form is opened); the form itself
+  // is the shared one Recipe on Fire's "+ Create new …" dialog also uses.
+  const form = mountMaterialForm(document.getElementById('mf-form-root'), { material, existingPhotoDataUrl, photoState: s });
+
+  document.getElementById('mf-back-btn').addEventListener('click', () => {
+    form.dispose();
+    goBackToMaterialsList();
+  });
+
+  document.getElementById('mf-save-btn').addEventListener('click', async () => {
+    const statusEl = document.getElementById('mf-status');
+    const saveBtn = document.getElementById('mf-save-btn');
+    saveBtn.disabled = true;
+    statusEl.textContent = 'Saving…';
+    const saved = await form.save();
+    if (!saved) { statusEl.textContent = ''; saveBtn.disabled = false; return; }
+    form.dispose();
+    goBackToMaterialsList();
+  });
+}
+
+// The Materials Add / Edit form -- Name, Category, Shape Type (only the Category's shapes), Weight, the
+// shape's dimension fields, the live 3D preview and the optional photo -- drawn into `root`. ONE form for
+// every entry point: the Materials screen (renderMaterialFormView) and Recipe on Fire's "+ Create new
+// cutter / tray…" dialog (openMaterialCreateModal), so the two can never drift apart. The caller draws its
+// own Save / Cancel and calls:
+//   save()    -> validates, calls saveMaterial (a real materials row, MS code assigned by main.js); resolves
+//                { id } on success, or null after telling the chef what went wrong
+//   dispose() -> frees the 3D preview's WebGL context and the resize listener; call on every way out.
+// Options: material (the row being edited, or null for a new one), existingPhotoDataUrl, photoState (an
+// object holding pendingPhoto / removePhoto; a private one by default) and lockCategory (a category key:
+// the Category is fixed to it, so what gets made is usable where it was made).
+function mountMaterialForm(root, { material = null, existingPhotoDataUrl = null, photoState = null, lockCategory = null } = {}) {
+  const editing = !!material;
+  const ps = photoState || { pendingPhoto: null, removePhoto: false };
+  const $ = (id) => root.querySelector(`#${id}`);
+  const currentPhotoSrc = ps.pendingPhoto ? ps.pendingPhoto.dataUrl : (existingPhotoDataUrl && !ps.removePhoto ? existingPhotoDataUrl : null);
+  const initialCategory = lockCategory || material?.category || 'tray_pan';
+  const initialShape = material?.shape_type || 'round';
+
+  root.innerHTML = `
     <div class="generate-controls">
-      <div class="field"><label>Name</label><input id="mf-name" value="${material?.name || ''}" dir="auto" /></div>
+      <div class="field"><label for="mf-name">Name</label><input id="mf-name" dir="auto" /></div>
       <div class="field" style="max-width:200px;">
-        <label>Category</label>
-        <select id="mf-category">
-          ${Object.entries(MATERIAL_CATEGORIES).map(([key, c]) => `<option value="${key}" ${initialCategory === key ? 'selected' : ''}>${c.label}</option>`).join('')}
+        <label for="mf-category">Category</label>
+        <select id="mf-category" ${lockCategory ? 'disabled' : ''}>
+          ${Object.entries(MATERIAL_CATEGORIES).filter(([key]) => !lockCategory || key === lockCategory).map(([key, c]) => `<option value="${key}" ${initialCategory === key ? 'selected' : ''}>${c.label}</option>`).join('')}
         </select>
       </div>
       <div class="field" style="max-width:240px;">
-        <label>Shape Type</label>
-        <select id="mf-shape">
-          ${Object.entries(MATERIAL_SHAPE_PRESETS).map(([key, p]) => `<option value="${key}" ${initialShape === key ? 'selected' : ''}>${p.label}</option>`).join('')}
-        </select>
+        <label for="mf-shape">Shape Type</label>
+        <select id="mf-shape"></select>
       </div>
       <div class="field" style="max-width:200px;">
-        <label id="mf-weight-label">Weight (g)</label>
+        <label id="mf-weight-label" for="mf-weight">Weight (g)</label>
         <input id="mf-weight" type="number" min="0" step="1" value="${material?.weight_grams ?? ''}" />
         <span id="mf-weight-hint" style="font-size:11px; color:var(--neutral);"></span>
       </div>
@@ -10249,25 +13155,25 @@ async function renderMaterialFormView(main) {
     </div>
 
     <div class="field" style="margin:16px 0; max-width:320px;">
-      <label>Photo (optional)</label>
+      <label for="mf-photo-input">Photo (optional)</label>
       <input type="file" id="mf-photo-input" accept="image/jpeg,image/png" />
       <div id="mf-photo-preview-wrap" style="margin-top:8px; ${currentPhotoSrc ? '' : 'display:none;'}">
-        <img id="mf-photo-preview" src="${currentPhotoSrc || ''}" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
+        <img id="mf-photo-preview" src="${currentPhotoSrc || ''}" alt="" style="max-width:220px; max-height:220px; border:1px solid var(--line); border-radius:6px; display:block;" />
         <button type="button" class="secondary" id="mf-photo-remove-btn" style="margin-top:6px;">Remove Photo</button>
       </div>
     </div>
-
-    <button class="primary" id="mf-save-btn">${editing ? 'Save Changes' : 'Save Material'}</button>
-    <span id="mf-status" style="margin-left:12px; color:var(--neutral); font-size:12.5px;"></span>
   `;
+
+  // Set as a property, not in the markup, so a name with a quote in it can't break the field.
+  $('mf-name').value = material?.name || '';
 
   // Photo -- single-photo model, same pattern as Recipe Book's own (see renderRecipeFormView).
   function updatePhotoPreview() {
-    const src = s.pendingPhoto ? s.pendingPhoto.dataUrl : (existingPhotoDataUrl && !s.removePhoto ? existingPhotoDataUrl : null);
-    document.getElementById('mf-photo-preview-wrap').style.display = src ? '' : 'none';
-    document.getElementById('mf-photo-preview').src = src || '';
+    const src = ps.pendingPhoto ? ps.pendingPhoto.dataUrl : (existingPhotoDataUrl && !ps.removePhoto ? existingPhotoDataUrl : null);
+    $('mf-photo-preview-wrap').style.display = src ? '' : 'none';
+    $('mf-photo-preview').src = src || '';
   }
-  document.getElementById('mf-photo-input').addEventListener('change', (e) => {
+  $('mf-photo-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
     if (!['image/jpeg', 'image/png'].includes(file.type)) {
@@ -10285,33 +13191,33 @@ async function renderMaterialFormView(main) {
       const dataUrl = reader.result;
       const base64 = dataUrl.split(',')[1];
       const ext = file.type === 'image/png' ? 'png' : 'jpeg';
-      s.pendingPhoto = { dataUrl, base64, ext };
-      s.removePhoto = false;
+      ps.pendingPhoto = { dataUrl, base64, ext };
+      ps.removePhoto = false;
       updatePhotoPreview();
     };
     reader.readAsDataURL(file);
   });
-  document.getElementById('mf-photo-remove-btn').addEventListener('click', () => {
-    s.pendingPhoto = null;
-    s.removePhoto = true;
-    document.getElementById('mf-photo-input').value = '';
+  $('mf-photo-remove-btn').addEventListener('click', () => {
+    ps.pendingPhoto = null;
+    ps.removePhoto = true;
+    $('mf-photo-input').value = '';
     updatePhotoPreview();
   });
 
   // Dimensions + live 3D preview -- rebuilt whenever the shape type changes (a different field
   // set entirely), refreshed on every dimension keystroke otherwise.
-  const preview3D = createMaterialPreview3D(document.getElementById('mf-preview-canvas'));
-  const dimensionFieldsEl = document.getElementById('mf-dimension-fields');
+  const preview3D = createMaterialPreview3D($('mf-preview-canvas'));
+  const dimensionFieldsEl = $('mf-dimension-fields');
 
-  function currentShape() { return document.getElementById('mf-shape').value; }
+  function currentShape() { return $('mf-shape').value; }
 
-  function currentCategory() { return document.getElementById('mf-category').value; }
+  function currentCategory() { return $('mf-category').value; }
 
   function updatePreview() {
     const shape = currentShape();
-    const dims = readMaterialDims(shape);
+    const dims = readMaterialDims(shape, root);
     const hasAllDims = MATERIAL_SHAPE_PRESETS[shape].fields.every(f => dims[f.key] > 0);
-    document.getElementById('mf-preview-empty').style.display = hasAllDims ? 'none' : '';
+    $('mf-preview-empty').style.display = hasAllDims ? 'none' : '';
     preview3D.setShape(shape, dims, currentCategory());
   }
 
@@ -10322,16 +13228,16 @@ async function renderMaterialFormView(main) {
   // just after saving.
   function updateWeightLabel() {
     const shape = currentShape();
-    const labelEl = document.getElementById('mf-weight-label');
-    const hintEl = document.getElementById('mf-weight-hint');
+    const labelEl = $('mf-weight-label');
+    const hintEl = $('mf-weight-hint');
     if (shape !== 'muffin_tray') {
       labelEl.textContent = 'Weight (g)';
       hintEl.textContent = '';
       return;
     }
     labelEl.textContent = 'Weight per Cup (g)';
-    const dims = readMaterialDims(shape);
-    const weightRaw = document.getElementById('mf-weight').value.trim();
+    const dims = readMaterialDims(shape, root);
+    const weightRaw = $('mf-weight').value.trim();
     const weight = weightRaw === '' ? null : parseFloat(weightRaw);
     const total = materialCapacityGrams({ shape_type: shape, weight_grams: weight, cup_rows: dims.cupRows, cup_columns: dims.cupColumns });
     hintEl.textContent = total != null ? `Tray total: ${total} g (${dims.cupRows}×${dims.cupColumns} cups)` : '';
@@ -10346,17 +13252,34 @@ async function renderMaterialFormView(main) {
     updateWeightLabel();
   }
 
-  document.getElementById('mf-weight').addEventListener('input', updateWeightLabel);
+  $('mf-weight').addEventListener('input', updateWeightLabel);
 
-  renderDimensionsForShape(initialShape, materialDimsFromRow(material));
+  // Shape Type lists only the chosen Category's shapes (MATERIAL_CATEGORY_SHAPES). The saved shape of the
+  // material being edited is kept as an option while its own category is selected.
+  function fillShapeOptions(category, selected) {
+    const keep = editing && category === material.category ? material.shape_type : null;
+    const opts = materialShapeOptions(category, keep);
+    const pick = opts.some(([k]) => k === selected) ? selected : opts[0][0];
+    $('mf-shape').innerHTML = opts.map(([key, label]) => `<option value="${key}" ${pick === key ? 'selected' : ''}>${label}</option>`).join('');
+    return pick;
+  }
 
-  document.getElementById('mf-shape').addEventListener('change', () => {
+  const firstShape = fillShapeOptions(initialCategory, initialShape);
+  renderDimensionsForShape(firstShape, firstShape === initialShape ? materialDimsFromRow(material) : {});
+
+  $('mf-shape').addEventListener('change', () => {
     renderDimensionsForShape(currentShape(), {});
   });
 
-  // Category doesn't change which dimension fields show (only shape does) -- just re-derives the
-  // 3D preview's floor-or-not, so a plain updatePreview() is enough, no full dimension re-render.
-  document.getElementById('mf-category').addEventListener('change', updatePreview);
+  // A category change re-lists the shapes. If the current shape is still offered it stays, with its typed
+  // dimensions (only the 3D preview's floor-or-not changes); otherwise the first shape of the new list is
+  // chosen and its fields shown empty.
+  $('mf-category').addEventListener('change', () => {
+    const before = currentShape();
+    const after = fillShapeOptions(currentCategory(), before);
+    if (after === before) updatePreview();
+    else renderDimensionsForShape(after, {});
+  });
 
   // The preview canvas has no pixel size of its own (CSS gives its wrapper height:300px, width
   // 100%) -- resize once layout has settled, and again if the window itself resizes while this
@@ -10365,57 +13288,104 @@ async function renderMaterialFormView(main) {
   const onWindowResize = () => preview3D.resize();
   window.addEventListener('resize', onWindowResize);
 
-  // This view is torn down and rebuilt fresh on every navigation (same as every other screen in
-  // this app), never re-rendered in place -- so the running WebGL context needs an explicit
-  // teardown, or every visit to this form leaks another one. Both ways out of this form (Back,
-  // successful Save) go through here.
-  function leaveForm() {
+  // Every screen in this app is torn down and rebuilt fresh on navigation, never re-rendered in place,
+  // so the running WebGL context needs an explicit teardown, or every visit to this form leaks another
+  // one. Every way out (Back, successful Save, the dialog's Cancel / Escape) goes through dispose().
+  let disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
     window.removeEventListener('resize', onWindowResize);
     preview3D.dispose();
   }
 
-  document.getElementById('mf-back-btn').addEventListener('click', () => {
-    leaveForm();
-    goBackToMaterialsList();
-  });
-
-  document.getElementById('mf-save-btn').addEventListener('click', async () => {
-    const name = document.getElementById('mf-name').value.trim();
-    if (!name) return alert('Please enter a material name.');
-
-    const statusEl = document.getElementById('mf-status');
-    const saveBtn = document.getElementById('mf-save-btn');
-    saveBtn.disabled = true;
-    statusEl.textContent = 'Saving…';
+  async function save() {
+    const name = $('mf-name').value.trim();
+    if (!name) { alert('Please enter a material name.'); $('mf-name').focus(); return null; }
 
     const shape = currentShape();
-    const weightRaw = document.getElementById('mf-weight').value.trim();
+    const weightRaw = $('mf-weight').value.trim();
 
     const payload = {
-      id: s.formId || undefined,
+      id: material?.id || undefined,
       name,
       category: currentCategory(),
       shapeType: shape,
-      ...buildMaterialDimensionPayload(shape),
+      ...buildMaterialDimensionPayload(shape, root),
       weightGrams: weightRaw === '' ? null : parseFloat(weightRaw),
-      removePhoto: s.removePhoto,
+      removePhoto: ps.removePhoto,
     };
-    if (s.pendingPhoto) {
-      payload.photoBase64 = s.pendingPhoto.base64;
-      payload.photoExt = s.pendingPhoto.ext;
+    if (ps.pendingPhoto) {
+      payload.photoBase64 = ps.pendingPhoto.base64;
+      payload.photoExt = ps.pendingPhoto.ext;
     }
 
     try {
-      await window.api.saveMaterial(payload);
-      leaveForm();
-      goBackToMaterialsList();
+      return await window.api.saveMaterial(payload);
     } catch (err) {
-      statusEl.textContent = '';
-      saveBtn.disabled = false;
       alert(`Save failed: ${err.message}`);
+      return null;
     }
-  });
+  }
+
+  return { save, dispose, focus: () => $('mf-name').focus() };
 }
 
+// "+ Create new cutter… / tray…" from Recipe on Fire: the Materials form (mountMaterialForm, the very same
+// one the Materials screen uses) in a dialog over the screen, so a new material never needs a trip to
+// Materials. The Category is fixed by where it was opened (a cutter from Trim, a tray / pan from Setup), so
+// what she makes is usable right there. Saving creates a REAL materials row. Resolves { id, materials }
+// (the freshly reloaded catalog, so the caller can select the new one straight away), or null on Cancel.
+function openMaterialCreateModal({ category }) {
+  return new Promise((resolve) => {
+    const noun = category === 'cutter' ? 'Cutter' : 'Tray / Pan';
+    const opener = document.activeElement; // focus goes back here when the dialog closes
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal material-create-modal" role="dialog" aria-modal="true" aria-labelledby="mcm-title">
+        <h2 id="mcm-title">New ${noun}</h2>
+        <p class="mcm-note">Saved to the Materials catalog (MS code assigned on save), exactly as if made there.</p>
+        <div id="mcm-form"></div>
+        <div class="actions">
+          <span id="mcm-status" role="status"></span>
+          <button type="button" class="secondary" id="mcm-cancel">Cancel</button>
+          <button type="button" class="primary" id="mcm-save">Save ${noun.toLowerCase()}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const form = mountMaterialForm(overlay.querySelector('#mcm-form'), { lockCategory: category });
+    let busy = false;
+    const close = (result) => {
+      document.removeEventListener('keydown', onKeydown, true);
+      form.dispose();
+      overlay.remove();
+      if (opener && opener.focus) opener.focus();
+      resolve(result);
+    };
+    // Escape cancels (not while saving); Tab stays inside the dialog -- same as the Dough Shapes dialog.
+    function onKeydown(e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (!busy) close(null); return; }
+      if (e.key !== 'Tab') return;
+      const focusable = [...overlay.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled && el.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
+    document.addEventListener('keydown', onKeydown, true);
+    overlay.querySelector('#mcm-cancel').addEventListener('click', () => { if (!busy) close(null); });
+    overlay.querySelector('#mcm-save').addEventListener('click', async () => {
+      const saveBtn = overlay.querySelector('#mcm-save'), cancelBtn = overlay.querySelector('#mcm-cancel'), status = overlay.querySelector('#mcm-status');
+      busy = true; saveBtn.disabled = true; cancelBtn.disabled = true; status.textContent = 'Saving…';
+      const saved = await form.save();
+      if (!saved) { busy = false; saveBtn.disabled = false; cancelBtn.disabled = false; status.textContent = ''; return; }
+      let materials = null;
+      try { materials = await window.api.listMaterials(); } catch (err) { console.error('[materials] reload after create failed:', err); }
+      close({ id: saved.id, materials });
+    });
+    form.focus();
+  });
+}
 
 init().catch(showViewError);
