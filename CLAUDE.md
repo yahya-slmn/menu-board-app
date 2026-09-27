@@ -388,7 +388,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   Layers (raw -> baked per tray, wastage, "not used" / "short" as their own lines, never waste), Stack & cuts, One portion,
   Waste (each layer's planned Baking Waste beside the measured scrap), Baking (pre-bake and final bake). Prints on one A4.
   The layered tray is complete (L1-L5); Shape & Place and muffin trays stay single-dough only.
-- Batch Calculator (in progress, phases B1-B5; B1 + B2 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
+- Batch Calculator (in progress, phases B1-B5; B1-B3 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
   a tray, a cut (cutter or knife) and each layer's THICKNESS give the trays needed and each process's Total Quantity, which then
   drive Setup -> Trim for one tray's share (session-only; nothing written back). Layered recipes (2+ processes) only; a
   single-process batch (B6) is deferred. `rof/batch.js` `solveBatch` (pure, tested): pieces per tray from the SAME `packCutters`
@@ -405,9 +405,16 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   the panel has the tray (the same `#rof-material-select`, so `updateSetupPreview` draws it), Portions, Cutter | Knife. The
   full result is a card OVER THE STAGE (`#rof-batch-card`, like Fill's cross-section) so any number of layers fits
   1280x800; the panel keeps a one-line status ("Still to set: ...", an error, or the headline). One dough / a process change
-  turns the batch off. Next: B3 carry
-  into Setup / Pre-bake / Fill / Bake (scaled session ingredient rows via `scaleIngredientSets`, tray count locked, every
-  layer "All of it"), B4 Trim locked to the batch's cut, B5 PDF page 2+ "Recipe for X portions:" from
+  turns the batch off.
+  B3 (carry): Batch's "Setup ->" = `applyBatch`: each process's SESSION `ingredientRows` are scaled from its own rows
+  (`batchOriginals`, so re-solving never compounds) by `scaleIngredientSets` (one multiplier per process), and while
+  `batchApplied` `computeLayerPlan` uses the batch's tray count, "All of it" for every layer and `excludeTrimming` -- the
+  saved fill choices / tray count are never overwritten, so leaving undoes it. Everything downstream reads quantities through
+  computeLayerPlan (rise / filling looks read proportions only), so Pre-bake / Fill / Bake / Trim are unchanged. Setup: tray
+  select and Trays locked ("from the batch (N portions)"); a density / wastage / thickness edit re-solves (`updateLayerPlan`
+  -> `applyBatch` -> `refreshLayerSums`). Fill shows each layer's thickness read-only. `resetBatch` (Use the recipe as
+  saved, One dough, a process change, a new recipe) puts the recipe's own rows back. Next: B4 Trim locked to the batch's
+  cut, B5 PDF page 2+ "Recipe for X portions:" from
   `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight).
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /

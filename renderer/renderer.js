@@ -10371,14 +10371,27 @@ function renderRecipeOnFireView(main) {
   // ---- Batch Calculator (In layers only; the arithmetic is renderer/rof/batch.js, pure) ------------------
   // An optional step BEFORE Setup that runs the layer plan in reverse: a target portion count, the tray, the cut
   // (a cutter or a knife grid) and each layer's thickness (layerCfg's thicknessCm) give the trays needed and how
-  // much of each process to make. Session-only, like the rest of this screen. Phase B2: the step and its live
-  // result; carrying the batch into Setup is the next phase (B3), so Setup -> waits.
+  // much of each process to make. Session-only, like the rest of this screen.
+  // "Setup ->" APPLIES it (applyBatch): each process's ingredient rows (the session copy, never the saved recipe) are
+  // scaled to the batch's Total Quantity with the Recipe Calculator's own rounding, and the layer plan takes the batch's
+  // tray count, "All of it" for every layer and Trimming Waste left out (computeLayerPlan) -- so Setup, Pre-bake, Fill,
+  // Bake and Trim work on one tray's share of it exactly as they do on a saved recipe. The targets (tray, cut,
+  // thicknesses, portions) stay fixed; the quantities are re-solved whenever density or wastage changes in Setup.
   const BATCH_CFG_DEFAULT = { target: '', cutKind: 'cutter', cutterId: null, across: 5, down: 5 };
   let batchOn = false;
   let batchCfg = { ...BATCH_CFG_DEFAULT };
   let batchResult = null;          // the last solveBatch() result
+  let batchApplied = null;         // { result, trayId } once "Setup ->" has scaled the recipe to it
+  const batchOriginals = new Map(); // localId -> the process's own ingredient rows, before the batch scaled them
   const batchActive = () => batchOn && layersActive();
-  function resetBatch() { batchOn = false; batchResult = null; }
+  function resetBatch() {
+    for (const [id, rows] of batchOriginals) {
+      const p = workingProcesses.find(x => String(x.localId) === id);
+      if (p) p.ingredientRows = rows;
+    }
+    batchOriginals.clear();
+    batchOn = false; batchResult = null; batchApplied = null;
+  }
 
   // ---- Step-wizard state -----------------------------------------------------------------------
   // One continuous session over shared state (processes / wastes / tray / whatever is in the game view),
@@ -10696,10 +10709,18 @@ function renderRecipeOnFireView(main) {
     const qty = `${roundNice(sumIngredientQuantities(p.ingredientRows))} g`;
     if (batchActive()) { // the recipe's own quantity doesn't set anything here: the thickness does
       const t = parseFloat(c.thicknessCm);
-      return `${t > 0 ? `${t} cm thick` : 'thickness … cm'}${i === 0 && c.prebake ? ' · pre-bake' : ''}`;
+      return `${t > 0 ? `${t} cm thick` : 'thickness … cm'}${batchApplied && rofStep !== 'batch' ? ` · ${batchGrams(sumIngredientQuantities(p.ingredientRows))}` : ''}${i === 0 && c.prebake ? ' · pre-bake' : ''}`;
     }
     if (i === 0) return `${qty}${c.prebake ? ' · pre-bake' : ''}`;
     return `${qty} · ${c.fillKind === 'height' ? (parseFloat(c.targetCm) > 0 ? `up to ${parseFloat(c.targetCm)} cm` : 'up to … cm') : 'all of it'}`;
+  }
+  // Rewrites every layer card's folded summary line in place (no re-render, so an input being typed in keeps focus).
+  function refreshLayerSums() {
+    const procs = selectedProcesses();
+    summaryEl.querySelectorAll('.rof-layer').forEach(card => {
+      const id = card.dataset.layer, p = procs.find(x => String(x.localId) === id), el = card.querySelector('.rof-layer-sum');
+      if (p && el) el.textContent = layerSummaryText(p, layerOrder.indexOf(id));
+    });
   }
   // One card per layer, top first (as they sit in the tray). Folded, a card is one line: its number, name, a short
   // summary and the move buttons; opened (one at a time), it has the density (est., editable), its own wastage, and
@@ -10840,7 +10861,8 @@ function renderRecipeOnFireView(main) {
     const baseFillElsewhere = !baseFillWeight && base.materialId != null && Number(base.materialFillWeightGrams) > 0;
     const run = (measured) => L.planLayers({
       tray: { areaCm2: fp.areaCm2, usableHeightCm: fp.usableHeightCm },
-      trays: { fillWeightGrams: baseFillWeight, manualCount: layerTraysManual },
+      trays: { fillWeightGrams: baseFillWeight, manualCount: batchApplied ? batchApplied.result.trays : layerTraysManual },
+      excludeTrimming: !!batchApplied, // the batch's cut layout measures the trimming (see rof/batch.js)
       layers: procs.map((p, i) => {
         const c = layerCfg.get(String(p.localId));
         return {
@@ -10848,7 +10870,7 @@ function renderRecipeOnFireView(main) {
           totalGrams: sumIngredientQuantities(p.ingredientRows), wastes: c.wastes, density: parseFloat(c.density),
           prebake: i === 0 && c.prebake,
           measuredHeightCm: i === 0 ? measured : null,
-          fill: i === 0 || c.fillKind !== 'height' ? { kind: 'all' } : { kind: 'height', targetCm: parseFloat(c.targetCm) },
+          fill: batchApplied || i === 0 || c.fillKind !== 'height' ? { kind: 'all' } : { kind: 'height', targetCm: parseFloat(c.targetCm) },
           // The pre-bake's own correction for a pre-baked base; the final bake's for everything that rises in it.
           hMul: layerHMul(p) * (i === 0 && c.prebake ? (Number(c.riseScale) || 1) : layerFinalRise),
         };
@@ -10868,6 +10890,15 @@ function renderRecipeOnFireView(main) {
     if (rofStep === 'batch') { updateBatchPlan(); return; } // same cards, the batch's own result
     const el = document.getElementById('rof-fill-summary');
     if (!el || !layersActive()) return;
+    // A density / wastage / thickness edit re-solves the batch (the targets stay; the quantities follow).
+    const resolved = batchApplied && bakeSnapshot ? applyBatch() : null;
+    if (resolved !== null) refreshLayerSums(); // every card's quantity follows the re-solve, not just the edited one
+    if (resolved === false) {
+      layerPlan = null;
+      el.innerHTML = `<div class="computed-value-box rof-layer-plan">${(batchResult?.errors || []).map(e => `<div class="rof-leftover">${escHtml(e)}</div>`).join('')}</div>`;
+      syncLayerContinue();
+      return;
+    }
     const material = bakeSnapshot?.material;
     if (!material || !bakeSnapshot?.footprint) { el.innerHTML = ''; layerPlan = null; syncLayerContinue(); return; }
     if (material.shape_type === 'muffin_tray') {
@@ -10896,12 +10927,15 @@ function renderRecipeOnFireView(main) {
     }
     const traysIn = el.querySelector('#rof-layer-trays');
     if (document.activeElement !== traysIn) traysIn.value = plan.trays || '';
+    traysIn.disabled = !!batchApplied;
     const auto = L.trayCount({ baseRawGrams: plan.layers[0]?.availableRawTotal || 0, fillWeightGrams: r.baseFillWeight });
     const src = el.querySelector('#rof-layer-trays-src');
-    src.textContent = plan.traySource === 'manual' ? 'your count'
+    src.textContent = batchApplied ? `from the batch (${batchApplied.result.totalPortions} portions)`
+      : plan.traySource === 'manual' ? 'your count'
       : plan.traySource === 'fillWeight' ? `from Fill Weight (${g(r.baseFillWeight)})`
       : r.baseFillElsewhere ? 'Fill Weight is for another tray' : 'no Fill Weight saved';
-    src.title = plan.traySource === 'manual'
+    src.title = batchApplied ? 'Set by the Batch step: change the portions or the cut there.'
+      : plan.traySource === 'manual'
       ? (auto.source === 'fillWeight' ? `The bottom layer's Fill Weight gives ${auto.count}. Clear the box to use it.` : 'Clear the box to go back to 1.')
       : plan.traySource === 'fillWeight' ? `${g(plan.layers[0].availableRawTotal)} of ${escHtml(r.base.name || 'the bottom layer')} at ${g(r.baseFillWeight)} per tray, split evenly.`
       : 'Type how many trays this batch fills.';
@@ -11269,7 +11303,7 @@ function renderRecipeOnFireView(main) {
       </div>
       <div class="rof-setup-go">
         <button type="button" class="primary" id="rof-continue-btn" style="margin-top:4px;" disabled>Continue →</button>
-        ${layersActive() ? '<button type="button" class="secondary" id="rof-batch-btn" title="Work backwards from how many portions you need: the trays and how much of each process to make">From a portion target…</button>' : ''}
+        ${layersActive() && !batchOn ? '<button type="button" class="secondary" id="rof-batch-btn" title="Work backwards from how many portions you need: the trays and how much of each process to make">From a portion target…</button>' : ''}
       </div>
     `;
     document.getElementById('rof-batch-btn')?.addEventListener('click', () => { batchOn = true; enterBatchStep(); });
@@ -11307,6 +11341,12 @@ function renderRecipeOnFireView(main) {
       else if (layerCfg.get(layerOrder[0])?.prebake) startPrebakeFlow();
       else startFillFlow({ fromPrebake: false });
     });
+    if (batchApplied) { // the batch was worked out for this tray
+      const sel = document.getElementById('rof-material-select');
+      sel.disabled = true;
+      sel.title = 'Chosen in the Batch step: go back to Batch to change it.';
+      lastMaterialId = batchApplied.trayId;
+    }
     reloadMaterials();
     populateMaterialSelect();
   }
@@ -11326,7 +11366,7 @@ function renderRecipeOnFireView(main) {
   function backToSetup() {
     resetGameSession();
     rofStep = 'setup';
-    reachedRofSteps = new Set(['setup']);
+    reachedRofSteps = new Set([...(batchApplied ? ['batch'] : []), 'setup']);
     bakeSnapshot = null;
     renderTrayStepPanel();
   }
@@ -11373,13 +11413,37 @@ function renderRecipeOnFireView(main) {
         const c = layerCfg.get(String(p.localId));
         return {
           key: String(p.localId), name: p.name || '(untitled process)',
-          totalGrams: sumIngredientQuantities(p.ingredientRows), wastes: c.wastes,
+          totalGrams: sumIngredientQuantities(batchOriginals.get(String(p.localId)) || p.ingredientRows), wastes: c.wastes,
           density: parseFloat(c.density), thicknessCm: parseFloat(c.thicknessCm), prebake: i === 0 && c.prebake,
           // Only for the after-bake height estimate; the quantities never depend on it.
           hMul: layerHMul(p) * (i === 0 && c.prebake ? (Number(c.riseScale) || 1) : layerFinalRise),
         };
       }),
     };
+  }
+  // Solves the batch and scales each process's session rows to it -- always from the recipe's own rows, so
+  // re-solving never compounds. One multiplier per process; scaleIngredientSets rounds each process's rows to add
+  // up to its Total Quantity to the hundredth (the Recipe Calculator's rounding). False (nothing changed) on an error.
+  function applyBatch() {
+    const r = batchResult = window.RofGame.batch.solveBatch(batchInputs());
+    if (!r.ok) return false;
+    const procs = syncLayers(selectedProcesses());
+    procs.forEach(p => {
+      const id = String(p.localId);
+      if (!batchOriginals.has(id)) batchOriginals.set(id, p.ingredientRows.map(x => ({ ...x })));
+    });
+    const scaled = scaleIngredientSets(procs.map(p => batchOriginals.get(String(p.localId))), r.layers.map(l => l.multiplier));
+    procs.forEach((p, i) => { p.ingredientRows = scaled[i]; });
+    batchApplied = { result: r, trayId: String(bakeSnapshot.material.id) };
+    return true;
+  }
+  function batchToSetup() {
+    if (!bakeSnapshot || !applyBatch()) return;
+    rofStep = 'setup';
+    reachedRofSteps = new Set(['batch', 'setup']);
+    layerOpenId = '';
+    renderProcessSummary();
+    renderTrayStepPanel();
   }
   // Big batch quantities read better with thousands separators (22,911.5 g).
   const batchGrams = (v) => `${(Math.round(v * 10) / 10).toLocaleString('en-US')} g`;
@@ -11402,6 +11466,8 @@ function renderRecipeOnFireView(main) {
   function updateBatchPlan() {
     const el = document.getElementById('rof-batch-result');
     if (!el) return;
+    const go = document.getElementById('rof-batch-go');
+    if (go) { go.disabled = true; go.title = 'Finish the batch first.'; }
     const say = (html) => { el.innerHTML = html; hideBatchCard(); };
     if (!bakeSnapshot) { batchResult = null; say('<span class="rof-batch-wait">Choose a tray.</span>'); return; }
     const input = batchInputs();
@@ -11438,6 +11504,7 @@ function renderRecipeOnFireView(main) {
       ${trimmed.length ? `<div class="rof-batch-note">Trimming Waste (${trimmed.map(l => l.trimmingExcluded.map(w => `${w.percent}%`).join(' + ')).join(', ')}) is left out on purpose: the cuts on the tray are the real trimming, so taking the recipe's Trimming % off too would overstate what you prepare.</div>` : ''}
       ${r.warnings.map(w => `<div class="rof-leftover">${escHtml(w)}</div>`).join('')}`;
     card.hidden = false;
+    if (go) { go.disabled = false; go.title = ''; }
   }
   function fillBatchCutterSelect() {
     const sel = document.getElementById('rof-batch-cutter');
@@ -11469,7 +11536,7 @@ function renderRecipeOnFireView(main) {
       </div>
       <div class="rof-batch-result" id="rof-batch-result" role="status" aria-live="polite"></div>
       <div class="rof-setup-go">
-        <button type="button" class="primary" id="rof-batch-go" disabled title="Carrying the batch into Setup comes next.">Setup →</button>
+        <button type="button" class="primary" id="rof-batch-go" disabled>Setup →</button>
         <button type="button" class="rof-link-btn" id="rof-batch-off">Use the recipe as saved</button>
       </div>`;
     document.getElementById('rof-material-select').addEventListener('change', (e) => {
@@ -11486,6 +11553,7 @@ function renderRecipeOnFireView(main) {
     document.getElementById('rof-batch-target').addEventListener('input', (e) => { batchCfg.target = e.target.value; updateBatchPlan(); });
     ['across', 'down'].forEach(k => document.getElementById(`rof-batch-${k}`)?.addEventListener('input', (e) => { batchCfg[k] = e.target.value; updateBatchPlan(); }));
     document.getElementById('rof-batch-off').addEventListener('click', leaveBatch);
+    document.getElementById('rof-batch-go').addEventListener('click', batchToSetup);
     reloadMaterials();
     populateMaterialSelect(); // -> updateSetupPreview -> the tray on the stage and updateBatchPlan
     if (!knife) {
@@ -12628,11 +12696,11 @@ function renderRecipeOnFireView(main) {
           <div class="rof-fill-layer" data-fill-layer="${id}">
             <div class="rof-fill-head">
               <strong class="rof-fill-name" dir="auto" title="${name}">${name}</strong>
-              <span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
+              ${batchApplied ? `<span class="rof-layer-est" title="Set in the Batch step">${cmFmt(parseFloat(c.thicknessCm))} thick, from the batch</span>` : `<span class="mode-toggle rof-mini-toggle" role="group" aria-label="How much of ${name} goes in">
                 <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? '' : 'active'}" data-fill-kind="all" aria-pressed="${c.fillKind !== 'height'}">All of it</button>
                 <button type="button" class="mode-toggle-btn ${c.fillKind === 'height' ? 'active' : ''}" data-fill-kind="height" aria-pressed="${c.fillKind === 'height'}">Up to</button>
               </span>
-              ${c.fillKind === 'height' ? `<input type="number" min="0.1" step="0.1" value="${escHtml(String(c.targetCm ?? ''))}" data-fill-target class="rof-layer-target" aria-label="${name}: height from the tray floor, cm" placeholder="cm" /> cm` : ''}
+              ${c.fillKind === 'height' ? `<input type="number" min="0.1" step="0.1" value="${escHtml(String(c.targetCm ?? ''))}" data-fill-target class="rof-layer-target" aria-label="${name}: height from the tray floor, cm" placeholder="cm" /> cm` : ''}`}
             </div>
             <div class="rof-fill-line" data-fill-line role="status" aria-live="polite"></div>
           </div>`;
@@ -13042,6 +13110,7 @@ function renderRecipeOnFireView(main) {
     reachedRofSteps = new Set(['setup']);
     bakeSnapshot = null;
     resetGameSession();
+    resetBatch();
     renderProcessSummary();
     const hasSelection = selectedProcessLocalIds.size > 0;
     traySection.style.display = hasSelection ? '' : 'none';
