@@ -6,6 +6,7 @@ import { packCutters } from './packing.js';
 import { measurePortion, fmtCm } from './portion.js';
 import { parseBakeParams } from './bakeParams.js';
 import * as layers from './layers.js';
+import * as batch from './batch.js';
 import { fillingLook } from './filling.js';
 import { stackSvg } from './stack.js';
 
@@ -21,6 +22,7 @@ window.RofGame = {
   packCutters,         // cutter packing (pure geometry)
   parseBakeParams,     // reads an oven temperature / bake time out of method text (best effort)
   layers,              // layered tray (Sheet & Trim, "In layers"): grams / heights / trays per layer (pure)
+  batch,               // Batch Calculator: target portions + layer thicknesses -> trays and quantities (pure)
   fillingLook,         // a filling layer's colours, from its ingredient names (pure)
   stackSvg,            // a layered tray's cross-section, to scale, as an SVG string (pure)
   fmtCm,               // the centimetre format the portion view uses

@@ -26,14 +26,18 @@ export const DENSITY_FILLING = 1.0;
 // rise estimate has no flour to read in a filling, so this stands in for it (an estimate, shown as one).
 export const FILLING_H_MUL = 0.1;
 
-const isBaking = (w) => /baking/i.test(w?.name || '');
-const pctOf = (w) => { const v = parseFloat(w?.percent); return Number.isFinite(v) ? Math.min(Math.max(v, 0), 100) : 0; };
-const retentionOf = (wastes, pick) => (wastes || []).filter(pick).reduce((acc, w) => acc * (1 - pctOf(w) / 100), 1);
+export const isBaking = (w) => /baking/i.test(w?.name || '');
+// Trimming Waste: the same match the PDF uses (renderer.js buildPdfData, wasteIdx(/trim/i)).
+export const isTrimming = (w) => /trim/i.test(w?.name || '');
+export const pctOf = (w) => { const v = parseFloat(w?.percent); return Number.isFinite(v) ? Math.min(Math.max(v, 0), 100) : 0; };
+export const retentionOf = (wastes, pick) => (wastes || []).filter(pick).reduce((acc, w) => acc * (1 - pctOf(w) / 100), 1);
 
 // The grams of one layer's recipe that go into the tray(s) raw, and what share of them is left after baking.
-export function layerGrams({ totalGrams, wastes }) {
+// excludeTrimming (Batch Calculator only, see batch.js): Trimming Waste is left out of the pre-tray wastes, because
+// there the cut layout IS the trimming measurement. Default false = the L1 convention, unchanged.
+export function layerGrams({ totalGrams, wastes }, { excludeTrimming = false } = {}) {
   const total = Number(totalGrams) > 0 ? Number(totalGrams) : 0;
-  const raw = total * retentionOf(wastes, (w) => !isBaking(w));
+  const raw = total * retentionOf(wastes, (w) => !isBaking(w) && !(excludeTrimming && isTrimming(w)));
   const bakeRetention = retentionOf(wastes, isBaking);
   return { total, raw, bakeRetention, hasBakingWaste: (wastes || []).some(isBaking) };
 }
@@ -67,14 +71,15 @@ export function trayCount({ baseRawGrams, fillWeightGrams, manualCount }) {
 //   trays:  { fillWeightGrams, manualCount }
 // Returns { ok, errors, warnings, trays, traySource, layers: [...per layer...], assembledHeightCm, finalHeightEstCm,
 //   finishedPerTrayGrams, rawPerTrayGrams }. Grams per layer are per tray unless named *Total.
-export function planLayers({ tray, layers, trays = {} }) {
+//   excludeTrimming: see layerGrams (the Batch Calculator's plans only).
+export function planLayers({ tray, layers, trays = {}, excludeTrimming = false }) {
   const errors = [], warnings = [];
   const area = Number(tray?.areaCm2) || 0, usable = Number(tray?.usableHeightCm) || 0;
   if (!(area > 0)) errors.push('The tray has no inside area.');
   if (!Array.isArray(layers) || layers.length < 2) errors.push('A layered tray needs at least two processes.');
   if (errors.length) return { ok: false, errors, warnings, layers: [] };
 
-  const g = layers.map(l => layerGrams(l));
+  const g = layers.map(l => layerGrams(l, { excludeTrimming }));
   const base = layers[0];
   const tc = trayCount({ baseRawGrams: g[0].raw, fillWeightGrams: trays.fillWeightGrams, manualCount: trays.manualCount });
   const n = tc.count;
