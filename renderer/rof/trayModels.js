@@ -112,6 +112,15 @@ export function regionFromFootprint(shapeType, footprint) {
   return null;
 }
 
+// The tray's OUTER footprint as a plan box (what Auto-arrange scans; containment is checked against the interior region).
+// Pure, from the Materials dims: buildTray uses it, and so does the Shape & Place batch plan (shapeBatch.js).
+export function trayPlanFromDims(shapeType, dims) {
+  if (shapeType === 'round') { const r = dims.diameterCm / 2; return { minX: -r, maxX: r, minY: -r, maxY: r }; }
+  if (shapeType === 'rectangular' || shapeType === 'muffin_tray') return { minX: -dims.lengthCm / 2, maxX: dims.lengthCm / 2, minY: -dims.widthCm / 2, maxY: dims.widthCm / 2 };
+  if (shapeType === 'triangle') return { minX: -dims.baseCm / 2, maxX: dims.baseCm / 2, minY: 0, maxY: dims.triHeightCm };
+  return null;
+}
+
 export function buildTray({ shapeType, dims, footprint }, mats) {
   const group = new THREE.Group();
   let plan, region, floorTopY, rimTopY;
@@ -129,7 +138,7 @@ export function buildTray({ shapeType, dims, footprint }, mats) {
     prof.push(...arc(outerR - rr, h - rr, rr, 0, Math.PI, 10));
     prof.push(...arc(innerR - fi, floorT + fi, fi, 0, -Math.PI / 2, 6), new THREE.Vector2(0, floorT));
     group.add(mesh(new THREE.LatheGeometry(prof, 128), mats.steel, { uv: 'xz' }));
-    plan = { minX: -outerR, maxX: outerR, minY: -outerR, maxY: outerR };
+    plan = trayPlanFromDims('round', dims);
     region = regionFromFootprint('round', { innerR });
     floorTopY = floorT; rimTopY = h;
   } else if (shapeType === 'rectangular') {
@@ -141,7 +150,7 @@ export function buildTray({ shapeType, dims, footprint }, mats) {
     const inner = roundedRectPath(new THREE.Path(), l - 2 * wallT, w - 2 * wallT, Math.max(cr - wallT, 0.25));
     group.add(extrudedSlab(roundedRectPath(new THREE.Shape(), l, w, cr), floorT, mats.steel));
     group.add(extrudedRing(outer, inner, floorT, h - floorT, Math.min(wallT * 0.42, 0.3), mats.steel));
-    plan = { minX: -l / 2, maxX: l / 2, minY: -w / 2, maxY: w / 2 };
+    plan = trayPlanFromDims('rectangular', dims);
     region = regionFromFootprint('rectangular', footprint);
     floorTopY = floorT; rimTopY = h;
   } else if (shapeType === 'triangle') {
@@ -152,7 +161,7 @@ export function buildTray({ shapeType, dims, footprint }, mats) {
     group.add(extrudedSlab(polygonPath(new THREE.Shape(), outerPts), floorT, mats.steel));
     group.add(extrudedRing(polygonPath(new THREE.Shape(), outerPts), polygonPath(new THREE.Path(), footprint.innerPts),
       floorT, h - floorT, Math.min(wallT * 0.42, 0.3), mats.steel));
-    plan = { minX: -b / 2, maxX: b / 2, minY: 0, maxY: triH };
+    plan = trayPlanFromDims('triangle', dims);
     region = regionFromFootprint('triangle', footprint);
     floorTopY = floorT; rimTopY = h;
   } else if (shapeType === 'muffin_tray') {
@@ -185,7 +194,7 @@ export function buildTray({ shapeType, dims, footprint }, mats) {
     for (let j = 1; j <= 8; j++) { const a = (j / 8) * Math.PI / 2; prof.push(new THREE.Vector2(bottomR * Math.cos(a), floorY + bottomR * (1 - Math.sin(a)))); }
     const cupGeo = planarUV(new THREE.LatheGeometry(prof, 40), 'xz');
     centers.forEach(({ x, y }) => { const cup = mesh(cupGeo, mats.steelDark); cup.position.set(x, 0, -y); group.add(cup); });
-    plan = { minX: -l / 2, maxX: l / 2, minY: -w / 2, maxY: w / 2 };
+    plan = trayPlanFromDims('muffin_tray', dims);
     region = { kind: 'cups', centers, r: holeR, floorY, hw: l / 2 - 0.4, hh: w / 2 - 0.4 };
     floorTopY = floorY; rimTopY = h;
   } else {

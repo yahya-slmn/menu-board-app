@@ -454,6 +454,19 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   estimates or types one): an editable line under the process summary, shown only for Sheet & Trim (Shape & Place sizes
   pieces from the shape), read by computeSheetInfo (thickness, 70%-of-rim capacity), the portion view and the PDF; reset
   with the dough (process change / new recipe). Density is not used to size Shape & Place pieces (out of scope).
+- Shape & Place Batch Calculator (in progress, phases S1-S4; S1 built 2026-09-27): target portions + tray + shape + portion
+  weight -> pieces per tray, trays and how much dough to make; one piece = one portion of the FINISHED weight; exactly the
+  target is made (last tray may be partly filled); one multiplier for the whole dough (a One dough keeps its proportions),
+  = target x grams / the dough's Net Weight (Setup's combined wastage) x SAFETY_MARGIN (= the Recipe Calculator's
+  TARGET_PORTIONS_SAFETY_MARGIN: 4000 random round trips through scaleIngredientSets never short, worst +0.082%). The PDF
+  recipe page (S4) shows each process's OWN wastes, Portions Produced = the batch count, and a note that portions were
+  counted from the combined wastage. `rof/shapeBatch.js` (pure, tested): `pieceSpecFor` (cube-root sizing, 0.55-1.9x, as
+  startPlacementSession), `piecesPerTray` (muffin = cups; else the SAME placement.js rules over the SAME outline and tray:
+  `dough.js doughOutlines` and `trayModels.js trayPlanFromDims` are now the single sources the 3D pieces / tray also use),
+  `solveShapeBatch`. At most 60 per tray (MAX_PIECES, `capped`). The count is ONE pass over Auto-arrange's scan grid
+  (`placement.js autoArrangeStep` + `trayValid`): with identical pieces the next spot is never earlier in the scan, so it
+  equals Auto-arrange piece for piece (36/36 vs HEAD's literal autoArrange, 24/24 vs the live game) in ~50 ms instead of
+  seconds. Next: S2 the Batch step UI for Shape & Place, S3 carry into Place / Bake, S4 PDF.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.

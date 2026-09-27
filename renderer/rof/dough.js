@@ -118,19 +118,31 @@ export function buildDoughGeometry(spec, seed, spread = 1) {
   geo.morphAttributes.normal = targets.map(g => g.attributes.normal);
   targets.forEach(g => g.dispose());
 
-  // Collision outline (convex): the piece's footprint AFTER it has risen, so pieces placed with this
-  // outline never touch once they've proofed and baked. Top side, then back along the bottom side.
-  // A little clearance beyond the risen size (4%) so loaves sit apart rather than exactly tangent.
+  const { poly, rawPoly } = doughOutlines(spec, spread);
+  return { geometry: geo, poly, rawPoly, height: H * (1 + R.h) };
+}
+
+// A piece's collision outlines, from its spec alone (pure; no 3D): the SAME for every piece of a spec, since the
+// per-piece seed only shapes the surface. buildDoughGeometry uses it, and so does the Shape & Place batch plan
+// (shapeBatch.js), so the count it plans is the count Auto-arrange places.
+//   poly:    convex footprint AFTER rising (what a piece reserves on the tray, so pieces never touch once proofed and
+//            baked), plus 4% clearance so loaves sit apart rather than exactly tangent. Top side, then back along the
+//            bottom side.
+//   rawPoly: the un-risen footprint, for pieces resting on the bench (no rise room needed there).
+export function doughOutlines(spec, spread = 1) {
+  const arche = ARCHETYPES[spec.archetype] || ARCHETYPES.ball;
+  const a = spec.lengthCm / 2, b = spec.widthCm / 2;
+  const W = widthFn(spec.archetype, spec.taper ?? (spec.archetype === 'log' ? 0.8 : 0));
+  const R = arche.rise;
   const outline = [], N = 14, gl = (1 + R.l * spread) * 1.04, gw = (1 + R.w * spread) * 1.04;
   for (let i = 0; i <= N; i++) { const s = -Math.cos((Math.PI * i) / N); outline.push([a * s * gl, b * W(s) * gw]); }
   for (let i = N; i >= 0; i--) { const s = -Math.cos((Math.PI * i) / N); outline.push([a * s * gl, -b * W(s) * gw]); }
   const poly = outline.filter((p, i) => i === 0 || Math.hypot(p[0] - outline[i - 1][0], p[1] - outline[i - 1][1]) > 0.05);
-  // The un-risen footprint, for pieces resting on the bench (no rise room needed there).
   const raw = [];
   for (let i = 0; i <= N; i++) { const s = -Math.cos((Math.PI * i) / N); raw.push([a * s * 1.03, b * W(s) * 1.04]); }
   for (let i = N; i >= 0; i--) { const s = -Math.cos((Math.PI * i) / N); raw.push([a * s * 1.03, -b * W(s) * 1.04]); }
   const rawPoly = raw.filter((p, i) => i === 0 || Math.hypot(p[0] - raw[i - 1][0], p[1] - raw[i - 1][1]) > 0.05);
-  return { geometry: geo, poly, rawPoly, height: H * (1 + R.h) };
+  return { poly, rawPoly };
 }
 
 // The plan outline of a shape plus where its score slashes fall, in cm -- for the Shapes modal's small

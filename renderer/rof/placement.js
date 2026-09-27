@@ -8,6 +8,10 @@ import { worldPoly, fitInside, satPush } from './constraints.js';
 //   anywhere else -> goes back to where it was picked up.
 // While carried, `invalid` tells the outline to turn red: "this won't place here".
 
+// Auto-arrange's scan step over a tray's plan box (cm): finer on a small tray, never below 0.6 or above 1.2. Shared with
+// the Shape & Place batch plan (shapeBatch.js) so its count is Auto-arrange's.
+export const autoArrangeStep = (plan) => Math.min(1.2, Math.max(0.6, Math.min(plan.maxX - plan.minX, plan.maxY - plan.minY) / 60));
+
 export function createPlacement({ getItems, getTray, getBench }) {
   // On the bench a piece is its raw, un-risen size; on the tray it needs its risen footprint.
   const polyFor = (it, home) => (home === 'bench' && it.benchPoly ? it.benchPoly : it.poly);
@@ -141,7 +145,7 @@ export function createPlacement({ getItems, getTray, getBench }) {
   function autoArrange(pieces) {
     const t = getTray();
     let placed = 0;
-    const step = Math.min(1.2, Math.max(0.6, Math.min(t.plan.maxX - t.plan.minX, t.plan.maxY - t.plan.minY) / 60));
+    const step = autoArrangeStep(t.plan);
     for (const it of pieces) {
       const spot = t.region.kind === 'cups'
         ? (() => { const c = cupFor(it, 1e9, 1e9) || t.region.centers.find(cc => !getItems().some(o => o !== it && o.home === 'tray' && Math.hypot(o.tx - cc.x, o.ty - cc.y) < 0.6)); return c ? [c.x, c.y] : null; })()
@@ -164,5 +168,6 @@ export function createPlacement({ getItems, getTray, getBench }) {
     }
   }
 
-  return { carry, settle, revert, zoneAt, autoArrange, packOnBench, trayCandidate, benchCandidate, bounds };
+  // trayValid is exposed for the batch plan's single-pass count (shapeBatch.js); the game itself doesn't call it.
+  return { carry, settle, revert, zoneAt, autoArrange, packOnBench, trayCandidate, benchCandidate, bounds, trayValid };
 }
