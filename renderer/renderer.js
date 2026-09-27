@@ -10259,7 +10259,7 @@ function cutterPieceSizeLabel(shapeType, dims) {
 // none of that exists yet, on purpose.
 function renderRecipeOnFireView(main) {
   main.innerHTML = `
-    <div class="topbar">
+    <div class="topbar rof-topbar">
       <div><h1>Recipe on Fire</h1><span class="page-description">Pick the process(es) going into one tray, then the tray itself</span></div>
     </div>
 
@@ -11771,7 +11771,7 @@ function renderRecipeOnFireView(main) {
       </div>
       <div id="rof-place-summary"></div>
       <div class="rof-actions">
-        <button type="button" class="secondary" id="rof-edit-setup-btn">← Edit Setup</button>
+        <button type="button" class="secondary rof-back" id="rof-edit-setup-btn">← Edit Setup</button>
         <button type="button" class="primary" id="rof-bake-btn" disabled>Bake →</button>
       </div>
     `;
@@ -12425,13 +12425,13 @@ function renderRecipeOnFireView(main) {
       <div id="rof-place-summary">${pre ? prebakeSummaryHtml(ready) : lay ? layerBakeSummaryHtml(ready) : sheetMode ? sheetSummaryHtml() : ''}</div>
       ${ready || sheetMode ? '' : '<div class="rof-export-status" id="rof-export-status" role="status"></div>'}
       <div class="rof-actions">
-        <button type="button" class="secondary" id="rof-edit-place-btn">${lay ? '← Fill' : sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
+        <button type="button" class="secondary rof-back" id="rof-edit-place-btn">${lay ? '← Fill' : sheetMode ? '← Edit Setup' : '← Edit Placement'}</button>
         ${ready ? `<button type="button" class="primary" id="rof-start-bake-btn">${pre ? 'Start pre-bake' : 'Start baking'}</button>`
                 : `<button type="button" class="secondary" id="rof-bake-again-btn">Bake again</button>
                    ${pre ? '<button type="button" class="primary" id="rof-fill-btn">Fill →</button>'
                    : lay ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
                    : sheetMode ? '<button type="button" class="primary" id="rof-trim-btn">Trim →</button>'
-                               : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn">Export PDF</button>'}`}
+                               : '<button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false">One portion</button><button type="button" class="primary" id="rof-export-pdf-btn">Export PDF</button>'}`}
       </div>`;
     panel.querySelectorAll('[data-doneness]').forEach(btn => btn.addEventListener('click', () => {
       bakeDoneness = btn.dataset.doneness;
@@ -12766,7 +12766,7 @@ function renderRecipeOnFireView(main) {
       </div>
       <div class="computed-value-box rof-fill-total" id="rof-fill-total" role="status" aria-live="polite"></div>
       <div class="rof-actions">
-        <button type="button" class="secondary" id="rof-fill-back-btn">${pre ? '← Pre-bake' : '← Edit Setup'}</button>
+        <button type="button" class="secondary rof-back" id="rof-fill-back-btn">${pre ? '← Pre-bake' : '← Edit Setup'}</button>
         <button type="button" class="primary" id="rof-fill-bake-btn">Bake →</button>
       </div>`;
     panel.querySelectorAll('[data-fill-layer]').forEach(box => {
@@ -13165,7 +13165,7 @@ function renderRecipeOnFireView(main) {
       ${lock ? '<div class="rof-batch-check" id="rof-batch-check" role="status" aria-live="polite"></div>' : ''}
       <div id="rof-trim-summary"></div>
       <div class="rof-export-status" id="rof-export-status" role="status"></div>
-      <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn" disabled>Export PDF</button></div>`;
+      <div class="rof-actions"><button type="button" class="secondary rof-back" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button><button type="button" class="primary" id="rof-export-pdf-btn" disabled>Export PDF</button></div>`;
     wirePortionBtn();
     panel.querySelectorAll('[data-trim-mode]').forEach(b => b.addEventListener('click', () => setTrimMode(b.dataset.trimMode)));
     document.getElementById('rof-batch-change-cut')?.addEventListener('click', enterBatchStep);
@@ -13405,8 +13405,8 @@ async function renderMaterialsListView(main) {
         bodyRows.push(`
           <tr>
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${label}</td>` : ''}
-            <td>${m.code}</td>
-            <td>${m.name}</td>
+            <td class="mat-code">${m.code}</td>
+            <td class="mat-name">${m.name}</td>
             <td>${materialShapeLabel(m.category, m.shape_type)}</td>
             <td>${formatMaterialDimensions(m)}</td>
             <td>${formatMaterialWeight(m)}</td>

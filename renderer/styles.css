@@ -320,6 +320,7 @@ table.items-table td.cat-cell {
   color: var(--danger); background: #f9e9e5;
 }
 .icon-btn svg { display: inline-block; }
+.icon-btn { white-space: nowrap; } /* an action label never breaks mid-word (a narrow cell once showed "Rem-ove") */
 
 /* ---------------- Generate view ---------------- */
 .generate-controls {
@@ -1213,12 +1214,16 @@ button:disabled { box-shadow: none; }
    than min-width, the table scrolls inside its own container instead of clipping. */
 .materials-table { table-layout: fixed; }
 .materials-table th:nth-child(1), .materials-table td:nth-child(1) { width: 110px; }
-.materials-table th:nth-child(2), .materials-table td:nth-child(2) { width: 100px; white-space: nowrap; }
+/* Widths come from the header row (table-layout: fixed). Cell rules are by class, not position: the Category cell spans
+   its group's rows, so in every row after a group's first the cells sit one position to the left, and a positional
+   td rule lands on the wrong column (the Code column's nowrap once hit a long Name and ran it into Shape). */
+.materials-table th:nth-child(2) { width: 100px; }
+.materials-table td.mat-code { white-space: nowrap; }
 .materials-table th:nth-child(4), .materials-table td:nth-child(4) { width: 130px; }
 .materials-table th:nth-child(5), .materials-table td:nth-child(5) { width: 170px; }
 .materials-table th:nth-child(6), .materials-table td:nth-child(6) { width: 110px; }
 .materials-table th:nth-child(7), .materials-table td:nth-child(7) { width: 150px; }
-.materials-table td:nth-child(3) { overflow-wrap: break-word; }
+.materials-table td.mat-name { overflow-wrap: break-word; }
 
 /* Dish Catalog: Category / Name / Calories / Style / Protein / Menu use / Created By / Code / actions.
    Two classes, so these win over the base .items-table widths (shared with Ingredients / Waste Types,
@@ -1265,7 +1270,7 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .recipe-ingredients-table th:nth-child(2) { width: 34%; }
 .recipe-ingredients-table th:nth-child(3) { width: 15%; }
 .recipe-ingredients-table th:nth-child(4) { width: 12%; }
-.recipe-ingredients-table th:last-child { width: 82px; }
+.recipe-ingredients-table th:last-child { width: 96px; } /* fits "Remove" (about 60 px) inside the 14 px cell padding */
 .recipe-ingredients-table input[type="number"], input[type="number"] { font-variant-numeric: tabular-nums; }
 .process-card { box-shadow: var(--shadow); }
 .process-card-head { background: var(--sage-fill); }
@@ -1510,3 +1515,98 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .mix-table td.mix-thin { color: var(--danger); font-weight: 600; }
 .mix-table td.mix-note { color: var(--neutral); font-size: 12px; }
 .mix-cell { display: inline-block; margin-right: 10px; white-space: nowrap; }
+
+/* ============================================================================================================
+   Recipe on Fire -- design pass (2026-09-27). One visual language for every step, scoped to this screen:
+   - Spacing scale 4 / 8 / 12 / 16 / 24 (--rof-1..5): 12 between blocks, 8 inside a group.
+   - Two surfaces only. CARDS hold what you edit (white, 1px line, 10px radius; the sage left edge marks a LAYER
+     and nothing else). READOUTS show computed numbers (tinted, borderless, 10px radius, regular text with the key
+     numbers bold).
+   - Buttons: primary = the forward / finishing action (filled, pushed right in the action bar); secondary =
+     outlined; .rof-back = quiet text button on the left; tool buttons inside a panel one size smaller. Nothing wraps.
+   - Inputs one height; anything locked by a batch looks locked.
+   Visual only: no ids or JS-read classes change (JS reads .rof-layer / -sum / -wastes, .rof-batch-card / -check,
+   .rof-stack, and toggles the Cut button's primary / secondary).
+   ============================================================================================================ */
+.rof-layout {
+  --rof-1: 4px; --rof-2: 8px; --rof-3: 12px; --rof-4: 16px; --rof-5: 24px;
+  --rof-radius: 10px; --rof-control-h: 30px; --rof-readout: var(--sage-fill);
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr); gap: var(--rof-5);
+}
+
+/* Header: compact on this screen only (every step gains ~50px for its own controls). */
+.topbar.rof-topbar { margin-bottom: 16px; padding-bottom: 12px; }
+.rof-topbar > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; }
+.rof-topbar h1 { font-size: 28px; letter-spacing: -0.5px; }
+.rof-topbar .page-description { display: inline; margin: 0; font-size: 12.5px; }
+.rof-stage-col .material-preview-wrap { height: calc(100vh - 196px); }
+
+/* Step pills: one row for up to six steps. */
+.rof-side .rof-steps { gap: 4px; padding: 5px 0; margin-bottom: var(--rof-3); flex-wrap: nowrap; }
+.rof-side .rof-step-pill { flex: 0 1 auto; min-width: 0; padding: 4px 9px; font-size: 11.5px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Controls: one height, one radius. */
+.rof-side :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select) {
+  height: var(--rof-control-h); padding-top: 3px; padding-bottom: 3px; border-radius: 7px; font-size: 13px;
+}
+.rof-side :is(input, select):disabled { background: var(--paper-dim); color: var(--neutral); border-style: dashed; cursor: not-allowed; opacity: 1; }
+.rof-side .rof-knife-row { align-items: flex-end; gap: var(--rof-2); }
+.rof-side .rof-knife-row .field label { font-size: 12px; margin-bottom: 3px; }
+.rof-side .rof-knife-row:not(:has(.field)) button { margin-left: 0; } /* a batch's locked knife: Cut sits with the text, not alone on the right */
+
+/* Buttons. */
+.rof-side button.primary, .rof-side button.secondary { padding: 6px 14px; min-height: 34px; font-size: 13px; line-height: 1.35; white-space: nowrap; }
+.rof-side #rof-step-panel :not(.rof-actions) > button.secondary { padding: 4px 11px; min-height: 30px; font-size: 12.5px; } /* tools */
+.rof-side button.rof-back { background: transparent; border-color: transparent; color: var(--neutral); padding-left: 4px; padding-right: 8px; box-shadow: none; }
+.rof-side .rof-actions > button { font-size: 12.5px; }
+.rof-side .rof-actions > button.secondary:not(.rof-back), .rof-side .rof-actions > button.primary { padding-left: 11px; padding-right: 11px; }
+.rof-side button.rof-back:hover { background: var(--paper-dim); color: var(--sage-dark); border-color: transparent; }
+.rof-side .rof-actions { gap: 6px; padding: var(--rof-3) 0; margin-top: var(--rof-3); align-items: center; flex-wrap: nowrap; }
+.rof-side .rof-actions > button.primary { margin-left: auto; }
+.rof-side .rof-setup-go { gap: var(--rof-3); margin-top: var(--rof-1); }
+.rof-side .rof-setup-go button { margin-top: 0 !important; }
+
+/* Readouts: one tinted surface for every computed box. */
+.rof-side :is(.computed-value-box, .rof-cutter-info, .rof-batch-lock) {
+  background: var(--rof-readout); border: 0; border-radius: var(--rof-radius); color: var(--ink);
+  font-weight: 500; font-size: 12.5px; line-height: 1.5;
+}
+.rof-side .computed-value-box strong { font-weight: 700; color: var(--sage-dark); }
+.rof-side .rof-cutter-info { padding: var(--rof-2) var(--rof-3); margin-top: var(--rof-2); }
+.rof-side .rof-cutter-info-grams { font-size: 13px; margin-bottom: 2px; }
+.rof-side .rof-cutter-info-line { font-size: 12px; line-height: 1.55; }
+.rof-side #rof-trim-summary .computed-value-box, .rof-side #rof-place-summary .computed-value-box { margin: var(--rof-2) 0 0 !important; padding: 10px 12px; }
+.rof-side .rof-batch-lock { padding: var(--rof-2) var(--rof-3); margin-bottom: var(--rof-3); }
+.rof-side .rof-batch-lock-k { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; font-weight: 600; }
+.rof-side .rof-batch-check { margin: var(--rof-2) 2px 0; font-size: 12.5px; }
+.rof-side .rof-batch-result { margin: 0 0 var(--rof-2); }
+.rof-side .rof-layer-plan { padding: 6px 12px; }
+.rof-side .rof-leftover { font-weight: 600; }
+
+/* Cards: layers (in Setup / Batch) and fill layers. */
+.rof-side .rof-layers { gap: 6px; margin-bottom: var(--rof-2); }
+.rof-side :is(.rof-layer, .rof-fill-layer) { border-radius: var(--rof-radius); padding: 6px 10px 6px 12px; box-shadow: 0 1px 2px rgba(37, 59, 52, .04); }
+.rof-side .rof-layer.open { padding-bottom: 6px; }
+.rof-side .rof-layer-name { flex: 0 1 auto; min-width: 5.5em; }
+.rof-side .rof-layer-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; } /* the summary gives way before the name */
+.rof-side .rof-layer-line { gap: 4px 14px; margin-top: var(--rof-1); }
+.rof-side :is(.rof-layer-density input, .rof-layer-target) { height: 28px; }
+.rof-side .rof-fill-layers { gap: 6px; margin-bottom: var(--rof-3); }
+
+/* Wastage rows: one line each (name, %, the recipe's default, remove). */
+.rof-side .rof-waste-row { flex-wrap: nowrap; gap: 8px; margin-bottom: 2px; }
+.rof-side .rof-waste-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.rof-side .rof-waste-row .process-waste-percent { height: 24px; padding-top: 1px; padding-bottom: 1px; }
+.rof-side :is([data-layer-add-waste], [data-rof-add-waste]) { height: 26px; margin-top: 4px !important; }
+.rof-side .rof-waste-note { flex: 0 0 12.5em; order: 3; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* fixed width: every % input lines up */
+.rof-side .rof-waste-row :is([data-rof-waste-remove], [data-lw-remove]) { order: 4; padding: 2px 6px; }
+
+/* Panel headings and hints. */
+.rof-side #rof-step-panel h3 { font-size: 17px; margin: 0 0 var(--rof-2); }
+.rof-side .rof-fill-hint { margin-bottom: var(--rof-3); }
+
+/* Stage overlays: the same radius as the side panel's cards. */
+.rof-batch-card { border-radius: var(--rof-radius); top: 100px; max-height: calc(100% - 162px); } /* below the view buttons, which take two rows on this stage width */
+
+/* Create tray / cutter dialog: labels line up across a row. */
+.material-create-modal .generate-controls { align-items: start; } /* labels on one line; a field's hint hangs below its input */

@@ -519,6 +519,14 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   waste row named like "baking" counts, combined); a recipe without one shows "No Baking Waste in this recipe". The 3D pieces are
   still sized from the finished weight (drawing them from the raw weight would make them ~3% wider with an 8.5% baking waste;
   deliberately not done -- revisit only if it becomes a visible complaint).
+- Design system (2026-09-27 polish pass; one scoped block at the END of styles.css, "Recipe on Fire -- design pass"): a
+  compact header (`.rof-topbar`), a 420px side column, spacing 4/8/12/16/24 (`--rof-1..5`), TWO surfaces -- cards for what
+  you edit (white, 1px line, 10px radius; the sage left edge marks a LAYER only) and readouts for computed numbers (tinted
+  `--rof-readout`, borderless, regular text, key numbers bold: `.computed-value-box`, `.rof-cutter-info`, `.rof-batch-lock`)
+  -- and buttons: `primary` = the forward / finishing action (pushed right in `.rof-actions`; Export PDF is primary),
+  `secondary` outlined, `.rof-back` a quiet text button for every "<- ..." button, tools inside a panel one size smaller;
+  nothing wraps. Inputs are one height (`--rof-control-h`); a batch-locked input looks locked. New pieces use these, not a
+  new style. Six step pills fit one row.
 - No scrolling to reach anything on this screen: every step's controls and the sticky `.rof-actions` bar fit at
   the default window (1280x800). Check `main.scrollHeight <= main.clientHeight` on every step after adding a
   control; that was a recurring regression.
