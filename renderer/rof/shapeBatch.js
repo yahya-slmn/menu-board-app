@@ -1,6 +1,6 @@
 import { doughOutlines } from './dough.js';
 import { regionFromFootprint, trayPlanFromDims } from './trayModels.js';
-import { createPlacement, autoArrangeStep } from './placement.js';
+import { createPlacement } from './placement.js';
 import { MAX_PIECES, MIN_GRAMS } from './portions.js';
 
 // Shape & Place's Batch Calculator (phase S1): a target portion count, a tray, a shape and a portion weight give how many
@@ -10,7 +10,7 @@ import { MAX_PIECES, MIN_GRAMS } from './portions.js';
 // Conventions (confirmed with the chef, 2026-09-27):
 //   - One placed piece is one portion, of the chosen FINISHED weight (the Net Weight already has every waste off, Baking
 //     included) -- the same as the Place step's planPortions.
-//   - Pieces per tray is what Auto-arrange places: the SAME placement.js scan over the SAME collision outline
+//   - Pieces per tray is what Auto-arrange places: placement.js autoArrange itself, over the SAME collision outline
 //     (dough.js doughOutlines, the risen footprint with the rise model's spread) on the SAME tray bounds and interior
 //     (trayModels.js trayPlanFromDims / regionFromFootprint). A muffin tray holds one piece per cup. Never more than
 //     MAX_PIECES (60, what the bench lays out); the result says when that limit, not the tray, set the count.
@@ -46,21 +46,7 @@ export function piecesPerTray({ tray, spec, spread = 1 }) {
   const benchRadius = Math.max(...rawPoly.map(([x, y]) => Math.hypot(x, y)));
   const pieces = Array.from({ length: MAX_PIECES }, () => ({ home: 'bench', tx: 0, ty: 0, rotT: 0, poly, benchPoly: rawPoly, radius, benchRadius, baseYT: 0 }));
   const placement = createPlacement({ getItems: () => pieces, getTray: () => ({ region, plan, floorTopY: 0 }), getBench: () => null });
-  // Auto-arrange gives each piece the FIRST free spot scanning the plan box top row first, left to right (placement.js
-  // firstFree). With identical pieces, every spot before the last piece's was already refused for that piece, and one
-  // more piece on the tray can only make them more crowded -- so the next piece's spot is never earlier in the scan.
-  // ONE pass over the same grid, placing a piece wherever one fits, therefore gives exactly Auto-arrange's count (and
-  // positions) without re-scanning from the top for every piece: milliseconds instead of seconds.
-  const step = autoArrangeStep(plan);
-  let count = 0;
-  for (let y = plan.maxY; y >= plan.minY && count < MAX_PIECES; y -= step) {
-    for (let x = plan.minX; x <= plan.maxX && count < MAX_PIECES; x += step) {
-      const piece = pieces[count];
-      if (!placement.trayValid(piece, x, y)) continue;
-      piece.tx = x; piece.ty = y; piece.home = 'tray';
-      count++;
-    }
-  }
+  const count = placement.autoArrange(pieces); // Auto-arrange itself (its one-pass path: the pieces are identical)
   return { count, capped: count >= MAX_PIECES, cups: 0 };
 }
 

@@ -142,10 +142,32 @@ export function createPlacement({ getItems, getTray, getBench }) {
     }
     return null;
   }
+  // Identical pieces: the same outline (point for point) and the same turn. Every piece of one Shape & Place session is
+  // cut from one spec, so this is the usual case; a piece turned by hand makes it false.
+  function identicalPieces(pieces) {
+    const a = pieces[0];
+    return pieces.every(it => it.rotT === a.rotT && it.poly.length === a.poly.length && it.poly.every((p, i) => p[0] === a.poly[i][0] && p[1] === a.poly[i][1]));
+  }
+  // Lays the pieces onto the tray, each at the FIRST free spot scanning the plan box top row first, left to right. Pieces
+  // already on the tray stay where they are (obstacles). With identical pieces this is ONE pass over the scan grid:
+  // every spot before a piece's was already refused for it, and one more piece on the tray only adds to what's in the
+  // way, so the next identical piece's spot is never earlier in the scan -- the same spots, piece for piece, as scanning
+  // from the top for each (proven against that scan and the live game), in milliseconds instead of seconds. Anything
+  // else (a muffin tray's cups, pieces of different outlines or turns) takes the piece-by-piece scan below.
   function autoArrange(pieces) {
     const t = getTray();
     let placed = 0;
     const step = autoArrangeStep(t.plan);
+    if (t.region.kind !== 'cups' && pieces.length > 1 && identicalPieces(pieces)) {
+      for (let y = t.plan.maxY; y >= t.plan.minY && placed < pieces.length; y -= step) {
+        for (let x = t.plan.minX; x <= t.plan.maxX && placed < pieces.length; x += step) {
+          const it = pieces[placed];
+          if (!trayValid(it, x, y)) continue;
+          it.tx = x; it.ty = y; it.home = 'tray'; it.baseYT = t.floorTopY; placed++;
+        }
+      }
+      return placed;
+    }
     for (const it of pieces) {
       const spot = t.region.kind === 'cups'
         ? (() => { const c = cupFor(it, 1e9, 1e9) || t.region.centers.find(cc => !getItems().some(o => o !== it && o.home === 'tray' && Math.hypot(o.tx - cc.x, o.ty - cc.y) < 0.6)); return c ? [c.x, c.y] : null; })()
@@ -168,6 +190,5 @@ export function createPlacement({ getItems, getTray, getBench }) {
     }
   }
 
-  // trayValid is exposed for the batch plan's single-pass count (shapeBatch.js); the game itself doesn't call it.
-  return { carry, settle, revert, zoneAt, autoArrange, packOnBench, trayCandidate, benchCandidate, bounds, trayValid };
+  return { carry, settle, revert, zoneAt, autoArrange, packOnBench, trayCandidate, benchCandidate, bounds };
 }
