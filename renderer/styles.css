@@ -872,6 +872,11 @@ table.materials-table td.cat-cell {
 .rof-batch-foot { margin-top: 6px; }
 .rof-batch-note { margin-top: 6px; color: var(--neutral); font-size: 11.5px; line-height: 1.35; }
 .rof-batch-card .rof-leftover { margin-top: 4px; }
+.rof-batch-lock { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 6px; margin-bottom: 8px; padding: 6px 10px; border-radius: 8px; background: var(--paper-dim); font-size: 12.5px; }
+.rof-batch-lock-k { color: var(--neutral); }
+.rof-batch-lock .rof-link-btn { margin-left: auto; }
+.rof-batch-check { margin: 8px 0 0; font-size: 12.5px; color: var(--neutral); }
+.rof-batch-check.ok { color: var(--sage-dark); font-weight: 600; }
 .rof-layer-note { font-size: 12px; line-height: 1.45; margin: 1px 0 3px; }
 .rof-layer-note-1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rof-layer-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }

@@ -388,7 +388,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   Layers (raw -> baked per tray, wastage, "not used" / "short" as their own lines, never waste), Stack & cuts, One portion,
   Waste (each layer's planned Baking Waste beside the measured scrap), Baking (pre-bake and final bake). Prints on one A4.
   The layered tray is complete (L1-L5); Shape & Place and muffin trays stay single-dough only.
-- Batch Calculator (in progress, phases B1-B5; B1-B3 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
+- Batch Calculator (in progress, phases B1-B5; B1-B4 done 2026-09-27): the layered tray run in REVERSE -- a target portion count,
   a tray, a cut (cutter or knife) and each layer's THICKNESS give the trays needed and each process's Total Quantity, which then
   drive Setup -> Trim for one tray's share (session-only; nothing written back). Layered recipes (2+ processes) only; a
   single-process batch (B6) is deferred. `rof/batch.js` `solveBatch` (pure, tested): pieces per tray from the SAME `packCutters`
@@ -413,8 +413,12 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   computeLayerPlan (rise / filling looks read proportions only), so Pre-bake / Fill / Bake / Trim are unchanged. Setup: tray
   select and Trays locked ("from the batch (N portions)"); a density / wastage / thickness edit re-solves (`updateLayerPlan`
   -> `applyBatch` -> `refreshLayerSums`). Fill shows each layer's thickness read-only. `resetBatch` (Use the recipe as
-  saved, One dough, a process change, a new recipe) puts the recipe's own rows back. Next: B4 Trim locked to the batch's
-  cut, B5 PDF page 2+ "Recipe for X portions:" from
+  saved, One dough, a process change, a new recipe) puts the recipe's own rows back.
+  B4 (Trim): under a batch the cut is LOCKED (`batchApplied.cut`, snapshotted by applyBatch): no Cutter / Knife switch,
+  dropdown or knife sizes (`setTrimMode` refuses), a "From the batch: <cut> · Change in Batch" line instead; the plan is laid
+  out on arrival (Auto-arrange with the batch's cutter / the knife grid as a preview); hand moves, Place by hand, Clear and
+  Cut stay. `updateBatchCheck` (run with the trim summary) compares the tray with the plan ("As planned: ..." or "18 on this
+  tray, the plan has 21: ... 68 short of 500"). No batch = Trim exactly as before. Next: B5 PDF page 2+ "Recipe for X portions:" from
   `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight).
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /

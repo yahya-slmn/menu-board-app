@@ -10381,7 +10381,7 @@ function renderRecipeOnFireView(main) {
   let batchOn = false;
   let batchCfg = { ...BATCH_CFG_DEFAULT };
   let batchResult = null;          // the last solveBatch() result
-  let batchApplied = null;         // { result, trayId } once "Setup ->" has scaled the recipe to it
+  let batchApplied = null;         // { result, trayId, target, cut } once "Setup ->" has scaled the recipe to it
   const batchOriginals = new Map(); // localId -> the process's own ingredient rows, before the batch scaled them
   const batchActive = () => batchOn && layersActive();
   function resetBatch() {
@@ -11434,7 +11434,8 @@ function renderRecipeOnFireView(main) {
     });
     const scaled = scaleIngredientSets(procs.map(p => batchOriginals.get(String(p.localId))), r.layers.map(l => l.multiplier));
     procs.forEach((p, i) => { p.ingredientRows = scaled[i]; });
-    batchApplied = { result: r, trayId: String(bakeSnapshot.material.id) };
+    batchApplied = { result: r, trayId: String(bakeSnapshot.material.id), target: Number(batchCfg.target),
+      cut: { kind: batchCfg.cutKind, cutterId: batchCfg.cutterId, across: parseFloat(batchCfg.across), down: parseFloat(batchCfg.down) } };
     return true;
   }
   function batchToSetup() {
@@ -12882,7 +12883,20 @@ function renderRecipeOnFireView(main) {
     const frac = footprint.areaCm2 > 0 ? Math.max(0, footprint.areaCm2 - covered) / footprint.areaCm2 : 0;
     return { grams: frac * grams, pct: frac * 100, covered };
   }
+  // Under a batch: what is on this tray against the plan, and what that means for the whole batch.
+  function updateBatchCheck() {
+    const el = document.getElementById('rof-batch-check');
+    if (!el || !batchApplied) return;
+    const plan = batchApplied.result, n = cutterList.length, target = batchApplied.target;
+    if (n === 0) { el.className = 'rof-batch-check'; el.textContent = `Nothing cut yet. The plan: ${plan.perTray} per tray × ${plan.trays} trays = ${plan.totalPortions}.`; return; }
+    const total = n * plan.trays, short = target - total;
+    el.className = `rof-batch-check ${n === plan.perTray ? 'ok' : short > 0 ? 'rof-leftover' : ''}`;
+    el.textContent = n === plan.perTray
+      ? `As planned: ${n} per tray × ${plan.trays} trays = ${total} portions.`
+      : `${n} on this tray, the plan has ${plan.perTray}: ${n} × ${plan.trays} trays = ${total}${short > 0 ? `, ${short} short of ${target}.` : ` (the target is ${target}).`}`;
+  }
   function updateTrimSummary() {
+    updateBatchCheck();
     const el = document.getElementById('rof-trim-summary');
     if (!el || !bakeSnapshot || !sheetInfo) return;
     const ready = cutsReady();
@@ -12929,7 +12943,7 @@ function renderRecipeOnFireView(main) {
   const TRIM_MARGIN_CM = 0.3, TRIM_GAP_CM = 0.2;
   function autoArrangeCutters() {
     const m = cutterMaterials.find(x => String(x.id) === String(armedCutterId ?? lastCutterId));
-    if (!m) { trimNote = 'Choose a cutter first.'; updateTrimSummary(); return; }
+    if (!m) { trimNote = batchApplied ? "The batch's cutter is no longer in Materials -- choose another in the Batch step." : 'Choose a cutter first.'; updateTrimSummary(); return; }
     const res = rofGame.autoArrangeCutters({ shapeType: m.shape_type, dims: materialDimsFromRow(m), materialId: m.id, marginCm: TRIM_MARGIN_CM, gapCm: TRIM_GAP_CM });
     playArrangeSound();
     rofGame.disarmCutter(); // arranging is a finished action; putting the cutter down also lets you hover the scrap
@@ -13019,7 +13033,7 @@ function renderRecipeOnFireView(main) {
   }
   // Cutter <-> Knife. A tray is cut one way or the other, so switching clears what is on it.
   function setTrimMode(mode) {
-    if (mode === trimMode) return;
+    if (mode === trimMode || batchApplied) return; // a batch's cut is fixed (see renderTrimStepPanel)
     trimMode = mode;
     if (mode === 'knife') {
       rofGame.disarmCutter();
@@ -13034,8 +13048,29 @@ function renderRecipeOnFireView(main) {
 
   async function renderTrimStepPanel(panel) {
     if (rofGame) rofGame.setInteractive(true); // the bake switches input off; cutters need it back
+    // Under a batch the cut was chosen in the Batch step and the tray count and quantities depend on it, so it is
+    // LOCKED here: no Cutter / Knife switch, no cutter dropdown, no knife sizes -- the plan is laid out on arrival, and
+    // "Change in Batch" goes back to change it. Hand placement (move, turn, remove, stamp more) stays.
+    const lock = batchApplied ? batchApplied.cut : null;
+    if (lock) {
+      trimMode = lock.kind;
+      if (lock.kind === 'knife') {
+        const same = knifeSpec && knifeSpec.across === lock.across && knifeSpec.down === lock.down;
+        knifeSpec = { across: lock.across, down: lock.down, cut: same ? knifeSpec.cut : false };
+      } else lastCutterId = lock.cutterId;
+    }
     const knifeMode = trimMode === 'knife';
-    const tools = knifeMode ? `
+    const tools = lock ? (knifeMode ? `
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">The dotted lines show where the knife goes, centred on the tray. Cut when it looks right.</div>
+      <div class="rof-knife-row"><button type="button" class="primary" id="rof-knife-cut-btn">Cut</button></div>
+      <div class="rof-cutter-info" id="rof-knife-info" role="status"></div>` : `
+      <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Laid out as planned. Drag to move one, scroll to turn it, Delete removes it; Place by hand stamps more.</div>
+      <div class="rof-cutter-info" id="rof-cutter-info" role="status" hidden></div>
+      <div style="display:flex; gap:8px; margin-bottom:2px;">
+        <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
+        <button type="button" class="secondary" id="rof-cutter-hand-btn" aria-pressed="false" disabled title="Take the cutter in hand to stamp it on the sheet">Place by hand</button>
+        <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
+      </div>`) : knifeMode ? `
       <div style="font-size:12.5px; color:var(--neutral); margin-bottom:8px;">Set the piece size; the dotted lines show where the knife goes, centred on the tray. Cut when it looks right.</div>
       <div class="rof-knife-row">
         <div class="field"><label for="rof-knife-across">Across (cm)</label><input id="rof-knife-across" type="number" min="${KNIFE_MIN_CM}" max="${KNIFE_MAX_CM}" step="0.5" value="${knifeSpec.across}" /></div>
@@ -13056,17 +13091,27 @@ function renderRecipeOnFireView(main) {
         <button type="button" class="secondary" id="rof-auto-cut-btn">Auto-arrange</button>
         <button type="button" class="secondary" id="rof-clear-cuts-btn">Clear all</button>
       </div>`;
+    if (lock && !knifeMode) await ensureCutterMaterials(); // to name the locked cutter
+    if (rofStep !== 'trim') return; // moved on while the list loaded
+    const lockedCutter = lock && !knifeMode ? cutterMaterials.find(x => String(x.id) === String(lock.cutterId)) : null;
+    const lockLabel = !lock ? '' : knifeMode ? `Knife, ${roundNice(lock.across)} × ${roundNice(lock.down)} cm pieces`
+      : lockedCutter ? `${escHtml(lockedCutter.name)} (${cutterPieceSizeLabel(lockedCutter.shape_type, materialDimsFromRow(lockedCutter))})` : 'a cutter no longer in Materials';
     panel.innerHTML = `
+      ${lock ? `
+      <div class="rof-batch-lock" role="note"><span class="rof-batch-lock-k">From the batch:</span> <strong dir="auto">${lockLabel}</strong>
+        <button type="button" class="rof-link-btn" id="rof-batch-change-cut" title="The trays and quantities were worked out for this cut">Change in Batch</button></div>` : `
       <div class="mode-toggle rof-trim-mode" role="group" aria-label="Trim with">
         <button type="button" class="mode-toggle-btn ${knifeMode ? '' : 'active'}" data-trim-mode="cutter" aria-pressed="${!knifeMode}">Cutter</button>
         <button type="button" class="mode-toggle-btn ${knifeMode ? 'active' : ''}" data-trim-mode="knife" aria-pressed="${knifeMode}">Trim by Knife</button>
-      </div>
+      </div>`}
       ${tools}
+      ${lock ? '<div class="rof-batch-check" id="rof-batch-check" role="status" aria-live="polite"></div>' : ''}
       <div id="rof-trim-summary"></div>
       <div class="rof-export-status" id="rof-export-status" role="status"></div>
       <div class="rof-actions"><button type="button" class="secondary" id="rof-back-bake-btn">← Back to Bake</button><button type="button" class="secondary" id="rof-portion-btn" aria-pressed="false" disabled>One portion</button><button type="button" class="secondary" id="rof-export-pdf-btn" disabled>Export PDF</button></div>`;
     wirePortionBtn();
     panel.querySelectorAll('[data-trim-mode]').forEach(b => b.addEventListener('click', () => setTrimMode(b.dataset.trimMode)));
+    document.getElementById('rof-batch-change-cut')?.addEventListener('click', enterBatchStep);
     document.getElementById('rof-export-pdf-btn').addEventListener('click', exportRofPdf);
     rofGame.setScrapHighlight(true);
     document.getElementById('rof-back-bake-btn').addEventListener('click', () => {
@@ -13077,7 +13122,7 @@ function renderRecipeOnFireView(main) {
     });
 
     if (knifeMode) {
-      ['rof-knife-across', 'rof-knife-down'].forEach(id => document.getElementById(id).addEventListener('input', onKnifeSize));
+      ['rof-knife-across', 'rof-knife-down'].forEach(id => document.getElementById(id)?.addEventListener('input', onKnifeSize));
       document.getElementById('rof-knife-cut-btn').addEventListener('click', toggleKnifeCut);
       // Coming (back) to Trim with no grid on the tray: lay it out again (as a preview).
       if (!cutterList.some(c => String(c.data.materialId) === 'knife')) { knifeSpec.cut = false; applyKnifeGrid(); }
@@ -13088,6 +13133,13 @@ function renderRecipeOnFireView(main) {
 
     document.getElementById('rof-auto-cut-btn').addEventListener('click', autoArrangeCutters);
     document.getElementById('rof-clear-cuts-btn').addEventListener('click', () => { rofGame.clearCutters(); });
+    if (lock) {
+      document.getElementById('rof-cutter-hand-btn').addEventListener('click', toggleCutterInHand);
+      if (cutterList.length === 0) autoArrangeCutters(); // arriving: lay out the plan
+      syncCutterPicker();
+      updateTrimSummary();
+      return;
+    }
     reloadMaterials();
     await ensureCutterMaterials();
     const sel = document.getElementById('rof-cutter-select');
