@@ -1610,3 +1610,15 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 
 /* Create tray / cutter dialog: labels line up across a row. */
 .material-create-modal .generate-controls { align-items: start; } /* labels on one line; a field's hint hangs below its input */
+
+/* AI density (D3): the density row (input, mark, Estimate) and the note under it (range, confidence, how to measure). */
+.rof-side .rof-density-row { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
+.rof-side .rof-density-est { padding: 0 2px; font-size: 12px; }
+.rof-side .rof-density-est:disabled { color: var(--neutral); text-decoration: none; cursor: progress; opacity: 1; }
+.rof-side .rof-density-note { flex: 1 1 100%; font-size: 11.5px; color: var(--neutral); line-height: 1.4; }
+.rof-side .rof-density-note.rof-leftover { color: var(--danger); font-weight: 500; }
+.rof-side .rof-density-tip { text-decoration: underline dotted; cursor: help; white-space: nowrap; }
+.rof-side .rof-density-tip:focus-visible { outline: 2px solid var(--sage); outline-offset: 1px; border-radius: 3px; }
+.rof-side .rof-sheet-density { margin-top: 6px; padding-top: 5px; border-top: 1px solid rgba(49, 92, 76, .15); font-weight: 400; color: var(--ink); font-size: 12.5px; }
+.rof-side .rof-sheet-density input { width: 64px; height: 26px; }
+

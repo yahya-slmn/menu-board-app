@@ -10385,6 +10385,41 @@ function renderRecipeOnFireView(main) {
   let batchApplied = null;         // { result, trayId, target, cut } once "Setup ->" has scaled the recipe to it
   const batchOriginals = new Map(); // localId -> the process's own ingredient rows, before the batch scaled them
   const batchActive = () => batchOn && layersActive();
+
+  // ---- AI density (D3; the Edge Function / cache are lib/estimateDensity.js + lib/densityCache.js) --------------------
+  // A density has a source: 'default' (the flat 1.05 / 1.0 guess), 'ai' (the Estimate button) or 'chef' (a number she
+  // typed -- it always wins: an estimate replaces it only on the card whose Estimate she pressed). The last AI answer is
+  // kept beside it ({ density, low, high, confidence, basis, cached }) for the range line under the input. Layers keep this
+  // in layerCfg (densitySource / densityAi); the one-dough sheet (Sheet & Trim without layers) in sheetDensityCfg, whose
+  // value replaces what used to be a hidden constant (1.05, still the default: SHEET_DENSITY_DEFAULT). Session-only.
+  const DENSITY_TIP = 'Mixing, whipping and resting change a real density. To measure it: weigh a 250 ml cup of the raw mix -- grams ÷ 250 is its density in g/cm³.';
+  const SHEET_DENSITY_DEFAULT = 1.05;
+  let sheetDensityCfg = { value: SHEET_DENSITY_DEFAULT, source: 'default', ai: null };
+  let densityBusy = false;   // one estimate at a time
+  let densityError = '';
+  const sheetDensity = () => (Number(sheetDensityCfg.value) > 0 ? Number(sheetDensityCfg.value) : SHEET_DENSITY_DEFAULT);
+  // One process as an estimate's source: its own (unscaled) rows and its method text.
+  const densitySourceOf = (p) => ({
+    rows: (batchOriginals.get(String(p.localId)) || p.ingredientRows).map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit })),
+    method: collectTextListFieldValue(p, makeProcessMethodCfg(p)),
+  });
+  const g3 = (v) => String(Math.round(Number(v) * 100) / 100);
+  // The small mark after "g/cm³": est. (flat default), est. (AI) with the range in its tooltip, or yours.
+  function densityMarkHtml(source, ai) {
+    if (source === 'chef') return '<span class="rof-layer-est rof-density-mark" title="The density you entered">yours</span>';
+    if (source === 'ai' && ai) return `<span class="rof-layer-est rof-density-mark" title="${escHtml(`AI estimate ${g3(ai.low)}–${g3(ai.high)} g/cm³, ${ai.confidence} confidence. ${ai.basis} ${DENSITY_TIP}`)}">est. (AI)</span>`;
+    return `<span class="rof-layer-est rof-density-mark" title="${escHtml(`A typical value, not worked out from this recipe. Estimate asks the AI; or type your own. ${DENSITY_TIP}`)}">est.</span>`;
+  }
+  // The line under a density once there is an AI answer (or an error): its range and confidence, and how to measure.
+  function densityNoteHtml(source, ai) {
+    if (densityError) return `<div class="rof-density-note rof-leftover" role="status">${escHtml(densityError)}</div>`;
+    if (!ai) return '';
+    const lead = source === 'chef' ? `AI said ${g3(ai.density)}` : 'AI estimate';
+    const reused = ai.cached ? ' Reused: this mix was estimated before, so no new AI call was made.' : '';
+    return `<div class="rof-density-note" role="status"><span title="${escHtml(ai.basis + reused)}">${lead} · range ${g3(ai.low)}–${g3(ai.high)} · ${escHtml(ai.confidence)} confidence</span> <span class="rof-density-tip" tabindex="0" title="${escHtml(DENSITY_TIP)}" aria-label="${escHtml(DENSITY_TIP)}">How to measure</span></div>`;
+  }
+  const densityButtonHtml = (attr, title) => `<button type="button" class="rof-link-btn rof-density-est" ${attr} ${densityBusy ? 'disabled' : ''} title="${escHtml(title)}">${densityBusy ? 'Estimating…' : 'Estimate'}</button>`;
+
   function resetBatch() {
     for (const [id, rows] of batchOriginals) {
       const p = workingProcesses.find(x => String(x.localId) === id);
@@ -10529,6 +10564,7 @@ function renderRecipeOnFireView(main) {
     combinedWastes = [];
     doughLayout = 'mixed'; layerOrder = []; layerCfg.clear(); layerTraysManual = null; layerPlan = null; layerOpenId = null; processListOpen = false;
     resetBatch(); batchCfg = { ...BATCH_CFG_DEFAULT };
+    sheetDensityCfg = { value: SHEET_DENSITY_DEFAULT, source: 'default', ai: null }; densityError = '';
     layerBakeSlots = { prebake: null, final: null }; activeLayerBake = null; layerFinalRise = 1; prebakeSheetState = null;
     document.getElementById('rof-process-collapsed')?.remove();
     const procLabel = document.querySelector('#rof-process-field .rof-process-head label');
@@ -10588,8 +10624,10 @@ function renderRecipeOnFireView(main) {
             </details>
             <div class="rof-mix-net"><span class="rof-mix-total" title="Combined total quantity"><span id="rof-combined-total"></span> g →</span> Net <span id="rof-net-combined"></span> g</div>
           </div>
+          ${sheetDensityHtml()}
         </div>
       `;
+      wireSheetDensity();
       wireLayoutToggle();
       renderWasteRowsFor();
       refreshComputedNumbers();
@@ -10609,8 +10647,10 @@ function renderRecipeOnFireView(main) {
           </select>
         </details>
         <div><strong>Net Weight:</strong> <span id="rof-net-combined"></span> g</div>
+        ${sheetDensityHtml()}
       </div>
     `;
+    wireSheetDensity();
     wireLayoutToggle();
     renderWasteRowsFor();
     refreshComputedNumbers();
@@ -10697,6 +10737,7 @@ function renderRecipeOnFireView(main) {
         density: hasFlour(p) ? (L ? L.DENSITY_DOUGH : 1.05) : (L ? L.DENSITY_FILLING : 1.0),
         prebake: false, fillKind: 'all', targetCm: '',
         thicknessCm: '',       // Batch Calculator: the layer's raw thickness in the tray (cm)
+        densitySource: 'default', densityAi: null, // AI density (see densityMarkHtml)
         wastes: p.wastes.map(w => ({ ...w, localId: ++_recipeRowLocalIdCounter })),
         riseScale: 1,          // the pre-bake's rise slider (bottom layer)
         measuredCm: '',        // her measured height after the pre-bake (bottom layer)
@@ -10754,7 +10795,8 @@ function renderRecipeOnFireView(main) {
               <button type="button" class="icon-btn" data-layer-move="1" ${i === n - 1 ? 'disabled' : ''} aria-label="Move ${name} up" title="Move up">↑</button>
             </div>
             <div class="rof-layer-line" id="rof-layer-body-${id}" ${open ? '' : 'hidden'}>
-              <label class="rof-layer-density">Density <input type="number" min="0.1" max="3" step="0.01" value="${c.density}" data-layer-density aria-label="Density of ${name}, g per cm³" /> g/cm³ <span class="rof-layer-est">est.</span></label>
+              <span class="rof-density-row"><label class="rof-layer-density">Density <input type="number" min="0.1" max="3" step="0.01" value="${c.density}" data-layer-density aria-label="Density of ${name}, g per cm³" /> g/cm³</label> ${densityMarkHtml(c.densitySource, c.densityAi)} ${densityButtonHtml('data-layer-estimate', "Estimate every layer's density with AI, from its ingredients and method")}</span>
+              ${densityNoteHtml(c.densitySource, c.densityAi)}
               ${batchActive() ? `<label class="rof-layer-thick" title="How thick this layer goes into the tray, raw (rolled or poured)${i === 0 ? ' -- before any pre-bake' : ''}">Thickness <input type="number" min="0.05" step="0.1" value="${c.thicknessCm}" data-layer-thickness class="rof-layer-target" aria-label="Thickness of ${name} in the tray, raw, cm" placeholder="cm" /> cm</label>` : ''}
               ${i === 0
                 ? `<label class="rof-layer-check"><input type="checkbox" data-layer-prebake ${c.prebake ? 'checked' : ''} /> Pre-bake alone first</label>`
@@ -10795,7 +10837,13 @@ function renderRecipeOnFireView(main) {
         const same = summaryEl.querySelector(`[data-layer="${id}"] [data-layer-move="${b.dataset.layerMove}"]`);
         (same && !same.disabled ? same : summaryEl.querySelector(`[data-layer="${id}"] [data-layer-move="${-Number(b.dataset.layerMove)}"]`))?.focus();
       }));
-      card.querySelector('[data-layer-density]').addEventListener('input', (e) => { c.density = e.target.value; updateLayerPlan(); });
+      card.querySelector('[data-layer-density]').addEventListener('input', (e) => {
+        c.density = e.target.value; c.densitySource = 'chef';
+        const mark = card.querySelector('.rof-density-mark');
+        if (mark) mark.outerHTML = densityMarkHtml('chef', c.densityAi); // in place: the input keeps focus
+        updateLayerPlan();
+      });
+      card.querySelector('[data-layer-estimate]')?.addEventListener('click', () => estimateLayerDensities(id));
       card.querySelector('[data-layer-prebake]')?.addEventListener('change', (e) => { c.prebake = e.target.checked; refreshSum(); renderStepHeader(); updateLayerPlan(); });
       card.querySelectorAll('[data-layer-fill]').forEach(b => b.addEventListener('click', () => {
         if (c.fillKind === b.dataset.layerFill) return;
@@ -10809,6 +10857,81 @@ function renderRecipeOnFireView(main) {
     });
     updateSetupPreview();
   }
+  // Estimate: every layer in ONE call (the shared cache answers any composition estimated before, by anyone). A layer
+  // she set herself keeps her number unless it is the card whose Estimate she pressed; the AI answer is still kept for
+  // its note ("AI said ..."). A new density re-plans (and, under a batch, re-solves the quantities).
+  async function estimateLayerDensities(pressedId) {
+    if (densityBusy) return;
+    const procs = syncLayers(selectedProcesses());
+    const recipeAtStart = selectedRecipe;
+    const masses = procs.map((p, i) => ({ index: i, label: p.name || '(untitled process)', role: hasFlour(p) ? 'dough' : 'filling', sources: [densitySourceOf(p)] }));
+    densityBusy = true; densityError = '';
+    renderLayerSummary(selectedProcesses());
+    try {
+      const r = await window.api.estimateDensity({ masses });
+      if (selectedRecipe !== recipeAtStart) return; // she moved on to another recipe meanwhile
+      const cached = new Set(r.cached || []);
+      for (const e of r.estimates || []) {
+        const p = procs[e.index], id = p && String(p.localId), c = id && layerCfg.get(id);
+        if (!c) continue;
+        c.densityAi = { density: e.density, low: e.low, high: e.high, confidence: e.confidence, basis: e.basis, cached: cached.has(e.index) };
+        if (c.densitySource === 'chef' && id !== pressedId) continue;
+        c.density = e.density; c.densitySource = 'ai';
+      }
+      if ((r.missing || []).length) densityError = `No estimate came back for ${r.missing.map(i => procs[i]?.name || 'a layer').join(', ')} -- try again.`;
+    } catch (err) {
+      densityError = `Couldn't estimate the density: ${err.message}`;
+    } finally {
+      densityBusy = false;
+      if (selectedRecipe === recipeAtStart && layersActive()) { renderLayerSummary(selectedProcesses()); updateLayerPlan(); }
+    }
+  }
+  // The one-dough sheet's density line (Sheet & Trim, not layers): shown under the process summary only while Sheet &
+  // Trim is the method, since Shape & Place sizes its pieces from the shape, not from a density.
+  function sheetDensityHtml() {
+    return `<div class="rof-sheet-density" id="rof-sheet-density" ${rofMode === 'sheet' ? '' : 'hidden'}>
+        <span class="rof-density-row"><label class="rof-layer-density" for="rof-sheet-density-input">Density</label> <input id="rof-sheet-density-input" type="number" min="0.1" max="3" step="0.01" value="${escHtml(String(sheetDensityCfg.value))}" aria-label="Density of the dough, g per cm³" /> g/cm³ ${densityMarkHtml(sheetDensityCfg.source, sheetDensityCfg.ai)} ${densityButtonHtml('data-sheet-estimate', "Estimate the dough's density with AI, from its ingredients and method")}</span>
+        ${densityNoteHtml(sheetDensityCfg.source, sheetDensityCfg.ai)}
+      </div>`;
+  }
+  function renderSheetDensity() {
+    const el = document.getElementById('rof-sheet-density');
+    if (!el) return;
+    el.outerHTML = sheetDensityHtml();
+    wireSheetDensity();
+  }
+  function wireSheetDensity() {
+    const el = document.getElementById('rof-sheet-density');
+    if (!el) return;
+    el.querySelector('#rof-sheet-density-input').addEventListener('input', (e) => {
+      sheetDensityCfg.value = e.target.value; sheetDensityCfg.source = 'chef';
+      const mark = el.querySelector('.rof-density-mark');
+      if (mark) mark.outerHTML = densityMarkHtml('chef', sheetDensityCfg.ai);
+    });
+    el.querySelector('[data-sheet-estimate]').addEventListener('click', estimateSheetDensity);
+  }
+  // The dough as ONE mass: every ticked process merged (a One dough), or the single process.
+  async function estimateSheetDensity() {
+    if (densityBusy) return;
+    const procs = selectedProcesses();
+    if (!procs.length) return;
+    const recipeAtStart = selectedRecipe;
+    densityBusy = true; densityError = '';
+    renderSheetDensity();
+    try {
+      const r = await window.api.estimateDensity({ masses: [{ index: 0, label: procs.map(p => p.name || '(untitled process)').join(' + '), role: procs.length > 1 ? 'mixed' : 'dough', sources: procs.map(densitySourceOf) }] });
+      if (selectedRecipe !== recipeAtStart) return;
+      const e = (r.estimates || [])[0];
+      if (!e) densityError = 'No estimate came back -- try again.';
+      else sheetDensityCfg = { value: e.density, source: 'ai', ai: { density: e.density, low: e.low, high: e.high, confidence: e.confidence, basis: e.basis, cached: (r.cached || []).includes(0) } };
+    } catch (err) {
+      densityError = `Couldn't estimate the density: ${err.message}`;
+    } finally {
+      densityBusy = false;
+      if (selectedRecipe === recipeAtStart) renderSheetDensity();
+    }
+  }
+
   // A layer's own wastage rows: edit the %, remove, or add one from the catalog -- session-only, like the
   // mixed dough's (renderWasteRowsFor); the recipe itself is never changed.
   function renderLayerWasteRows(card, c) {
@@ -11158,6 +11281,8 @@ function renderRecipeOnFireView(main) {
         rofMode = 'shape';
         document.querySelectorAll('#rof-mode-toggle [data-rof-mode]').forEach(b => { b.classList.toggle('active', b.dataset.rofMode === 'shape'); b.setAttribute('aria-pressed', String(b.dataset.rofMode === 'shape')); });
         renderStepHeader();
+        const sd = document.getElementById('rof-sheet-density');
+        if (sd) sd.hidden = true;
       }
     }
     syncPreviewMode();
@@ -11331,6 +11456,8 @@ function renderRecipeOnFireView(main) {
       panel.querySelectorAll('[data-rof-mode]').forEach(b => { b.classList.toggle('active', b === btn); b.setAttribute('aria-pressed', String(b === btn)); });
       showModeHint();
       renderStepHeader();
+      const sd = document.getElementById('rof-sheet-density');
+      if (sd) sd.hidden = rofMode !== 'sheet';
     }));
     document.getElementById('rof-material-select').addEventListener('change', (e) => {
       if (e.target.value === NEW_MATERIAL) { createTrayInline(e.target); return; }
@@ -12035,7 +12162,7 @@ function renderRecipeOnFireView(main) {
     // A layered tray: the piece is the whole stack -- its assembled height rising to the estimated baked height (the
     // `hMul` that does exactly that), drawn as one slab per layer; its grams are its share of the stack's baked grams.
     const lay = !!sheetInfo.layered;
-    const thicknessCm = lay ? sheetInfo.thicknessCm : sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+    const thicknessCm = lay ? sheetInfo.thicknessCm : sheetInfo.sessionGrams / (fp.areaCm2 * sheetDensity());
     const desc = { kind: 'cut', shapeType, dims, thicknessCm, hMul: lay ? sheetInfo.stackHMul : model.hMul, doneness: bakeDoneness, brownSpeed: model.brownSpeed };
     if (lay) desc.layers = sheetInfo.layers.map(l => ({ heightCm: l.finalH, kind: l.kind, color: l.color, topColor: l.topColor }));
     const m = window.RofGame.measurePortion(desc);
@@ -12127,7 +12254,7 @@ function renderRecipeOnFireView(main) {
     let make;
     if (sheetMode) {
       const groups = cutGroups();
-      const thick = sheetInfo.sessionGrams / (fp.areaCm2 * RAW_DOUGH_DENSITY);
+      const thick = sheetInfo.sessionGrams / (fp.areaCm2 * sheetDensity());
       make = { title: trimMode === 'knife' ? 'Sheet & knife cuts' : 'Sheet & cutters', rows: [
         { label: 'Net Weight on this tray', value: g(sheetInfo.sessionGrams), note: sheetInfo.sessions > 1 ? `This batch needs ${sheetInfo.sessions} trays; the figures below are for one.` : '' },
         { label: 'Sheet thickness', value: `${Math.round(thick * 100) / 10} mm`, note: `about ${window.RofGame.fmtCm(desc.measures.heightCm, true)} once baked (est.)` },
@@ -12354,13 +12481,13 @@ function renderRecipeOnFireView(main) {
   }
 
   // ---- Sheet & Trim: the dough as one sheet ------------------------------------------------------
-  const RAW_DOUGH_DENSITY = 1.05; // g/cm3, raw dough
+  // The sheet's density: SHEET_DENSITY_DEFAULT (1.05 g/cm3, raw dough) until she estimates or types one (sheetDensity()).
   function computeSheetInfo() {
     const { footprint, netWeight } = bakeSnapshot;
     const area = footprint.areaCm2, usable = footprint.usableHeightCm;
-    const thicknessCm = netWeight / (area * RAW_DOUGH_DENSITY);
+    const thicknessCm = netWeight / (area * sheetDensity());
     // A tray is "full" at about 70% of its rim height, which leaves the sheet room to rise.
-    const capacityGrams = area * usable * 0.7 * RAW_DOUGH_DENSITY;
+    const capacityGrams = area * usable * 0.7 * sheetDensity();
     return {
       thicknessCm, capacityGrams,
       sessionGrams: Math.min(netWeight, capacityGrams),
@@ -13220,6 +13347,7 @@ function renderRecipeOnFireView(main) {
     bakeSnapshot = null;
     resetGameSession();
     resetBatch();
+    sheetDensityCfg = { value: SHEET_DENSITY_DEFAULT, source: 'default', ai: null }; densityError = ''; // a new dough
     renderProcessSummary();
     const hasSelection = selectedProcessLocalIds.size > 0;
     traySection.style.display = hasSelection ? '' : 'none';

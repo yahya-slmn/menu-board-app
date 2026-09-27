@@ -428,7 +428,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   it. Only page 1 is shrink-fitted (`renderFitPdf` fits it alone, then prints it with the recipe pages; zoom is on `.page1`).
   Single-process batches (B6) are deferred. Earlier plan notes, kept for reference: page 2+ "Recipe for X portions:" from
   `buildRecipeContentModel` (with a Portions Produced override: the cut count, not Net / portion weight) -- all done.
-- AI density (in progress, phases D1-D3; D1 done + deployed 2026-09-27: 6/6 reference mixtures inside their known ranges, repeat runs within 0.03): an explicit "Estimate" button will replace the flat 1.05 / 1.0
+- AI density (D1-D3 complete 2026-09-27; D1 deployed: 6/6 reference mixtures inside their known ranges, repeat runs within 0.03): an explicit "Estimate" button will replace the flat 1.05 / 1.0
   guesses with an estimate from a mass's ingredients, quantities and method (a layer, or several processes merged as One
   dough). `supabase/functions/estimate-density` (Sonnet 5, thinking off, index-tagged like estimate-calories; returns value,
   low / high range, confidence, a one-line basis, and `prompt_version`) <- `lib/estimateDensity.js` (pure, tested:
@@ -444,8 +444,16 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   method whitespace- and case-insensitive, plus role and method; process name and recipe ignored. `lib/densityCache.js`
   `estimateDensityCached`: look up (newest prompt version >= DENSITY_PROMPT_VERSION, keep it equal to the function's
   PROMPT_VERSION) -> estimate only the misses, each composition once -> upsert (ignore duplicates). Best-effort both ways:
-  no table = estimate without caching; a failed save keeps the answer. IPC returns `cached` indices. Next: D3 the UI (layer
-  cards, and the One dough Sheet & Trim density that is a hidden 1.05 today).
+  no table = estimate without caching; a failed save keeps the answer. IPC returns `cached` indices.
+  D3 (UI): a density has a source -- 'default' (flat guess, mark "est."), 'ai' ("est. (AI)", range + confidence + basis in
+  its tooltip) or 'chef' ("yours"); layers keep it in layerCfg (`densitySource` / `densityAi`), the one-dough sheet in
+  `sheetDensityCfg`. Estimate on ANY layer card (Setup or Batch) estimates every layer in one call; a number she typed is
+  kept unless it's the card whose Estimate she pressed (its note then reads "AI said X"). The note under an estimated
+  density: range, confidence, and a "How to measure" tip (weigh 250 ml of the raw mix, grams / 250). A new density
+  re-plans / re-solves the batch. The formerly hidden 1.05 is now `sheetDensity()` (SHEET_DENSITY_DEFAULT until she
+  estimates or types one): an editable line under the process summary, shown only for Sheet & Trim (Shape & Place sizes
+  pieces from the shape), read by computeSheetInfo (thickness, 70%-of-rim capacity), the portion view and the PDF; reset
+  with the dough (process change / new recipe). Density is not used to size Shape & Place pieces (out of scope).
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
