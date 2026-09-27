@@ -84,8 +84,9 @@ function createWindow() {
 
 // ---------------------------------------------------------------
 // Auto-update (electron-updater, checking GitHub Releases on the repo configured in
-// package.json's build.publish). Downloads silently in the background; the user is only
-// interrupted once the update is fully downloaded and ready to install.
+// package.json's build.publish). Downloads silently in the background; once the update
+// is fully downloaded the app quits and installs immediately (required on macOS —
+// MacUpdater has no install-on-quit path, so a "Later" dialog left updates stranded).
 //
 // Every check used to be a single shot at app launch with zero user-visible feedback on
 // anything short of a fully-downloaded update (a failed/no-op check just logged to a file
