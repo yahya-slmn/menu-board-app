@@ -454,7 +454,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   estimates or types one): an editable line under the process summary, shown only for Sheet & Trim (Shape & Place sizes
   pieces from the shape), read by computeSheetInfo (thickness, 70%-of-rim capacity), the portion view and the PDF; reset
   with the dough (process change / new recipe). Density is not used to size Shape & Place pieces (out of scope).
-- Shape & Place Batch Calculator (in progress, phases S1-S4; S1 built 2026-09-27): target portions + tray + shape + portion
+- Shape & Place Batch Calculator (in progress, phases S1-S4; S1 + S2 built 2026-09-27/28): target portions + tray + shape + portion
   weight -> pieces per tray, trays and how much dough to make; one piece = one portion of the FINISHED weight; exactly the
   target is made (last tray may be partly filled); one multiplier for the whole dough (a One dough keeps its proportions),
   = target x grams / the dough's Net Weight (Setup's combined wastage) x SAFETY_MARGIN (= the Recipe Calculator's
@@ -468,7 +468,17 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   outline, same turn -- one session's pieces are) it makes ONE pass over the scan grid (`autoArrangeStep`), since the next
   identical piece's spot is never earlier in the scan; hand-placed pieces stay as obstacles. Same spots piece for piece
   as the piece-by-piece scan (120/120 states incl. obstacles; 36/36 counts + positions; 24/24 vs the live game), ~50-80 ms
-  instead of up to 3.5 s. A turned piece, mixed outlines or a muffin tray take the unchanged piece-by-piece scan. Next: S2 the Batch step UI for Shape & Place, S3 carry into Place / Bake, S4 PDF.
+  instead of up to 3.5 s. A turned piece, mixed outlines or a muffin tray take the unchanged piece-by-piece scan.
+  S2 (UI): the same Batch step as layers, now with two kinds -- `batchKind()` 'layers' | 'shape'; `batchEligible()` = layers,
+  or Shape & Place with a process ticked (Sheet & Trim without layers has no batch). Setup's "From a portion target…" is
+  always rendered and hidden when not eligible (the Method toggle / a muffin tray update it). Shape pills: 1. Batch 2. Setup
+  3. Shape & Place 4. Bake (`withBatchStep`). `renderShapeBatchPanel`: tray + Portions, the Place step's shape presets
+  (`placeShapes`) + Portion weight (placeholder = the Place step's default, `batchGramsValue`); `updateShapeBatchPlan` ->
+  the stage card: per tray x trays (last tray), per process in the recipe -> to make (one multiplier), Net Weight needed,
+  one piece (size, or "sized to its cup"), dough per tray. The dough's Net Weight is from the recipe's OWN rows
+  (`batchSourceNet`) through Setup's combined wastage, so a wastage edit during the step re-solves. Entering / leaving a
+  shape batch does not re-render the process summary (that would reseed its wastage); ANY layout switch ends a batch.
+  Setup -> stays disabled until S3. Next: S3 carry into Setup / Place / Bake, S4 PDF.
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
