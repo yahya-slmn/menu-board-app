@@ -5,7 +5,6 @@ const crypto = require('crypto');
 const JSZip = require('jszip');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log/main');
-const { installMacUpdateFromZip } = require('./lib/macManualUpdate');
 const { supabase, supaFail } = require('./lib/supabaseClient');
 const {
   loadReferenceData, getSections, getSectionByCode, getSectionById,
@@ -85,10 +84,8 @@ function createWindow() {
 
 // ---------------------------------------------------------------
 // Auto-update (electron-updater, checking GitHub Releases on the repo configured in
-// package.json's build.publish). Downloads silently in the background; once ready the
-// user is prompted to restart. On macOS we deliberately bypass Squirrel.Mac and install
-// from the downloaded zip with ditto — unsigned CI builds make quitAndInstall() a silent
-// no-op, which is why Restart appeared to do nothing while stuck on old versions.
+// package.json's build.publish). Downloads silently in the background; the user is only
+// interrupted once the update is fully downloaded and ready to install.
 //
 // Every check used to be a single shot at app launch with zero user-visible feedback on
 // anything short of a fully-downloaded update (a failed/no-op check just logged to a file
@@ -113,10 +110,6 @@ log.transports.console.level = 'debug';
 autoUpdater.logger = log;
 
 autoUpdater.autoDownload = true;
-// Windows: install on quit if the user picked Later.
-// macOS: leave false so MacUpdater does NOT hand the zip to Squirrel (which no-ops on
-// unsigned builds); we install ourselves from info.downloadedFile instead.
-autoUpdater.autoInstallOnAppQuit = process.platform !== 'darwin';
 
 // Set only while a manually-triggered check (the menu item) is in flight -- every event handler
 // below branches on it so the automatic launch-time/periodic checks stay exactly as silent as
@@ -127,8 +120,6 @@ let manualCheckInProgress = false;
 // Set once buildApplicationMenu() runs; mutating a live MenuItem's .label/.enabled updates the
 // menu immediately, no need to rebuild/reassign the whole Menu.
 let checkForUpdatesMenuItem = null;
-// Pending Mac zip path so "Later" still installs on the next quit.
-let pendingMacUpdateZip = null;
 
 function resetCheckForUpdatesMenuItem() {
   manualCheckInProgress = false;
@@ -136,28 +127,6 @@ function resetCheckForUpdatesMenuItem() {
     checkForUpdatesMenuItem.label = 'Check for Updates…';
     checkForUpdatesMenuItem.enabled = true;
   }
-}
-
-function applyDownloadedUpdate(info) {
-  if (process.platform === 'darwin') {
-    const zipPath = info?.downloadedFile || pendingMacUpdateZip;
-    pendingMacUpdateZip = null;
-    try {
-      installMacUpdateFromZip(zipPath, log);
-    } catch (err) {
-      log.error('[auto-updater] mac manual install failed:', {
-        message: err?.message, stack: err?.stack, zipPath,
-      });
-      dialog.showMessageBox(mainWindow || loginWindow, {
-        type: 'error',
-        title: 'Update Install Failed',
-        message: "Couldn't install the update automatically.",
-        detail: `${err?.message || err}\n\nDownload the latest DMG from GitHub Releases, move it into Applications, and replace the existing app.`,
-      });
-    }
-    return;
-  }
-  autoUpdater.quitAndInstall(true, true);
 }
 
 autoUpdater.on('checking-for-update', () => {
@@ -191,23 +160,18 @@ autoUpdater.on('update-not-available', (info) => {
 });
 
 autoUpdater.on('update-downloaded', (info) => {
-  log.info(`[auto-updater] update-downloaded: v${info.version} -- prompting to restart`, {
-    downloadedFile: info?.downloadedFile,
-  });
-  if (process.platform === 'darwin' && info?.downloadedFile) {
-    pendingMacUpdateZip = info.downloadedFile;
-  }
+  log.info(`[auto-updater] update-downloaded: v${info.version} -- prompting to restart`);
   resetCheckForUpdatesMenuItem();
   dialog.showMessageBox(mainWindow || loginWindow, {
     type: 'info',
     title: 'Update Ready',
     message: `Version ${info.version} has been downloaded.`,
-    detail: 'Restart Menu Board now to install it, or it will install the next time you quit.',
+    detail: 'Restart Menu Board now to install it, or it will install automatically the next time you quit.',
     buttons: ['Restart Now', 'Later'],
     defaultId: 0,
     cancelId: 1,
   }).then((result) => {
-    if (result.response === 0) applyDownloadedUpdate(info);
+    if (result.response === 0) autoUpdater.quitAndInstall();
   });
 });
 
@@ -452,18 +416,6 @@ ipcMain.handle('auth-sign-in', async (e, { id, password }) => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
-});
-
-// macOS "Later": apply the pending zip on the next real quit (Cmd+Q). Squirrel is not used.
-app.on('before-quit', () => {
-  if (process.platform !== 'darwin' || !pendingMacUpdateZip) return;
-  const zipPath = pendingMacUpdateZip;
-  pendingMacUpdateZip = null;
-  try {
-    installMacUpdateFromZip(zipPath, log, { exitApp: false });
-  } catch (err) {
-    log.error('[auto-updater] mac install-on-quit failed:', err?.message || err);
-  }
 });
 
 // ---------------------------------------------------------------
