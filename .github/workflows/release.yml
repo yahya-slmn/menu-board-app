@@ -1,9 +1,9 @@
 name: Build and Publish Releases
 
+# Manual only (Actions tab -> Run workflow). Releases are published from the Mac with `npm run publish`, signed with
+# the Apple Development identity that installed copies check updates against; tag pushes must never build or publish.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,10 +15,13 @@ jobs:
     strategy:
       matrix:
         include:
+          # The Mac job builds but never publishes: Mac releases come only from `npm run publish` on the Mac (signed).
           - os: macos-latest
             args: --mac
+            publish: never
           - os: windows-latest
             args: --win
+            publish: onTagOrDraft
     steps:
       - uses: actions/checkout@v4
       - name: Setup Node.js
@@ -32,4 +35,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Explicitly skip signing so CI does not look for missing certs
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder ${{ matrix.args }} --publish onTagOrDraft
+        run: npx electron-builder ${{ matrix.args }} --publish ${{ matrix.publish }}
