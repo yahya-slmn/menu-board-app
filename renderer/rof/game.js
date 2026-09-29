@@ -147,7 +147,7 @@ export function createRofGame(container, opts = {}) {
   }
 
   // Starts Shape & Place: lays out `count` pieces of `spec` on a bench in front of the tray. On a
-  // muffin tray the count is the number of cups and each piece is sized to fit one. Returns the
+  // muffin tray the count is at most the number of cups and each piece is sized to fit one. Returns the
   // spec/count actually used, since the tray can change them.
   function beginPlacement({ spec, count, spread = 1 }) {
     closePortion({ quiet: true });
@@ -157,7 +157,7 @@ export function createRofGame(container, opts = {}) {
     if (tray.region.kind === 'cups') {
       const d = tray.region.r * 2 * 0.8;
       spec = { archetype: 'ball', lengthCm: d, widthCm: d, heightCm: d * 0.56 };
-      count = tray.region.centers.length;
+      count = Math.min(Number(count) >= 1 ? count : Infinity, tray.region.centers.length); // a batch's partly filled tray leaves cups empty
     }
     count = clamp(Math.round(count), 1, 60);
     const probe = createDoughPiece(spec, { seed: 1, spread });
