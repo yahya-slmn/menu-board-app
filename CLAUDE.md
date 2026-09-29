@@ -454,7 +454,7 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   estimates or types one): an editable line under the process summary, shown only for Sheet & Trim (Shape & Place sizes
   pieces from the shape), read by computeSheetInfo (thickness, 70%-of-rim capacity), the portion view and the PDF; reset
   with the dough (process change / new recipe). Density is not used to size Shape & Place pieces (out of scope).
-- Shape & Place Batch Calculator (in progress, phases S1-S4; S1-S3 built 2026-09-27/28): target portions + tray + shape + portion
+- Shape & Place Batch Calculator (complete, phases S1-S4, 2026-09-27/29): target portions + tray + shape + portion
   weight -> pieces per tray, trays and how much dough to make; one piece = one portion of the FINISHED weight; exactly the
   target is made (last tray may be partly filled); one multiplier for the whole dough (a One dough keeps its proportions),
   = target x grams / the dough's Net Weight (Setup's combined wastage) x SAFETY_MARGIN (= the Recipe Calculator's
@@ -488,8 +488,15 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   `currentPortionPlan` = the tray's share at the batch weight (a muffin tray too: `game.beginPlacement` now takes a count
   below the cups, so a partly filled tray leaves cups empty), and Auto-arrange runs on arrival. `shapeBatchCheckHtml` in
   the Place / Bake summary compares the tray with the plan (as planned, or "N x trays makes M, K short of target", the
-  last tray counted). The PDF's dough block (until S4) shows the whole batch's Net Weight and "Net Weight on this tray".
-  Next: S4 PDF.
+  last tray counted). The PDF's dough block shows the whole batch's Net Weight and "Net Weight on this tray".
+  S4 (PDF, B5's path): page 1 gains a "Batch" section (`shapeBatchPdfSection`: target, plan, placed on this tray -- "as
+  planned" or "N of target, K short"); `data.batchRecipe` (`buildShapeBatchRecipeData`: the batch-scaled session rows,
+  Portions Produced = the batch count, Portion Weight = the batch weight, `makesLabel` with the last tray, `shapeLabel`
+  instead of a cut) prints "Recipe for X portions:" from page 2. One process: its wastes are Setup's (what the batch was
+  solved with). One dough: each process's OWN saved wastes, and `notes` (recipe-page footer, also page 1's Batch note) say
+  the portions were counted from the combined wastage -- the processes' own Net Weights need not add up to it.
+  lib/recipePdf.js `batchRecipeHtml` takes the optional `makesLabel` / `shapeLabel` / `notes` (a layered batch passes none).
+  The Shape & Place Batch Calculator is complete (S1-S4).
 - Materials form: Shape Type lists only the Category's shapes (`MATERIAL_CATEGORY_SHAPES`, mirrored in main.js
   `save-material`): Cutter = round / rectangular ("Square / Rectangle") / triangle, Tray / Pan = round / rectangular /
   muffin_tray. A material saved with an off-list shape keeps it as an extra option; only CHANGING to one is refused.
