@@ -225,13 +225,13 @@ async function reload(workbook) {
       for (const k of [0, 1]) expectDish.set(dishName('KG_LP', 'LUNCH_MAIN', di, k), { group: 'MAIN', section: 'KG_LP', category: 'Lunch Main Course' });
       for (const k of [0, 1]) expectDish.set(dishName('KG_LP', 'LUNCH_STARCH', di, k), { group: 'SIDES', section: 'KG_LP', category: 'Lunch Starch/Side' });
       expectDish.set(dishName('MS_UP', 'LUNCH_VEGETABLE', di, 0), { group: 'SIDES', section: 'MS_UP', category: 'Lunch Vegetable Side' });
-      expectDish.set(ownName('STAFF', 'STAFF_MAIN', di, 5), { group: 'MAIN', section: 'STAFF' }); // Staff's own, matches nothing
+      expectDish.set(ownName('STAFF', 'STAFF_MAIN', di, 5), { group: 'MAIN', section: 'STAFF', role: true }); // Staff's own, matches nothing
       expectDish.set(dishName('DAYCARE', 'AM_SNACK', di, 0), { group: 'AM_SNACK_BREAKFAST', section: 'DAYCARE', category: 'AM Snack' });
       expectDish.set(dishName('MS_UP', 'AM_SNACK', di, 0), { group: 'AM_SNACK_BREAKFAST', section: 'MS_UP', category: 'AM Snack' });
       expectDish.set(ownName('STAFF', 'STAFF_BREAKFAST', di, 3), { group: 'AM_SNACK_BREAKFAST', section: 'STAFF' }); // Staff's own
     }
-    expectDish.set(ownName('STAFF', 'STAFF_MAIN', 0, 6), { group: 'MAIN', section: 'STAFF' });
-    expectDish.set(PUMPKIN, { group: 'MAIN', section: 'STAFF' });
+    expectDish.set(ownName('STAFF', 'STAFF_MAIN', 0, 6), { group: 'MAIN', section: 'STAFF', role: true });
+    expectDish.set(PUMPKIN, { group: 'MAIN', section: 'STAFF', role: true }); // also a Lunch Box option: still a Staff lunch main
     expectDish.set(RICE_PUDDING, { group: 'PM_SNACK', section: 'DAYCARE', category: 'PM Snack' });
     expectDish.set(SCHOOL_SPELLING, { group: 'SOUP_APPETIZER', section: 'KG_LP', category: 'Soup/Appetizer' });
     const results = {};
@@ -248,10 +248,18 @@ async function reload(workbook) {
         // The kept row (its category text is what the recipe shows and the AI is told) is the school one for a
         // shared dish -- Staff "Main Dish" rows are taken last, whatever the tab order.
         if (want.category) check(u.category === want.category, `recipe dedup (${label}): "${name}" kept category "${u.category}", expected "${want.category}"`);
+        // staffMainRole: only a Staff lunch main no student dish claims waits for its main / side decision (made after
+        // generation, lib/recipeCategoryGroups.js staffMainGroup); a shared one takes its school dish's group as is.
+        check(!!u.staffMainRole === !!want.role, `recipe dedup (${label}): "${name}" staffMainRole ${!!u.staffMainRole}, expected ${!!want.role}`);
       }
     }
     for (const [label, unique] of Object.entries(results)) {
       check(!unique.some((u) => u.name === STAFF_SPELLING), `recipe dedup (${label}): Staff's spelling "${STAFF_SPELLING}" was kept over the school's`);
+    }
+    // Served-as-is rows never become recipes, whatever each row's own name (Fruit Bar / Basket, Salad Bar, drinks).
+    for (const [label, unique] of Object.entries(results)) {
+      const leaked = unique.filter((u) => /fruit\s*(bar|basket)|salad\s*bar|beverages/i.test(u.category || ''));
+      check(!leaked.length, `recipe dedup (${label}): ${leaked.length} Fruit Bar / Basket / Salad Bar / Beverages row(s) would get a recipe: ${leaked.map((u) => u.name).slice(0, 3).join(', ')}`);
     }
     const a = results['file order'], b = results['Staff tab first'];
     check(a.length === b.length, `recipe dedup: ${a.length} dishes in file order, ${b.length} with the Staff tab first`);

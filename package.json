@@ -11,7 +11,8 @@
     "build": "electron-builder --mac --win",
     "publish": "electron-builder --mac --publish always",
     "tour": "node scripts/layout-tour/run.js",
-    "test:roundtrip": "node scripts/menu-ingredients-roundtrip.js"
+    "test:roundtrip": "node scripts/menu-ingredients-roundtrip.js",
+    "test": "node scripts/menu-ingredients-roundtrip.js && node scripts/recipe-groups-check.js"
   },
   "build": {
     "appId": "com.menuboard.app",

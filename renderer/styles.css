@@ -656,6 +656,14 @@ table.materials-table td.cat-cell {
 :is(.rg-drafts-table, .rg-generated-table) tr.rg-group-head td { background: #f6f7f1; color: var(--sage-dark); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 6px; padding-bottom: 6px; }
 :is(.rg-drafts-table, .rg-generated-table) tr:is(.rg-day-head, .rg-group-head):hover { background: none; }
 .rg-group-count { color: var(--neutral); font-weight: 400; text-transform: none; letter-spacing: 0; }
+/* "Looks like: ..." under a recipe name (a near-identical name in the same menu and group), and the Drafts folder's
+   re-group preview card. */
+.rg-lookalike { margin-top: 3px; font-size: 11.5px; color: var(--gold); line-height: 1.35; }
+.rg-regroup-card { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 13px; display: grid; gap: 6px; }
+.rg-regroup-warn { color: var(--danger); }
+.rg-regroup-error { color: var(--danger); }
+.rg-regroup-note { color: var(--neutral); font-size: 12px; }
+.rg-regroup-actions { display: flex; gap: 8px; margin-top: 2px; }
 .rg-generated-table { table-layout: fixed; min-width: 800px; }
 .rg-generated-table th:nth-child(1), .rg-generated-table td:nth-child(1) { width: 40px; padding-left: 12px; padding-right: 6px; }
 .rg-generated-table th:nth-child(2), .rg-generated-table td:nth-child(2) { width: 108px; white-space: nowrap; }

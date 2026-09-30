@@ -4285,7 +4285,7 @@ async function renderRecipeListView(main, ns) {
               <tr>
                 <td><input type="checkbox" class="recipe-row-check" data-select="${r.id}" data-month="${group.key}" ${selected.has(r.id) ? 'checked' : ''} /></td>
                 <td>${r.code}</td>
-                <td>${r.name}</td>
+                <td>${r.name}${recipeLookAlikeHtml(r)}</td>
                 <td>${r.category || '–'}</td>
                 <td>${r.prepared_by || '–'}</td>
                 <td>${r.date_created || '–'}</td>
@@ -6248,6 +6248,14 @@ function sortDayGroups(entries) { // entries: [[dayLabel|null, rows], ...] in fi
 // order. The group comes from main.js (category_group_label / category_group_order, lib/recipeCategoryGroups.js);
 // within a group, recipes keep the list's own order. Returns table-body HTML: a day heading row (only when some row
 // has a day -- a list with none gets category headings alone), a category heading row, then rowMarkup(recipe) per row.
+const rgEscape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// "Looks like: ..." under a recipe's name: another recipe of the same menu and group worded almost the same (main.js
+// looks_like). Two recipes for one dish that the dedup couldn't join -- shown, never merged; she deletes the extra one.
+function recipeLookAlikeHtml(r) {
+  const names = r.looks_like || [];
+  return names.length ? `<div class="rg-lookalike">Looks like: ${names.map(rgEscape).join(' · ')}</div>` : '';
+}
+
 function recipeDayCategoryRowsHtml(recipes, colspan, rowMarkup) {
   const byDay = new Map();
   for (const r of recipes) {
@@ -6378,6 +6386,56 @@ function renderDraftFolderList(container, ns, main, drafts) {
 // One menu's own drafts -- identical row markup/Review/Delete actions the old flat list always
 // had, just pre-filtered to one source_menu_label, fronted by a back link that plays the same
 // role as the review form's own "<- Back to Recipe Generator" button.
+// The Drafts folder's "Re-group from the original menu..." (main.js preview- / apply-regroup-generated-recipes,
+// lib/recipeRegroup.js): pick the file -> a preview of what will be grouped where (nothing written) -> Group them.
+// Covers this menu's confirmed recipes too, and only ever fills a group that is still empty.
+function wireRegroup(container, ns, main, folderLabel) {
+  const btn = container.querySelector('#rg-regroup-btn');
+  const input = container.querySelector('#rg-regroup-file');
+  const panel = container.querySelector('#rg-regroup-panel');
+  btn.addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => {
+    const file = input.files[0];
+    input.value = '';
+    if (!file) return;
+    btn.disabled = true;
+    panel.innerHTML = `<div class="rg-regroup-card">Reading "${rgEscape(file.name)}"…</div>`;
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const p = await window.api.previewRegroupGeneratedRecipes({ folderLabel, base64, fileName: file.name });
+      if (!p.success) { panel.innerHTML = `<div class="rg-regroup-card rg-regroup-error">${rgEscape(p.error)}</div>`; return; }
+      if (!p.willGroup) {
+        panel.innerHTML = `<div class="rg-regroup-card">${p.total ? `None of the ${p.total} ungrouped recipes of "${rgEscape(folderLabel)}" were found in this file -- is it the menu they came from?` : 'Every recipe here is already grouped.'}</div>`;
+        return;
+      }
+      panel.innerHTML = `
+        <div class="rg-regroup-card">
+          ${p.fileNameDiffers ? `<div class="rg-regroup-warn">This file's name ("${rgEscape(file.name)}") is not the menu these recipes came from ("${rgEscape(folderLabel)}"). Continue only if it is the same menu.</div>` : ''}
+          <div><strong>${p.willGroup} of ${p.total}</strong> recipe${p.total === 1 ? '' : 's'} will be grouped: ${p.byGroup.map(g => `${rgEscape(g.label)} ${g.count}`).join(' · ')}</div>
+          ${p.notFound.length ? `<div class="rg-regroup-note">Not in this file, left as they are (${p.notFound.length}): ${p.notFound.slice(0, 8).map(rgEscape).join(', ')}${p.notFound.length > 8 ? '…' : ''}</div>` : ''}
+          <div class="rg-regroup-actions"><button class="primary" id="rg-regroup-apply">Group them</button><button class="secondary" id="rg-regroup-cancel">Cancel</button></div>
+        </div>`;
+      panel.querySelector('#rg-regroup-cancel').addEventListener('click', () => { panel.innerHTML = ''; });
+      panel.querySelector('#rg-regroup-apply').addEventListener('click', async (e) => {
+        e.currentTarget.disabled = true;
+        const r = await window.api.applyRegroupGeneratedRecipes({ token: p.token });
+        if (!r.success) { panel.innerHTML = `<div class="rg-regroup-card rg-regroup-error">${rgEscape(r.error)}</div>`; return; }
+        showToast(`Grouped ${r.updated} recipe${r.updated === 1 ? '' : 's'}.`);
+        renderRecipeGeneratorTabs(main, ns);
+      });
+    } catch (err) {
+      panel.innerHTML = `<div class="rg-regroup-card rg-regroup-error">Couldn't re-group: ${rgEscape(err.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   const rows = drafts.filter(d => (d.source_menu_label || 'Unknown source') === folderLabel);
   const backBtn = `<button class="secondary" id="rg-drafts-back-btn" style="margin-bottom:14px;">← Back to Drafts</button>`;
@@ -6402,7 +6460,7 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   function rowMarkup(d) {
     return `
       <tr>
-        <td>${d.name}</td>
+        <td>${d.name}${recipeLookAlikeHtml(d)}</td>
         <td>${d.category || '–'}</td>
         <td>${d.source_menu_label || '–'}</td>
         <td>${new Date(d.created_at).toLocaleDateString()}</td>
@@ -6418,11 +6476,18 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   // Recipe Generated list). No day headings when no draft here has a day (drafts from before source_day_label, and the
   // AI-read fallback path, which captures no day): a lone "No day recorded" over every row would be noise.
 
+  // Drafts made before groups were saved sit under a guess from their category text (Staff "Main Dish" -> Other):
+  // "Re-group from the original menu..." re-reads the file they came from and fills their group (preview first).
+  const needsRegroup = rows.some(d => !d.category_group_saved);
   container.innerHTML = `
-    <div class="rg-draft-bar">${backBtn.replace('margin-bottom:14px;', 'margin-bottom:0;')}<select id="rg-draft-category-filter" aria-label="Filter by category" hidden></select></div>
+    <div class="rg-draft-bar">${backBtn.replace('margin-bottom:14px;', 'margin-bottom:0;')}<select id="rg-draft-category-filter" aria-label="Filter by category" hidden></select>
+      ${needsRegroup ? `<button class="secondary" id="rg-regroup-btn" title="Some recipes here were generated before recipes were grouped, so they're grouped by a guess (Staff &quot;Main Dish&quot; lands in Other). Pick the menu file they came from to group them properly. Shows what will change first.">Re-group from the original menu…</button><input type="file" id="rg-regroup-file" accept=".xlsx" hidden />` : ''}
+    </div>
+    <div id="rg-regroup-panel" role="status" aria-live="polite"></div>
     <div id="rg-draft-table"></div>
   `;
   wireBack();
+  if (needsRegroup) wireRegroup(container, ns, main, folderLabel);
   const s = state[ns.stateKey];
   const filterEl = document.getElementById('rg-draft-category-filter');
   s.draftCategory = fillCategoryFilter(filterEl, rows, s.draftCategory);

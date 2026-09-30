@@ -61,6 +61,9 @@ interface DishItem {
   seafoodAllowed: boolean;
   // Computed in main.js from the menu category (any category containing "salad", case-insensitive).
   separateDressing: boolean;
+  // Computed in main.js: true only for a Staff lunch "Main Dish" no student dish shares (see ROLE_RULE). The app
+  // files that recipe under Main Hot Dish or Starch / Side Vegetables by the "role" returned for it.
+  askRole: boolean;
 }
 
 const RECIPE_SCHEMA = {
@@ -78,6 +81,8 @@ const RECIPE_SCHEMA = {
           // see SEAFOOD_RESTRICTION. null for every normal item, including a shape-named dish
           // (e.g. a fish-shaped sandwich) that correctly generates with no real seafood.
           skipReason: { anyOf: [{ type: "string" }, { type: "null" }] },
+          // "main" / "side" for an item with askRole (see ROLE_RULE), null for every other item.
+          role: { anyOf: [{ type: "string", enum: ["main", "side"] }, { type: "null" }] },
           processes: {
             type: "array",
             items: {
@@ -118,7 +123,7 @@ const RECIPE_SCHEMA = {
             },
           },
         },
-        required: ["index", "name", "skipReason", "processes"],
+        required: ["index", "name", "skipReason", "role", "processes"],
         additionalProperties: false,
       },
     },
@@ -170,6 +175,15 @@ When "separateDressing" is true (the dish is in a Salad category) and the salad 
 - If the dish genuinely has no dressing (for example a plain fruit salad served as is), generate a single process as usual -- do not invent a dressing.
 
 When "separateDressing" is false or absent, ignore this rule: follow the normal process rule (one process for a simple dish) even if the dish happens to include a dressing.`;
+
+// Added 2026-09-30 (Recipe Generator category groups). Staff's lunch "Main Dish" row holds both the centre of the plate
+// and plain accompaniments (rice, potatoes, vegetables) under one label; the app groups recipes by what the dish IS on
+// the plate, so for the Staff mains no student dish shares (askRole, decided in main.js) the model says which. Meat or
+// fish in the dish always makes it a main in the app, whatever the role; the role matters for meatless dishes.
+const ROLE_RULE = `Each item also carries an "askRole" flag. When "askRole" is true, set "role" to how the dish is served on a plate:
+- "side" -- a plain ACCOMPANIMENT built on a starch or a vegetable, served next to a main: plain or seasoned rice (white rice, saffron rice, vermicelli rice), potatoes (mashed, roasted, wedges, fries), plain pasta or noodles with a simple sauce, bulgur or freekeh, steamed / sauteed / roasted / grilled vegetables, green beans, a vegetable gratin served as a side.
+- "main" -- the CENTRE of the plate, with or without meat: any meat, poultry or fish dish, and meatless mains such as eggplant parmigiana, mac and cheese, lasagna, a burrito or bowl, a curry with rice, stuffed vegetables, a tofu or lentil dish, moussaka, a vegetable stew eaten as the meal.
+If it is genuinely unclear, choose "main". When "askRole" is false or absent, set "role" to null.`;
 
 // Shorter version of suggest-dish-ingredients' own DECOMPOSITION_RULE -- a full recipe's
 // ingredient list is inherently more decomposed than a bare ingredient-name suggestion (you
@@ -230,9 +244,12 @@ ${SEAFOOD_RESTRICTION}
 
 ${SALAD_DRESSING_RULE}
 
+${ROLE_RULE}
+
 For each dish, generate:
 - "name": the dish name (use the given name, cleaned up if needed).
 - "skipReason": see the seafood restriction above -- null unless you are genuinely declining this specific item.
+- "role": see the role rule above -- "main" or "side" only for an item with "askRole" true, otherwise null.
 - "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish (except a dish flagged "separateDressing", which follows the salad rule above). Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen. Empty array only when "skipReason" is set.
 - Each process's "ingredients": every real base ingredient it needs, each with a realistic quantity for a normal/standard batch of this dish (NOT scaled to any particular total -- just a natural, realistic recipe). See the units rule above for how quantity/unit must be expressed -- it applies to every ingredient, no exceptions. "method" on an ingredient is a short prep note (e.g. "diced", "melted"), or null if none.
 - Each process's "method_steps": one array entry per distinct preparation step, in order.
@@ -274,7 +291,7 @@ Deno.serve(async (req) => {
   // "unknown means restricted, never permitted" principle main.js's own resolveSectionFromSheetName
   // caller already applies before this ever gets sent.
   const items = Array.isArray(body.items)
-    ? body.items.map((it) => ({ ...it, seafoodAllowed: it?.seafoodAllowed === true, separateDressing: it?.separateDressing === true }))
+    ? body.items.map((it) => ({ ...it, seafoodAllowed: it?.seafoodAllowed === true, separateDressing: it?.separateDressing === true, askRole: it?.askRole === true }))
     : body.items;
   const existingWasteTypeNames = Array.isArray(body.existingWasteTypeNames)
     ? body.existingWasteTypeNames.filter((n): n is string => typeof n === "string")

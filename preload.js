@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('recipe-generator-progress', listener);
   },
   listGeneratedRecipeDrafts: () => ipcRenderer.invoke('list-generated-recipe-drafts'),
+  // "Re-group from the original menu..." (Drafts folder): preview a plan from the picked file, then apply it by token.
+  previewRegroupGeneratedRecipes: (payload) => ipcRenderer.invoke('preview-regroup-generated-recipes', payload),
+  applyRegroupGeneratedRecipes: (payload) => ipcRenderer.invoke('apply-regroup-generated-recipes', payload),
   listGeneratedRecipes: () => ipcRenderer.invoke('list-generated-recipes'),
   searchGeneratedRecipes: (query) => ipcRenderer.invoke('search-generated-recipes', query),
   getGeneratedRecipe: (id) => ipcRenderer.invoke('get-generated-recipe', id),

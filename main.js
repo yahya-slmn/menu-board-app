@@ -49,7 +49,8 @@ const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
-const { categoryGroupFor, categoryGroupOfRecipe } = require('./lib/recipeCategoryGroups');
+const { categoryGroupFor, categoryGroupInfo, categoryGroupOfRecipe, staffMainGroup, lookAlikes } = require('./lib/recipeCategoryGroups');
+const { planRegroup } = require('./lib/recipeRegroup');
 
 let mainWindow;
 let loginWindow;
@@ -2276,6 +2277,8 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
         index: idx, name: d.name, category: d.category || undefined, seafoodAllowed: d.section === 'STAFF',
         // Salad-category dishes get their dressing as its own process -- decided here in code, like seafoodAllowed.
         separateDressing: isSaladCategory(d.category),
+        // A Staff lunch main no student dish shares: the model says whether it is a main or a side (ROLE_RULE).
+        askRole: !!d.staffMainRole,
       }));
       let recipes;
       try {
@@ -2338,6 +2341,12 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
       // same generate-recipe-photo IPC channel Recipe Book/Extractor use) -- she generates one
       // only for the specific recipes she actually wants a photo for.
       for (const { dish, gen } of toPersist) {
+        // Main Hot Dish or Starch / Side Vegetables for a Staff lunch main no student dish shares: meat or fish in its
+        // name or generated ingredients, else the model's role (lib/recipeCategoryGroups.js staffMainGroup).
+        if (dish.staffMainRole) {
+          const ingredientNames = (gen.processes || []).flatMap((p) => (p.ingredients || []).map((i) => i.name));
+          dish.categoryGroup = staffMainGroup({ name: dish.name, ingredientNames, role: gen.role ?? null }).group;
+        }
         try {
           await persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel: fileName, wasteTypeCache });
           createdCount++;
@@ -2482,11 +2491,110 @@ async function listGeneratedRecipesWithGroups(context, status, columns, orderBy)
     ({ data, error } = await run(columns));
   }
   if (error) throw supaFail(context, error);
-  return data.map((r) => {
+  const rows = data.map((r) => {
     const g = categoryGroupOfRecipe(r);
-    return { ...r, category_group: g.key, category_group_label: g.label, category_group_order: g.order };
+    // category_group_saved: false = grouped by a guess from the category text (made before groups were saved), which
+    // the Drafts folder's "Re-group from the original menu..." can fill in.
+    return { ...r, category_group: g.key, category_group_label: g.label, category_group_order: g.order, category_group_saved: !!r.source_category_group };
   });
+  // looks_like: the same dish worded two ways in one menu gets two recipes (the dedup only merges same-word-count
+  // spellings), so near-identical names within one source menu and one group are NOTED here -- never merged.
+  const buckets = new Map();
+  for (const r of rows) {
+    const key = `${r.source_menu_label || ''}|${r.category_group}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(r);
+  }
+  for (const list of buckets.values()) {
+    const alike = lookAlikes(list.map((r) => r.name));
+    for (const r of list) r.looks_like = [...new Set(alike.get(r.name) || [])];
+  }
+  return rows;
 }
+
+// "Re-group from the original menu..." (Drafts folder; lib/recipeRegroup.js): recipes of one source menu that have no
+// saved group (generated before source_category_group existed) are matched against the menu file she picks, and a
+// group is planned for each. Preview first, nothing written; apply writes only the stored plan, and only where the
+// group is still empty (a recipe grouped meanwhile is left alone). Drafts and confirmed recipes alike.
+const regroupPlans = new Map(); // token -> { folderLabel, assignments }
+ipcMain.handle('preview-regroup-generated-recipes', async (e, { folderLabel, base64, fileName } = {}) => {
+  if (!folderLabel || !base64) return { success: false, error: 'No menu or file given.' };
+  if (categoryGroupColumnMissing) {
+    return { success: false, error: 'The database column for recipe groups is not there yet (migration 20260930100000, applied by hand in the Supabase SQL editor). Apply it, then try again.' };
+  }
+  const { data: recipes, error } = await supabase.from('generated_recipes')
+    .select('id, name, source_dish_name, source_category_group')
+    .eq('source_menu_label', folderLabel).is('source_category_group', null);
+  if (error) {
+    if (isMissingCategoryGroupColumn(error)) {
+      categoryGroupColumnMissing = true;
+      return { success: false, error: 'The database column for recipe groups is not there yet (migration 20260930100000, applied by hand in the Supabase SQL editor). Apply it, then try again.' };
+    }
+    throw supaFail('preview-regroup-generated-recipes: load recipes', error);
+  }
+  if (!recipes.length) return { success: true, token: null, total: 0, willGroup: 0, notFound: [], byGroup: [] };
+
+  // Each recipe's saved ingredient names (her edits included) -- a Staff lunch main's group can depend on them.
+  const ingredientNamesById = new Map(recipes.map((r) => [r.id, []]));
+  const ids = recipes.map((r) => r.id);
+  for (let i = 0; i < ids.length; i += 300) {
+    const { data: procs, error: pErr } = await supabase.from('generated_recipe_processes').select('id, generated_recipe_id').in('generated_recipe_id', ids.slice(i, i + 300));
+    if (pErr) throw supaFail('preview-regroup-generated-recipes: load processes', pErr);
+    const recipeOfProcess = new Map(procs.map((p) => [p.id, p.generated_recipe_id]));
+    const procIds = procs.map((p) => p.id);
+    for (let j = 0; j < procIds.length; j += 300) {
+      const { data: ings, error: iErr } = await supabase.from('generated_recipe_ingredients').select('process_id, name').in('process_id', procIds.slice(j, j + 300));
+      if (iErr) throw supaFail('preview-regroup-generated-recipes: load ingredients', iErr);
+      for (const ing of ings) ingredientNamesById.get(recipeOfProcess.get(ing.process_id))?.push(ing.name);
+    }
+  }
+
+  let workbook;
+  try {
+    ({ workbook } = await loadWorkbookFromBuffer(Buffer.from(base64, 'base64')));
+  } catch (err) {
+    return { success: false, error: `Couldn't read this file as an Excel workbook: ${err.message}` };
+  }
+  const { rows } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+  if (!rows.length) return { success: false, error: "No menu rows were found in this file -- pick the menu these recipes were generated from." };
+
+  const { assignments, notFound } = planRegroup({
+    rows, recipes: recipes.map((r) => ({ ...r, ingredientNames: ingredientNamesById.get(r.id) || [] })),
+  });
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  regroupPlans.set(token, { folderLabel, assignments });
+  const counts = new Map();
+  for (const a of assignments) counts.set(a.group, (counts.get(a.group) || 0) + 1);
+  return {
+    success: true, token, total: recipes.length, willGroup: assignments.length,
+    notFound: notFound.map((n) => n.name),
+    byGroup: [...counts].map(([key, count]) => ({ ...categoryGroupInfo(key), count })).sort((a, b) => a.order - b.order),
+    fileNameDiffers: !!fileName && fileName !== folderLabel,
+  };
+});
+
+ipcMain.handle('apply-regroup-generated-recipes', async (e, { token } = {}) => {
+  const plan = regroupPlans.get(token);
+  if (!plan) return { success: false, error: 'This preview is no longer available -- choose the file again.' };
+  regroupPlans.delete(token);
+  const idsByGroup = new Map();
+  for (const a of plan.assignments) {
+    if (!idsByGroup.has(a.group)) idsByGroup.set(a.group, []);
+    idsByGroup.get(a.group).push(a.id);
+  }
+  let updated = 0;
+  for (const [group, ids] of idsByGroup) {
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data, error } = await supabase.from('generated_recipes')
+        .update({ source_category_group: group })
+        .in('id', ids.slice(i, i + 300)).is('source_category_group', null)
+        .select('id');
+      if (error) throw supaFail('apply-regroup-generated-recipes', error);
+      updated += data.length;
+    }
+  }
+  return { success: true, updated };
+});
 
 ipcMain.handle('list-generated-recipe-drafts', async () => listGeneratedRecipesWithGroups(
   'list-generated-recipe-drafts', 'draft', 'id, name, category, source_menu_label, source_dish_name, source_day_label, created_at', 'created_at',
