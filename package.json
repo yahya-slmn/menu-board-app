@@ -9,7 +9,8 @@
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
     "build": "electron-builder --mac --win",
-    "publish": "electron-builder --mac --publish always"
+    "publish": "electron-builder --mac --publish always",
+    "tour": "node scripts/layout-tour/run.js"
   },
   "build": {
     "appId": "com.menuboard.app",

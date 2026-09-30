@@ -19,9 +19,20 @@ anymore — every read and write goes over the network to Supabase.
 npm install       # no native modules to rebuild anymore (better-sqlite3 is gone)
 npm start          # launch the app (electron .)
 npm run build:mac  # package a signed-for-local-use .app into dist/
+npm run tour       # layout tour: every screen below fits, Mac-like and Windows-like (no login)
 ```
 
-There is no lint, test, or typecheck script — none are configured in this repo.
+There is no lint, unit-test or typecheck script. The one committed check of the UI is the **layout tour**
+(`scripts/layout-tour/`, added 2026-09-30; before it, "the tour" / "regression suite" in past notes meant a harness
+rebuilt in each session's scratchpad and lost with it). It loads the real renderer with a stubbed `window.api`
+(`data.js`: sample sections, dishes, recipes, trays; no Supabase, nothing written) and walks Dish Catalog, Menu
+Planner (Generate + each Build Menu section grid) and Recipe on Fire (Setup, Shape & Place, Sheet & Trim, layers,
+Batch, One dough) at 1280 x 792 with overlay scrollbars and 1264 x 761 with 17px classic ones (the Windows sizes
+are an estimate). It fails on any sideways scrolling, and on vertical scrolling in Recipe on Fire at the Mac size.
+`--css "<rule>"` injects CSS for a control run (put an old rule back: the tour must then fail). Run it after any
+layout / styles.css change; a new screen or step goes in `electron-main.js`'s STEPS (and any data it needs in
+`data.js`). It is Chromium with a simulated scrollbar, not Windows: fonts, DPI scaling and the real frame still need
+a look on a Windows machine.
 
 **Login is required on every launch.** `lib/supabaseClient.js` creates the
 Supabase client with `persistSession: false` (there's no `localStorage` in the
