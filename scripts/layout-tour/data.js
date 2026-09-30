@@ -47,7 +47,34 @@ const MATERIALS = [
   { id: 4, code: 'CU-01', name: 'Round cutter 7cm', category: 'cutter', shape_type: 'round', diameter_cm: 7, height_cm: 3 },
   { id: 5, code: 'CU-02', name: 'Square cutter 6cm', category: 'cutter', shape_type: 'rectangular', length_cm: 6, width_cm: 6, height_cm: 3 },
 ];
+// Recipe Generator lists, shaped as main.js returns them (listGeneratedRecipesWithGroups: the saved group, else a guess from
+// the category text). Days deliberately out of order and a Staff "Main Dish" with its group saved, plus one without.
+const { categoryGroupOfRecipe } = require('../../lib/recipeCategoryGroups.js');
+const withGroup = (r) => { const g = categoryGroupOfRecipe(r); return { ...r, category_group: g.key, category_group_label: g.label, category_group_order: g.order }; };
+const GEN_MENU = '13_09_2026 week_4.xlsx';
+const GEN = [
+  ['Monday 05-10-2026', 'Chicken Freekeh with Roasted Vegetables and Yogurt Sauce', 'Lunch Main', 'MAIN'],
+  ['Sunday 04-10-2026', 'Cheese Croissant', 'AM Snack', 'AM_SNACK_BREAKFAST'],
+  ['Sunday 04-10-2026', 'Turkey Club Sandwich', 'Option 1', 'LUNCH_BOX'],
+  ['Sunday 04-10-2026', 'Beef Kofta with Tahini-free Yogurt', 'Main Dish', 'MAIN'],
+  ['Sunday 04-10-2026', 'Shakshuka', 'Main Dish', 'BREAKFAST'], // a pre-merge key: must still group as AM Snack / Breakfast
+  ['Sunday 04-10-2026', 'Fattoush', 'Lunch Salad', null],
+  ['Sunday 04-10-2026', 'Vermicelli Rice', 'Lunch Starch', null],
+  ['Sunday 04-10-2026', 'Halloumi Wrap', 'Option 2', 'LUNCH_BOX'],
+  ['Sunday 04-10-2026', 'Mini Zaatar-free Herb Manakish', 'AM Snack', 'AM_SNACK_BREAKFAST'],
+  ['Sunday 04-10-2026', 'Lentil Soup', 'Soup / Appetizer', null],
+  ['Sunday 04-10-2026', 'Date Cake', 'Sweets', 'SWEETS'],
+  ['Sunday 04-10-2026', 'Oat Cookies', 'PM Snack', null],
+  ['Monday 05-10-2026', 'Spinach Fatayer', 'AM Snack', 'AM_SNACK_BREAKFAST'],
+  ['Monday 05-10-2026', 'Grilled Chicken Caesar-style Salad', 'Option 3', 'LUNCH_BOX'],
+];
+const genRow = ([day, name, category, group], i) => withGroup({ id: 500 + i, name, category, source_menu_label: GEN_MENU, source_dish_name: name,
+  source_day_label: day, source_category_group: group, created_at: '2026-09-30T10:00:00Z', code: `RG-${String(100 + i).padStart(5, '0')}`, date_created: '2026-09-30' });
+const GEN_DRAFTS = GEN.map(genRow);
+const GEN_CONFIRMED = GEN.map((r, i) => genRow(r, i + 100));
+
 const handlers = {
+  listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   getSections: () => SECTIONS, getCategories: () => CATEGORIES, getProteinTypes: () => PROTEINS,
   getCategoriesForSection: () => CATEGORIES,
   getItems: () => items(), listCreatedByLabels: () => ['AI', 'OLD'], listRecipePeople: () => [],

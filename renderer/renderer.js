@@ -6243,6 +6243,37 @@ function sortDayGroups(entries) { // entries: [[dayLabel|null, rows], ...] in fi
     .map(x => x.entry);
 }
 
+// Recipe Generator lists (Drafts and Recipe Generated), one grouping for both: day (ascending, sortDayGroups), then
+// the menu category group within the day (every AM Snack together, the Lunch Box options together...), in serving
+// order. The group comes from main.js (category_group_label / category_group_order, lib/recipeCategoryGroups.js);
+// within a group, recipes keep the list's own order. Returns table-body HTML: a day heading row (only when some row
+// has a day -- a list with none gets category headings alone), a category heading row, then rowMarkup(recipe) per row.
+function recipeDayCategoryRowsHtml(recipes, colspan, rowMarkup) {
+  const byDay = new Map();
+  for (const r of recipes) {
+    const day = r.source_day_label || null;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(r);
+  }
+  const showDays = recipes.some(r => r.source_day_label);
+  return sortDayGroups([...byDay.entries()]).map(([day, dayRows]) => {
+    const byGroup = new Map();
+    for (const r of dayRows) {
+      const key = r.category_group || 'OTHER';
+      if (!byGroup.has(key)) byGroup.set(key, { label: r.category_group_label || 'Other', order: r.category_group_order ?? 99, rows: [] });
+      byGroup.get(key).rows.push(r);
+    }
+    const groups = [...byGroup.values()].sort((a, b) => a.order - b.order);
+    return `
+      ${showDays ? `<tr class="rg-day-head"><td colspan="${colspan}">${day || 'No day recorded'}</td></tr>` : ''}
+      ${groups.map(g => `
+        <tr class="rg-group-head"><td colspan="${colspan}">${g.label} <span class="rg-group-count">(${g.rows.length})</span></td></tr>
+        ${g.rows.map(rowMarkup).join('')}
+      `).join('')}
+    `;
+  }).join('');
+}
+
 // "Prepared By" / "Checked By" suggestions. The boxes are free text; each carries list="recipe-people-list", and this fills that one
 // <datalist> (kept in <body>, so it survives screen changes) with every name already used on a recipe plus Tetiana -- see the
 // list-recipe-people handler in main.js. Called whenever one of those forms opens, so a name typed and saved on one recipe is
@@ -6383,18 +6414,9 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
     `;
   }
 
-  // Sub-grouped by day WITHIN this menu folder (requirement 4) -- a pure client-side grouping,
-  // same "no separately persisted grouping entity" convention the menu-folder grouping one level
-  // up already uses (see this function's own header comment), just one level deeper. Insertion
-  // order into the Map is first-seen-in-this-folder order, which is already chronological for a
-  // real menu (the parser encounters day-blocks in the sheet's own top-to-bottom order).
-  //
-  // Falls back to the old flat table with NO day headings at all when not a single row in this
-  // folder carries a day label -- true for every draft generated before source_day_label existed,
-  // and for the AI-assisted layout-agnostic fallback parse path, which doesn't capture a day at
-  // all today (see main.js's extractDishesWithAI) -- a lone "No day recorded" heading sitting over
-  // literally every row would be noise, not a grouping aid.
-  const hasAnyDayLabel = rows.some(d => d.source_day_label);
+  // Sub-grouped by day, then by menu category group, WITHIN this menu folder (recipeDayCategoryRowsHtml, shared with the
+  // Recipe Generated list). No day headings when no draft here has a day (drafts from before source_day_label, and the
+  // AI-read fallback path, which captures no day): a lone "No day recorded" over every row would be noise.
 
   container.innerHTML = `
     <div class="rg-draft-bar">${backBtn.replace('margin-bottom:14px;', 'margin-bottom:0;')}<select id="rg-draft-category-filter" aria-label="Filter by category" hidden></select></div>
@@ -6408,23 +6430,10 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   // The table itself is unchanged; the category filter only decides which rows go into it.
   function renderTable() {
     const shown = rows.filter(d => matchesCategoryFilter(d, filterEl.value));
-    let tableRowsHtml;
-    if (shown.length === 0) {
-      tableRowsHtml = `<tr><td colspan="5" style="color:var(--neutral);">No drafts in this category.</td></tr>`;
-    } else if (hasAnyDayLabel) {
-      const dayGroups = new Map(); // day label (or null) -> rows
-      for (const d of shown) {
-        const key = d.source_day_label || null;
-        if (!dayGroups.has(key)) dayGroups.set(key, []);
-        dayGroups.get(key).push(d);
-      }
-      tableRowsHtml = sortDayGroups([...dayGroups.entries()]).map(([day, groupRows]) => `
-      <tr><td colspan="5" style="background:var(--paper-dim); font-weight:600; padding-top:10px;">${day || 'No day recorded'}</td></tr>
-      ${groupRows.map(rowMarkup).join('')}
-    `).join('');
-    } else {
-      tableRowsHtml = shown.map(rowMarkup).join('');
-    }
+    // Day, then category group within the day (recipeDayCategoryRowsHtml; the day headings only when a row has a day).
+    const tableRowsHtml = shown.length === 0
+      ? `<tr><td colspan="5" style="color:var(--neutral);">No drafts in this category.</td></tr>`
+      : recipeDayCategoryRowsHtml(shown, 5, rowMarkup);
     const tableEl = document.getElementById('rg-draft-table');
     tableEl.innerHTML = `
     <div class="table-scroll"><table class="recipes-table rg-drafts-table">
@@ -6538,7 +6547,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
         <div class="table-scroll"><table class="recipes-table rg-generated-table">
           <thead><tr><th></th><th>Code</th><th>Name</th><th>Category</th><th>Date</th><th></th></tr></thead>
           <tbody>
-            ${group.recipes.map(r => `
+            ${recipeDayCategoryRowsHtml(group.recipes, 6, r => `
               <tr>
                 <td><input type="checkbox" class="recipe-row-check" data-select="${r.id}" data-month="${group.key}" ${selected.has(r.id) ? 'checked' : ''} /></td>
                 <td>${r.code}</td>
@@ -6551,7 +6560,7 @@ async function renderGeneratedConfirmedList(container, ns, main) {
                   <button class="icon-btn danger" data-delete="${r.id}">Delete</button>
                 </td>
               </tr>
-            `).join('')}
+            `)}
           </tbody>
         </table></div>
       </div>

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Layout tour: walks Dish Catalog, Menu Planner (Generate + every Build Menu section grid) and Recipe on Fire (Setup,
-// Shape & Place, Sheet & Trim, layers, Batch, One dough) in the real renderer, at a Mac-like size (overlay scrollbars)
+// Layout tour: walks Dish Catalog, Menu Planner (Generate + every Build Menu section grid), Recipe Generator (a draft
+// folder and Recipe Generated) and Recipe on Fire (Setup, Shape & Place, Sheet & Trim, layers, Batch, One dough) in the
+// real renderer, at a Mac-like size (overlay scrollbars)
 // and a Windows-like size (17px classic scrollbars), and fails (exit 1) when:
 //   - any screen scrolls sideways: #main, the page, or any scroll container inside it (a table's .table-scroll...);
 //   - a Recipe on Fire step needs vertical scrolling at the Mac size (CLAUDE.md: that screen never scrolls);

@@ -28,7 +28,7 @@ round trip, below under "Reading exports back in") and, for the UI, the **layout
 (`scripts/layout-tour/`, added 2026-09-30; before it, "the tour" / "regression suite" in past notes meant a harness
 rebuilt in each session's scratchpad and lost with it). It loads the real renderer with a stubbed `window.api`
 (`data.js`: sample sections, dishes, recipes, trays; no Supabase, nothing written) and walks Dish Catalog, Menu
-Planner (Generate + each Build Menu section grid) and Recipe on Fire (Setup, Shape & Place, Sheet & Trim, layers,
+Planner (Generate + each Build Menu section grid), Recipe Generator (a draft folder, Recipe Generated) and Recipe on Fire (Setup, Shape & Place, Sheet & Trim, layers,
 Batch, One dough) at 1280 x 792 with overlay scrollbars and 1264 x 761 with 17px classic ones (the Windows sizes
 are an estimate). It fails on any sideways scrolling, and on vertical scrolling in Recipe on Fire at the Mac size.
 `--css "<rule>"` injects CSS for a control run (put an old rule back: the tour must then fail). Run it after any
@@ -239,6 +239,24 @@ different dishes), and in the catalog but not on a section's menu (unticked: add
 category). `apply-catalog-import` writes only ticked keys of the stored plan: Created By via `normalizeCreatedByLabel`, portions
 for each section's age groups like Add Item, no code / calories / style. A header date may carry a note ("29-09-2026 Arminian
 Day"); the parser reads the first 10 characters.
+
+**Recipe Generator category groups** (2026-09-30, Menu Ingredients -> Recipe Generator pipeline, Phase B): drafts and
+confirmed recipes are listed day (ascending) -> menu category group -> recipe (`recipeDayCategoryRowsHtml` in renderer.js,
+one function for both lists; confirmed recipes stay under their source menu first). `lib/recipeCategoryGroups.js` (pure):
+`CATEGORY_GROUPS` in serving order (AM Snack / Breakfast -- one group: Staff Breakfast serves the school AM Snacks --,
+Soup / Appetizer, Salad, Main Course, Sides = starch + vegetable, Sweets, Lunch Box, PM Snack, Other) and
+`categoryGroupFor({ category, period })`. A dish on several rows gets ONE recipe (dedupeWithinUpload), and its group is
+chosen by priority, matching by NAME only (never the engine's sharing structure -- the chef hand-edits menus): a student
+row wins (a Staff copy of KG-LP's starch is Sides; a Staff breakfast that is Daycare's PM Snack is PM Snack), then a
+Staff "Main Dish" row (any Staff main is Main Course, even one that is also a Lunch Box option), then the first
+occurrence. All Staff rows are taken last, so the kept row of a shared dish (category text, day, spelling) is the school
+one whatever the tab order. `npm run test:roundtrip` checks 6 covers all of this, in file order and with the Staff tab first. The period matters (Staff's "Main Dish" is
+Breakfast's or Lunch's; Lunch Box rows are "Option N"), so the group is worked out at generation from the parsed row and
+saved in `generated_recipes.source_category_group` (migration 20260930100000, applied BY HAND). Older recipes are guessed
+from their category text (`categoryGroupOfRecipe`; an ambiguous "Main Dish" -> Other). Until the column exists, main.js
+saves drafts without it and lists by the guess (`categoryGroupColumnMissing`). The pipeline plan (phases A-F): A groundwork
+and B this are done; C Menu Ingredients prompt v2, D cross-section sharing, E / F Recipe Generator keeps the chef-reviewed
+ingredient list.
 
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its

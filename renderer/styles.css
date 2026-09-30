@@ -649,6 +649,13 @@ table.materials-table td.cat-cell {
 /* The last column of both Generator tables holds buttons (preview / Edit / Delete, Review / Delete). The shared one-line-with-ellipsis rule
    for short values (.recipes-table :is(...) above) also matched it and clipped "Delete" to an ellipsis, so it is switched off here. */
 .rg-generated-table :is(th, td):nth-child(6), .rg-drafts-table :is(th, td):nth-child(5) { overflow: visible; text-overflow: clip; white-space: nowrap; }
+/* Day and category-group heading rows of both Generator tables (recipeDayCategoryRowsHtml): the day is the stronger band, the
+   category group a lighter one under it. Each is one colspan cell, so the column rules around them (widths, padding) don't apply
+   beyond its first-column padding. */
+:is(.rg-drafts-table, .rg-generated-table) tr.rg-day-head td { background: var(--paper-dim); font-weight: 600; padding-top: 10px; }
+:is(.rg-drafts-table, .rg-generated-table) tr.rg-group-head td { background: #f6f7f1; color: var(--sage-dark); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 6px; padding-bottom: 6px; }
+:is(.rg-drafts-table, .rg-generated-table) tr:is(.rg-day-head, .rg-group-head):hover { background: none; }
+.rg-group-count { color: var(--neutral); font-weight: 400; text-transform: none; letter-spacing: 0; }
 .rg-generated-table { table-layout: fixed; min-width: 800px; }
 .rg-generated-table th:nth-child(1), .rg-generated-table td:nth-child(1) { width: 40px; padding-left: 12px; padding-right: 6px; }
 .rg-generated-table th:nth-child(2), .rg-generated-table td:nth-child(2) { width: 108px; white-space: nowrap; }

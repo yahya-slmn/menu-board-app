@@ -61,6 +61,10 @@ const STEPS = [
     document.getElementById('bm-start').value = '2026-10-04'; document.getElementById('bm-end').value = '2026-10-08';
     await t.click('Build Grids'); await t.until(() => document.querySelector('[data-builder-section]')); await t.sleep(600);`
     : `document.querySelector('[data-builder-section="${code}"]').click(); await t.sleep(500);`]),
+  ['Recipe Generator: draft folder', 'app', `document.querySelector('[data-view=recipeGenerator]').click(); await t.sleep(800);
+    (await t.until(() => document.querySelector('[data-rg-tab=drafts]'))).click(); await t.sleep(600);
+    (await t.until(() => document.querySelector('[data-rg-open-folder="0"]'))).click(); await t.until(() => document.querySelector('.rg-drafts-table'));`],
+  ['Recipe Generator: Recipe Generated', 'app', `document.querySelector('[data-rg-tab=generated]').click(); await t.until(() => document.querySelector('.rg-generated-table'));`],
   ['RoF Setup (empty)', 'rof', `document.querySelector('[data-view=recipeOnFire]').click(); await t.sleep(900);`],
   ['RoF Setup, one process + tray', 'rof', pickRecipe(1, 'Croissant') + pickTray(1)],
   ['RoF Shape & Place: Place', 'rof', `await t.click('Continue'); await t.sleep(1500);`],

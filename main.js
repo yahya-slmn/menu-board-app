@@ -49,6 +49,7 @@ const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
+const { categoryGroupFor, categoryGroupOfRecipe } = require('./lib/recipeCategoryGroups');
 
 let mainWindow;
 let loginWindow;
@@ -1973,6 +1974,16 @@ async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
 // afterward, either by hand or via the review form's manual "Generate Photo" button, both through
 // save-generated-recipe (see that handler's own comment on why automatic per-dish generation here
 // was tried and reverted).
+// generated_recipes.source_category_group comes from a migration applied by hand (20260930100000). Until it is,
+// PostgREST rejects the column -- on insert as PGRST204 ("Could not find the ... column"), on select as 42703
+// (undefined column) -- and the Recipe Generator carries on without it (drafts saved without a group, lists grouped
+// by category text). Remembered for the session once seen; a restart re-checks.
+let categoryGroupColumnMissing = false;
+function isMissingCategoryGroupColumn(error) {
+  const text = `${error?.code || ''} ${error?.message || ''}`;
+  return /PGRST204|42703/.test(text) && /source_category_group/.test(text);
+}
+
 async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTypeCache }) {
   // Seafood backstop is section-conditional (unlike the nut filter, which runs unconditionally
   // on every recipe) -- only ever applied when this dish's own resolved section is a student
@@ -2001,21 +2012,28 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
   const normalized = normalizeProcessesToNetWeight(processesRaw, REFERENCE_NET_WEIGHT_GRAMS);
   const producedNet = netWeightOfProcesses(normalized);
 
-  const { data: inserted, error: insErr } = await supabase
-    .from('generated_recipes')
-    .insert({
-      status: 'draft',
-      name: gen.name || dish.name,
-      category: dish.category || null,
-      quantity_produced: producedNet > 0 ? `${producedNet} G` : null,
-      date_created: new Date().toISOString().slice(0, 10),
-      source_menu_label: sourceMenuLabel,
-      source_dish_name: dish.name,
-      source_day_label: dish.dayLabel || null,
-      created_at: new Date().toISOString(),
-    })
-    .select('id')
-    .single();
+  const draftRow = {
+    status: 'draft',
+    name: gen.name || dish.name,
+    category: dish.category || null,
+    quantity_produced: producedNet > 0 ? `${producedNet} G` : null,
+    date_created: new Date().toISOString().slice(0, 10),
+    source_menu_label: sourceMenuLabel,
+    source_dish_name: dish.name,
+    source_day_label: dish.dayLabel || null,
+    created_at: new Date().toISOString(),
+  };
+  const insertDraft = (row) => supabase.from('generated_recipes').insert(row).select('id').single();
+  let { data: inserted, error: insErr } = await insertDraft(
+    categoryGroupColumnMissing ? draftRow : { ...draftRow, source_category_group: dish.categoryGroup || null },
+  );
+  // generated_recipes.source_category_group (20260930100000, applied by hand) not there yet: save without it -- the
+  // lists then group this recipe by its category text instead.
+  if (insErr && !categoryGroupColumnMissing && isMissingCategoryGroupColumn(insErr)) {
+    categoryGroupColumnMissing = true;
+    log.warn('[recipe-generator] generated_recipes.source_category_group is missing (migration 20260930100000 not applied) -- saving drafts without it');
+    ({ data: inserted, error: insErr } = await insertDraft(draftRow));
+  }
   if (insErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipes', insErr);
   const recipeId = inserted.id;
 
@@ -2199,7 +2217,8 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
   // the chef) are filtered out, THEN deduped by dish name -- see lib/recipeGenerator.js's
   // dedupeWithinUpload for the full within-upload dedup reasoning (exact-normalized AND
   // near-duplicate matching, first-occurrence-wins for category/day label, restrictive-wins for
-  // section). `section` is resolved from the sheet/tab name (see resolveSectionFromSheetName) --
+  // section, and the category group by priority: student row > Staff "Main Dish" > first occurrence; Staff rows last).
+  // `section` is resolved from the sheet/tab name (see resolveSectionFromSheetName) --
   // exact for this app's own exports, keyword-matched for a real uploaded file, null when it
   // can't be confidently told; null is later treated as the SAFE (not-Staff) default for the
   // seafood restriction below, never guessed permissive.
@@ -2208,6 +2227,9 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
       ...r,
       dayLabel: formatDayLabel(r.date, r.weekday),
       section: resolveSectionFromSheetName(r.sheetName),
+      // Worked out here, from the row's own label AND meal period (Staff's "Main Dish" is Breakfast's or Lunch's), and
+      // saved with the draft -- the period isn't stored anywhere else.
+      categoryGroup: categoryGroupFor({ category: r.category, period: r.period }),
     })),
   );
 
@@ -2448,15 +2470,27 @@ ipcMain.handle('preview-generated-recipe', async (e, id) => {
   return buildRecipeContentModel(recipe, processes);
 });
 
-ipcMain.handle('list-generated-recipe-drafts', async () => {
-  const { data, error } = await supabase
-    .from('generated_recipes')
-    .select('id, name, category, source_menu_label, source_dish_name, source_day_label, created_at')
-    .eq('status', 'draft')
-    .order('created_at', { ascending: false });
-  if (error) throw supaFail('list-generated-recipe-drafts', error);
-  return data;
-});
+// Both Recipe Generator lists: `columns` plus source_category_group (left out while that hand-applied column is
+// missing), each row given its category group -- `category_group` / `category_group_label` / `category_group_order`
+// (lib/recipeCategoryGroups.js: the saved group, else the best guess from the category text) -- so the renderer
+// groups drafts and confirmed recipes the same way within a day.
+async function listGeneratedRecipesWithGroups(context, status, columns, orderBy) {
+  const run = (cols) => supabase.from('generated_recipes').select(cols).eq('status', status).order(orderBy, { ascending: false });
+  let { data, error } = await run(categoryGroupColumnMissing ? columns : `${columns}, source_category_group`);
+  if (error && !categoryGroupColumnMissing && isMissingCategoryGroupColumn(error)) {
+    categoryGroupColumnMissing = true;
+    ({ data, error } = await run(columns));
+  }
+  if (error) throw supaFail(context, error);
+  return data.map((r) => {
+    const g = categoryGroupOfRecipe(r);
+    return { ...r, category_group: g.key, category_group_label: g.label, category_group_order: g.order };
+  });
+}
+
+ipcMain.handle('list-generated-recipe-drafts', async () => listGeneratedRecipesWithGroups(
+  'list-generated-recipe-drafts', 'draft', 'id, name, category, source_menu_label, source_dish_name, source_day_label, created_at', 'created_at',
+));
 
 // RECIPE_NS.generated.api.list/search -- confirmed only, always. Drafts aren't scaling/export
 // ready (see Recipe Calculator's third-source integration), so they're deliberately invisible
@@ -2467,15 +2501,10 @@ ipcMain.handle('list-generated-recipe-drafts', async () => {
 // selected here so the renderer can group this list by source menu (renderGeneratedConfirmedList/
 // groupRecipesBySourceMenu) instead of the calendar-month grouping Recipe Book/Extractor's own
 // list uses; no schema change needed, this column already existed on every row.
-ipcMain.handle('list-generated-recipes', async () => {
-  const { data, error } = await supabase
-    .from('generated_recipes')
-    .select('id, code, name, category, prepared_by, date_created, quantity_produced, source_menu_label')
-    .eq('status', 'confirmed')
-    .order('id', { ascending: false });
-  if (error) throw supaFail('list-generated-recipes', error);
-  return data;
-});
+// source_day_label too (2026-09-30): the confirmed list is grouped menu -> day -> category group, like the drafts.
+ipcMain.handle('list-generated-recipes', async () => listGeneratedRecipesWithGroups(
+  'list-generated-recipes', 'confirmed', 'id, code, name, category, prepared_by, date_created, quantity_produced, source_menu_label, source_day_label', 'id',
+));
 
 ipcMain.handle('search-generated-recipes', async (e, query) => {
   const q = (query || '').trim();
