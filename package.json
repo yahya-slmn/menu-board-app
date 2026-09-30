@@ -10,7 +10,8 @@
     "build:win": "electron-builder --win",
     "build": "electron-builder --mac --win",
     "publish": "electron-builder --mac --publish always",
-    "tour": "node scripts/layout-tour/run.js"
+    "tour": "node scripts/layout-tour/run.js",
+    "test:roundtrip": "node scripts/menu-ingredients-roundtrip.js"
   },
   "build": {
     "appId": "com.menuboard.app",

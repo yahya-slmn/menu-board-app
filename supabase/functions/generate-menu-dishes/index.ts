@@ -91,7 +91,7 @@ const HALAL_RULE = `HALAL ONLY -- every dish, every audience: no pork or pork pr
 
 NEVER SERVED, whatever meat they are made from: pepperoni, sausages of any kind (including chicken or beef sausage and cocktail sausages), hot dogs, frankfurters, wieners, salami and chorizo. Do not offer them even as "beef" or "halal" versions. Any other processed meat must say what it is made from ("turkey ham", "beef bacon"), and gelatin must be "halal gelatin" (or use agar). Use vinegar such as apple cider vinegar, never wine vinegar. As with nuts, never mention pork or alcohol at all, not even to say it is absent -- never write "alcohol-free", "non-alcoholic" or "pork-free".`;
 
-// Mirrors SPICY_TERMS in lib/aiMenuSafety.js.
+// Mirrors SPICY_TERMS in lib/spicyFilter.js (the one heat-word list; lib/aiMenuSafety.js uses it).
 const MILD_RULE = `MILD FOOD ONLY -- no spicy or hot dishes for anyone, adults included. Never use chili in any form (fresh, flakes, powder, sweet chili sauce), jalapeno, habanero, cayenne, chipotle, sriracha, harissa, gochujang, sambal, shatta, zhug, peri-peri, buffalo sauce, cajun or jerk seasoning, crushed red pepper, hot sauce, hot paprika, vindaloo or madras curry. Never describe a dish as "spicy", "spiced", "spice-rubbed", "fiery" or "hot" (in the heat sense) -- in the name, the description or the ingredients. Warm, aromatic, non-hot seasonings are welcome and may be named: cumin, coriander, sweet or smoked paprika, cinnamon, cardamom, baharat, seven spices, shawarma spice blend, black pepper, "spices". Write "seasoned", "aromatic" or "herbed" instead of "spiced".`;
 
 function seafoodRule(allowed: boolean): string {

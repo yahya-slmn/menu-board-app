@@ -20,9 +20,11 @@ npm install       # no native modules to rebuild anymore (better-sqlite3 is gone
 npm start          # launch the app (electron .)
 npm run build:mac  # package a signed-for-local-use .app into dist/
 npm run tour       # layout tour: every screen below fits, Mac-like and Windows-like (no login)
+npm run test:roundtrip  # menu export -> Menu Ingredients export -> read back (no login)
 ```
 
-There is no lint, unit-test or typecheck script. The one committed check of the UI is the **layout tour**
+There is no lint or typecheck script and no test runner. Two committed checks: `npm run test:roundtrip` (the menu file
+round trip, below under "Reading exports back in") and, for the UI, the **layout tour**
 (`scripts/layout-tour/`, added 2026-09-30; before it, "the tour" / "regression suite" in past notes meant a harness
 rebuilt in each session's scratchpad and lost with it). It loads the real renderer with a stubbed `window.api`
 (`data.js`: sample sections, dishes, recipes, trays; no Supabase, nothing written) and walks Dish Catalog, Menu
@@ -161,6 +163,9 @@ terminal instead of `[object Object]`.
   Generator's upload): a day block is found by date + weekday; layout comes from the old RC / Quantity / Weight-Unit markers
   when present (files already sent out), else CEO by its person-name header cells (`lib/menuLayout.js` `CEO_PERSONS`, shared
   with the exporter) or by two twin dish columns, and School vs Staff by vocabulary (warns only when the fit is unclear).
+  A Menu Ingredients export's "Ingredients" / "Allergens" header cells are markers too (2026-09-30): those columns are never
+  read as the dish column, and their rows carry `ingredientsText` / `allergensText` (absent on files without them).
+  `npm run test:roundtrip` (`scripts/menu-ingredients-roundtrip.js`) checks export -> Menu Ingredients export -> read back.
 - `options` can include `distinctProtein` (no two picks share a protein
   type), `distinctAttr` (no two picks share a `sauce_type`/`carb_type`/
   `dish_concept` value), and `composition` (ordered sub-rules like "exactly 1
@@ -634,7 +639,7 @@ the chef reviews a DRAFT before anything reaches `menu_items` / `generated_menus
 - `lib/aiMenuSafety.js` is MANDATORY on every AI or chef-written dish (generate, edit, replace, approve): nut/sesame
   (`nutFilter`; za'atar allowed in a dish NAME only), seafood for student sections, halal (`halalFilter.js`), and known-risk dishes
   (hummus, pesto...) must list their substitute. Also feature-only (not in `halalFilter.js`): pepperoni / sausage / hot dog /
-  frankfurter / wiener / salami / chorizo banned whatever meat is named, no spicy framing (`SPICY_TERMS`; aromatic words like
+  frankfurter / wiener / salami / chorizo banned whatever meat is named, no spicy framing (`SPICY_TERMS`, which lives in `lib/spicyFilter.js`, the one heat-word list for every feature; aromatic words like
   cumin, paprika, baharat stay allowed), and per-category rules (Daycare Lunch Salad = cooked veg sticks, no puree / raw
   carrot or celery; PM Snack never manakish; Daycare PM Snack soft only). A hit is a hard block, reported, never cleaned up or
   overridden.
