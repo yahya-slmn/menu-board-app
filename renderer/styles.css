@@ -1229,7 +1229,16 @@ button:disabled { box-shadow: none; }
    Two classes, so these win over the base .items-table widths (shared with Ingredients / Waste Types,
    whose columns mean something else). Name takes what is left. Style fits "Cold Kitchen", Protein
    "Vegetarian", Code "RC01-02777", actions Edit + Delete; "Not served: ..." wraps inside Menu use. */
-table.items-table.dish-catalog-table { min-width: 960px; } /* fits the default 1280 x 800 window without scrolling */
+/* The table fills whatever room is left (width: 100%; Name takes the rest), so it fits with or without a
+   classic scrollbar (Windows, or macOS "Show scroll bars: Always"). The minimum is only where it starts to
+   scroll: the eight set columns (790px) + a 120px Name. It was 960px, which fitted the 1280px Mac window
+   with 3px to spare and overflowed by ~29px on Windows (window frame + 17px scrollbar). */
+table.items-table.dish-catalog-table { min-width: 910px; }
+/* Keeps a classic scrollbar's width reserved when a filter makes the list short, so the table doesn't jump
+   17px as the list grows past one screen. Overlay scrollbars reserve nothing. Dish Catalog only: on .main
+   everywhere it would also take the width from Build Menu (.main.build-mode is overflow: hidden, which
+   `stable` still reserves for) and Recipe on Fire. */
+.main:has(.dish-catalog-table) { scrollbar-gutter: stable; }
 table.items-table.dish-catalog-table th:nth-child(1), table.items-table.dish-catalog-table td:nth-child(1) { width: 96px; }
 table.items-table.dish-catalog-table th:nth-child(3), table.items-table.dish-catalog-table td:nth-child(3) { width: 92px; }
 table.items-table.dish-catalog-table th:nth-child(4), table.items-table.dish-catalog-table td:nth-child(4) { width: 104px; }
