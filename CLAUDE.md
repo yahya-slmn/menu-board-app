@@ -583,6 +583,10 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   sentence that mentions the oven, so a rest or proof time is never read as a bake time; hours become minutes; a
   temperature with no unit is guessed C below 260 and flagged), then the chef confirms ("Looks right") or types over it.
   Values that were read from the method and never confirmed are printed on the PDF with a note saying so.
+  **Known issue (logged 2026-09-30, not fixed):** the "sentence that mentions the oven" rule breaks when a proof / rest
+  time and the bake time share ONE sentence: "Mix, proof 1 hour, bake at 180C for 18 minutes in the oven." pre-fills
+  60 min (the proof), while "Mix. Proof 1 hour. Bake at 180C for 18 minutes in the oven." correctly gives 18. The
+  chef still confirms or types over it, and an unconfirmed value is marked on the PDF.
 - Export PDF (Bake step in Shape & Place, Trim step in Sheet & Trim): `buildPdfData` in renderer.js gathers what is on
   screen (dough and every waste with its own base, tray, shape or cutters, one portion + the `capturePortion` picture,
   waste, oven) and `window.api.exportRecipePdf` -> `export-recipe-pdf` in main.js -> `lib/recipePdf.js`. It builds an HTML page
