@@ -29,7 +29,7 @@ const { estimateDensityCached } = require('./lib/densityCache');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
 const { matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
 const { dishesForSuggestion, toPayloadItem, cleanSuggestion, rowSeafoodAllowed } = require('./lib/menuIngredientsRequest');
-const { planShares, shareName, rowKey: shareRowKey } = require('./lib/menuIngredientsShare');
+const { planShares, shareName, rowKey: shareRowKey, sameAsLabels } = require('./lib/menuIngredientsShare');
 const { matchSeafoodTerms } = require('./lib/seafoodFilter');
 const {
   loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients,
@@ -1642,8 +1642,11 @@ ipcMain.handle('export-menu-ingredients', async (e, { files, uploadToken }) => {
     return { success: false, error: "This file's data is no longer current (a newer upload replaced it) -- please upload it again before exporting." };
   }
 
+  // The "Same as" column: who each still-following row follows (lib/menuIngredientsShare.js sameAsLabels).
+  const sameAs = sameAsLabels(files.map((f) => ({ ...f, fileName: menuIngredientsFiles.get(f.fileIndex)?.fileName })));
   const outputs = [];
-  for (const { fileIndex, rows } of files) {
+  for (const { fileIndex, rows: sentRows } of files) {
+    const rows = sentRows.map((r) => ({ ...r, sameAs: sameAs.get(shareRowKey({ ...r, fileIndex })) || '' }));
     const entry = menuIngredientsFiles.get(fileIndex);
     if (!entry) {
       miLog(`export bailing out -- no in-memory workbook for fileIndex ${fileIndex}`);

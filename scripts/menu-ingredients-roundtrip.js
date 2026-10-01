@@ -14,6 +14,9 @@
 //      Ingredients and one Allergens column, with the new values.
 //   4. An Ingredients column moved LEFT of the dish column is still never read as the dish column (before the
 //      parser named these columns, a left-most tie-break picked it).
+//   4c. The export's "Same as" column (who a shared row follows) sits next to full Ingredients text: rows read back
+//       unchanged, it is never the dish column, one column after re-exporting, and the Recipe Generator's dishes match.
+//   4d. A "Same as" column moved left of the dish column is never read as the dish.
 //   4b. A day whose header lost its "Ingredients" label (older exports) still reads its list from the sheet's column.
 //   5. Every category the Recipe Generator makes recipes for lands in its category group (lib/recipeCategoryGroups.js)
 //      from the label and meal period as they read back from the export -- Staff's "Main Dish" by its period. The
@@ -34,7 +37,7 @@ const { SECTION_SLOTS } = require('../lib/generator');
 const { exportCombinedWorkbook, SECTION_DISPLAY_NAMES } = require('../lib/export');
 const { loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients } = require('../lib/menuIngredients');
 const { categoryGroupFor } = require('../lib/recipeCategoryGroups');
-const { dedupeWithinUpload, resolveSectionFromSheetName } = require('../lib/recipeGenerator');
+const { dedupeWithinUpload, resolveSectionFromSheetName, reviewedIngredientsOf } = require('../lib/recipeGenerator');
 
 const failures = [];
 const check = (ok, what) => { if (!ok) failures.push(what); };
@@ -189,6 +192,41 @@ async function reload(workbook) {
     const moved = await parseWorkbookDishes(await reload(wb), schoolCategoryNames);
     check(moved.rows.map((r) => r.dishName).join(',') === 'Chicken Freekeh,Vermicelli Rice', `Ingredients moved left: read dishes "${moved.rows.map((r) => r.dishName).join(', ')}"`);
     check(moved.rows[0] && moved.rows[0].ingredientsText === 'chicken thighs - freekeh - onion - olive oil', 'Ingredients moved left: ingredients not read from their own column');
+
+    // ---- 4c. the "Same as" column (who a shared row follows) next to full Ingredients text --------------------
+    {
+      const { workbook: wb4 } = await loadWorkbookFromBuffer(fs.readFileSync(file));
+      const base = await parseWorkbookDishes(wb4, schoolCategoryNames);
+      const withSame = base.rows.map((r, i) => ({ ...r, ingredients: ingredientsFor(r), allergens: allergensFor(r), sameAs: i % 4 === 1 ? `Daycare's ${r.dishName}` : '' }));
+      await restructureAndAppendIngredients(wb4, withSame, base.dishColumnBySheet);
+      let reread = await reload(wb4);
+      const hdr = (sheet) => { const vals = []; sheet.getRow(1).eachCell((c) => vals.push(String(c.value))); return vals; };
+      const daycare = reread.getWorksheet(SECTION_DISPLAY_NAMES.DAYCARE);
+      check(JSON.stringify(hdr(daycare).slice(-3)) === JSON.stringify(['Ingredients', 'Allergens', 'Same as']), `"Same as" header: ${JSON.stringify(hdr(daycare).slice(-3))}`);
+      const p4 = await parseWorkbookDishes(reread, schoolCategoryNames);
+      check(p4.rows.length === base.rows.length && p4.rows.every((r, i) => r.dishName === base.rows[i].dishName && r.ingredientsText === ingredientsFor(base.rows[i])),
+        '"Same as" column: every row reads back with its dish and its FULL ingredient text');
+      // Exported again: still one "Same as" column.
+      await restructureAndAppendIngredients(reread, p4.rows.map((r) => ({ ...r, ingredients: r.ingredientsText, allergens: r.allergensText, sameAs: '' })), p4.dishColumnBySheet);
+      reread = await reload(reread);
+      check(hdr(reread.getWorksheet(SECTION_DISPLAY_NAMES.DAYCARE)).filter((v) => v === 'Same as').length === 1, '"Same as" column: one after exporting twice');
+      // The Recipe Generator sees the same dishes with or without the column.
+      const toMeta = (rows) => rows.map((r) => ({ ...r, section: resolveSectionFromSheetName(r.sheetName), dayLabel: r.date, categoryGroup: categoryGroupFor({ category: r.category, period: r.period }), reviewedIngredients: reviewedIngredientsOf(r.ingredientsText) }));
+      const plainBack = (await parseWorkbookDishes(await reload((await loadWorkbookFromBuffer(fs.readFileSync(file))).workbook), schoolCategoryNames)).rows;
+      const noCol = await (async () => { const { workbook: w } = await loadWorkbookFromBuffer(fs.readFileSync(file)); await restructureAndAppendIngredients(w, plainBack.map((r) => ({ ...r, ingredients: ingredientsFor(r), allergens: allergensFor(r) })), base.dishColumnBySheet); return (await parseWorkbookDishes(await reload(w), schoolCategoryNames)).rows; })();
+      check(dedupeWithinUpload(toMeta(p4.rows)).length === dedupeWithinUpload(toMeta(noCol)).length, '"Same as" column: the Recipe Generator finds the same dishes with or without it');
+    }
+
+    // ---- 4d. a "Same as" column moved LEFT of the dish column is never read as the dish
+    {
+      const w = new ExcelJS.Workbook();
+      const ws2 = w.addWorksheet('MS - UP (B-G)');
+      ws2.addRow(['Sunday', '04-10-2026', 'Same as', '', 'Ingredients', 'Allergens']);
+      ws2.addRow(['Lunch', 'Lunch Main Course', "KG - LP's Chicken Freekeh", 'Chicken Freekeh', 'chicken thighs - freekeh', 'gluten']);
+      ws2.addRow(['Lunch', 'Lunch Starch/Side', "KG - LP's Vermicelli Rice", 'Vermicelli Rice', 'white rice - vermicelli', 'gluten']);
+      const pm = await parseWorkbookDishes(await reload(w), schoolCategoryNames);
+      check(pm.rows.map((r) => r.dishName).join(',') === 'Chicken Freekeh,Vermicelli Rice', `"Same as" moved left: read dishes "${pm.rows.map((r) => r.dishName).join(', ')}"`);
+    }
 
     // ---- 4b. a day whose header lost its Ingredients label (files exported before the parser read "date + note")
     const legacy = new ExcelJS.Workbook();

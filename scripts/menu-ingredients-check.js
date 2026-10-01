@@ -17,7 +17,7 @@
 const { matchSpicyTerms } = require('../lib/spicyFilter');
 const { filterMenuIngredients } = require('../lib/menuIngredientFilters');
 const { dishesForSuggestion, toPayloadItem, basisText, cleanSuggestion, rowSeafoodAllowed } = require('../lib/menuIngredientsRequest');
-const { planShares, rowKey } = require('../lib/menuIngredientsShare');
+const { planShares, rowKey, sameAsLabels } = require('../lib/menuIngredientsShare');
 
 const failures = [];
 let count = 0;
@@ -130,6 +130,22 @@ expect(src(sameSheet), null, 'the same sheet the same day: no following');
 expect(src(otherFile), rowKey(dc), 'a row of another file of the upload follows (same day)');
 expect(src(edgeKg), null, 'a student row never follows a Staff / CEO row');
 expect(links.has(rowKey(dc)) || links.has(rowKey(edgeStaff)), false, 'a source never follows');
+
+// ---- E. the export's "Same as" column (who a still-following row follows) ------------------------------------------
+const lab = sameAsLabels([
+  { fileIndex: 0, fileName: 'Week A.xlsx', rows: [
+    { sheetName: 'Daycare', rowNumber: 2, dishName: 'Cheese Croissant', followsRef: null },
+    { sheetName: 'KG - LP', rowNumber: 2, dishName: 'Cheese Croissant', followsRef: { fileIndex: 0, sheetName: 'Daycare', rowNumber: 2 } },
+    { sheetName: 'Staff', rowNumber: 3, dishName: 'Cheese Croissant', followsRef: { fileIndex: 0, sheetName: 'Daycare', rowNumber: 2 }, unlinked: true },
+  ] },
+  { fileIndex: 1, fileName: 'Week A copy.xlsx', rows: [
+    { sheetName: 'MS - UP (B-G)', rowNumber: 2, dishName: 'Cheese Croissant', followsRef: { fileIndex: 0, sheetName: 'Daycare', rowNumber: 2 } },
+  ] },
+]);
+expect(lab.get('0|KG - LP|2'), "Daycare's Cheese Croissant", 'a following row names its source');
+expect(lab.has('0|Staff|3'), false, 'a row edited for its own section gets no "Same as"');
+expect(lab.has('0|Daycare|2'), false, 'a source gets no "Same as"');
+expect(lab.get('1|MS - UP (B-G)|2'), "Daycare's Cheese Croissant (Week A.xlsx)", 'a source in another file is named with its file');
 
 if (failures.length) {
   console.log(`FAILED (${failures.length} of ${count}):\n  ${failures.join('\n  ')}`);
