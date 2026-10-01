@@ -395,6 +395,10 @@ table.items-table td.cat-cell {
   font-family: inherit; font-size: 14px; background: var(--surface); color: var(--ink); min-width: 0;
 }
 .field textarea { width: 100%; resize: vertical; }
+.field-note { font-weight: 400; font-size: 11.5px; color: var(--neutral); margin-top: 4px; }
+label .field-note { margin-left: 6px; }
+/* Dish Catalog: a dish with an approved ingredient list (menu_items.ingredients_text). Small, so the table still fits. */
+.ing-mark { display: inline-block; margin-left: 4px; padding: 0 4px; border: 1px solid var(--sage); border-radius: 4px; font-size: 9.5px; font-weight: 700; letter-spacing: .04em; color: var(--sage-dark); vertical-align: 1px; cursor: help; }
 .field input[readonly] { background: var(--paper-dim); color: var(--sage-dark); font-weight: 600; }
 
 /* ---------------- Recipe Extractor: saved-recipe photo gallery ---------------- */
@@ -1506,6 +1510,22 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .ci-result ul { line-height: 1.8; font-size: 13.5px; }
 .ci-failed { color: var(--danger); }
 .ci-result-actions { display: flex; gap: 10px; margin-top: 8px; }
+/* Menu Ingredients -> Save approved lists to the Dish Catalog (renderCatalogIngredientsSaveView) */
+.cs-table td { vertical-align: top; }
+.cs-table td:nth-child(2) { width: 260px; }
+.cs-table .chip { margin: 4px 4px 0 0; }
+.cs-list { font-size: 12.5px; line-height: 1.5; }
+.cs-allergens { font-size: 11.5px; color: var(--neutral); margin-top: 2px; }
+.cs-saved { font-size: 12px; color: var(--neutral); text-decoration: line-through; text-decoration-color: #9aa79f; margin-bottom: 6px; }
+.cs-saved .cs-tag { text-decoration: none; display: inline-block; }
+.cs-tag { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--sage-dark); margin-right: 4px; }
+.cs-versions { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.cs-version { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.cs-version.cs-chosen { border-color: var(--sage); background: var(--sage-fill); }
+.cs-version input { margin-top: 3px; }
+.cs-reason { display: block; font-size: 12px; font-weight: 600; color: var(--sage-dark); margin-bottom: 2px; }
+.cs-not ul { margin: 0; padding-left: 18px; line-height: 1.7; font-size: 13px; }
+.cs-names { display: block; font-size: 12px; color: var(--neutral); }
 
 /* ---------------- Menu Planner: Created By mix (renderMixPanel / mixReportHtml) ---------------- */
 .mix-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; }

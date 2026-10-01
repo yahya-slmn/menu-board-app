@@ -16,7 +16,10 @@ function items(section) {
     out.push({ id: id++, name: LONG[(i + id) % LONG.length] + (i > 5 ? ' ' + i : ''), category_name: c, category_code: c.toUpperCase().replace(/ /g,'_'),
       calories_per_100g: i % 3 ? 180 + i : null, calories_unverified: i % 4 === 1, am_snack_style: i % 2 ? 'COLD_KITCHEN' : 'PASTRY',
       protein_code: p.code, protein_name: p.name, is_daily_repeating: i === 0, snack_rule_blocked: i === 3 && c.includes('Snack'),
-      created_by_label: i % 2 ? 'OLD' : 'AI', rc_code: i === 2 ? null : `RC0${i}-0${2770 + i}`, is_active: true });
+      created_by_label: i % 2 ? 'OLD' : 'AI', rc_code: i === 2 ? null : `RC0${i}-0${2770 + i}`, is_active: true,
+      // Dish Catalog ingredients (M2): every other dish has an approved list -> the "ING" mark beside its name.
+      ...(i % 2 ? {} : { ingredients_text: 'chicken thighs - basmati rice - onion - garlic - tomato paste - seven spices - olive oil - salt', allergens_text: 'none',
+        ingredients_updated_at: '2026-10-02T08:00:00.000+00:00', ingredients_updated_by: 'tetiana' }) });
   }
   return out;
 }
@@ -75,6 +78,22 @@ const genRow = ([day, name, category, group], i) => withGroup({ id: 500 + i, nam
 const GEN_DRAFTS = GEN.map(genRow);
 const GEN_CONFIRMED = GEN.map((r, i) => genRow(r, i + 100));
 
+const LIST = 'chicken thighs - basmati rice - onion - garlic - tomato paste - tomatoes - carrot - dried black lime - kabsa spice - cinnamon stick - cardamom pods - bay leaves - vegetable oil - chicken stock - salt - black pepper - raisins';
+const csEntry = (id, name, cat, sections, versions, saved = null) => ({ key: `item:${id}`, itemId: id, name, categoryCode: cat, categoryName: pretty(cat), sections, inactive: false,
+  saved, expectedUpdatedAt: saved ? saved.updatedAt : null, versions, preselected: 0, disagree: versions.length > 1, status: saved ? 'changed' : 'new', versionStatus: versions.map(() => (saved ? 'changed' : 'new')) });
+const csV = (ingredients, rows, sectionsText, extra = '') => ({ ingredients, allergens: 'gluten - dairy', rows, sections: [], days: [], files: [], sameAsSaved: false, reason: `${rows} row${rows === 1 ? '' : 's'}: ${sectionsText}${extra}` });
+const CS_PLAN = { token: 'cs1', warnings: [], hasLists: true, rowsRead: 385, unchangedCount: 12,
+  disagree: [
+    csEntry(1, 'Oven-baked turkey ham and cheese croissant', 'AM_SNACK', ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF'], [csV('flour - butter - turkey ham - cheese - milk - eggs - sugar - yeast - salt', 6, 'Daycare, KG-LP, MS-UP', ' (most rows)'), csV('flour - butter - turkey ham - cheese - milk - eggs - sugar - yeast - salt - sesame seeds', 2, 'Staff')]),
+    csEntry(2, 'Tuna pasta bake with sweet corn', 'LUNCH_MAIN', ['KG_LP', 'STAFF'], [csV('penne - tomato - sweet corn - mozzarella', 1, 'KG-LP', ' (first in the file -- same number of rows)'), csV('penne - tuna - tomato - sweet corn - mozzarella', 1, 'Staff')]),
+  ],
+  new: Array.from({ length: 14 }, (_, i) => csEntry(10 + i, LONG[i % LONG.length], 'LUNCH_MAIN', ['KG_LP', 'MS_UP'], [csV(LIST, 3, 'KG-LP, MS-UP')])),
+  changed: Array.from({ length: 4 }, (_, i) => csEntry(40 + i, LONG[(i + 3) % LONG.length], 'SOUP_APPETIZER', ['DAYCARE'], [csV(LIST, 2, 'Daycare')],
+    { ingredients: 'red lentils - onion - cumin - lemon juice - olive oil - salt', allergens: '', updatedAt: '2026-10-01T08:00:00.000+00:00', updatedBy: 'tetiana' })),
+  notSaved: { notInCatalog: [{ name: 'Molokhiyya soup', sections: 'KG-LP' }, { name: 'Mozzarella sticks', sections: 'KG-LP' }, { name: 'Corn in the Cup', sections: 'Daycare' }],
+    duplicates: [{ name: 'Pumpkin Soup', candidates: [{ id: 695, name: 'Pumpkin Soup' }, { id: 1552, name: 'Pumpkin Soup' }] }], blankDishes: ['Steamed Rice'], blankRows: 3, unclear: 10, servedAsIs: 40 },
+};
+
 const handlers = {
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   // "Re-group from the original menu...": a canned preview (main.js builds it from the picked file) and its apply.
@@ -93,5 +112,10 @@ const handlers = {
   searchRecipes: (q) => Object.values(RECIPES).filter(r => r.name.toLowerCase().includes(String(q).toLowerCase())).map(({ processes, ...r }) => r),
   getRecipe: (id) => RECIPES[id], listMaterials: () => MATERIALS, getMaterial: (id) => MATERIALS.find(m => m.id == id),
   listWasteTypes: () => WASTES, listDoughShapePresets: () => ({ available: false }),
+  // Menu Ingredients -> Save approved lists to the Dish Catalog: a canned preview with every group, long lists included.
+  catalogIngredientsAvailable: () => true,
+  previewCatalogIngredientsSave: () => CS_PLAN,
+  applyCatalogIngredientsSave: () => ({ saved: Array.from({ length: 41 }, (_, i) => ({ itemId: i, name: 'x' })), failed: [{ itemId: 9, name: 'Lentil Soup', error: 'network error' }],
+    conflicts: [{ itemId: 7, name: 'Slow-roasted herb chicken with saffron rice and toasted vermicelli', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], historyError: null }),
 };
 module.exports = { handlers };

@@ -53,6 +53,13 @@ const SECTION_TABS = [['Daycare', 'DAYCARE'], ['KG-LP', 'KG_LP'], ['MS-UP', 'MS_
 const STEPS = [
   ['Dish Catalog (60 rows)', 'app', `await t.until(() => document.querySelector('.dish-catalog-table'));`],
   ['Dish Catalog (search -> 2 rows)', 'app', `const s = document.getElementById('item-search'); s.value = 'Lentil'; s.dispatchEvent(new Event('input')); await t.sleep(500);`],
+  ['Edit Item (with ingredients)', 'app', `document.getElementById('item-search').value = ''; document.getElementById('item-search').dispatchEvent(new Event('input')); await t.sleep(300);
+    document.querySelector('[data-edit]').click(); await t.until(() => document.getElementById('m-ingredients'));`],
+  ['Menu Ingredients: save lists (preview)', 'app', `document.getElementById('m-cancel').click(); await t.sleep(300);
+    document.querySelector('[data-view=menuIngredients]').click(); await t.sleep(600); await t.click('Save approved lists');
+    state.catalogIngredientsSave.files = [{ name: 'September week_04_Ingredients.xlsx', base64: '' }]; renderCatalogIngredientsSaveView(document.getElementById('main'));
+    await t.click('Read files'); await t.until(() => document.getElementById('cs-apply'));`],
+  ['Menu Ingredients: save lists (result)', 'app', `document.getElementById('cs-apply').click(); await t.until(() => document.getElementById('cs-done'));`],
   ['Generate / One Section', 'app', `localStorage.setItem('menuPlannerMode', JSON.stringify({ mode: 'generate', scope: 'one' })); document.querySelector('[data-view=menuPlanner]').click(); await t.sleep(800);`],
   ['Generate / All Sections', 'app', `await t.click('All Sections');`],
   ['Build Menu (before grids)', 'app', `await t.click('Build');`],

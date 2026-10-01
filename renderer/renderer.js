@@ -36,6 +36,9 @@ const state = {
   // while open. files: [{ name, base64 }] kept so a section pick can re-read them; sel: key -> the
   // chef's tick / name / category / protein per row; overrides: 'file::sheet' -> section code.
   catalogImport: { open: false, files: [], plan: null, sel: {}, overrides: {}, createdBy: 'Tetiana', result: null, busy: false },
+  // Menu Ingredients -> "Save approved lists to the Dish Catalog" (renderCatalogIngredientsSaveView): shown in place of the
+  // Menu Ingredients screen while open. sel: entry key -> { include, version } (the list chosen for that dish).
+  catalogIngredientsSave: { open: false, files: [], plan: null, sel: {}, result: null, busy: false },
   // Recipe Book and Recipe Extractor now share this exact shape (both are process-shaped since
   // the Recipe Book multi-process migration -- see conversation notes) -- processes instead of a
   // flat ingredientRows/prep pair, since a recipe can describe several named sub-recipes (e.g.
@@ -1058,7 +1061,7 @@ async function renderItemsView(main) {
         bodyRows.push(`
           <tr>
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${catName}</td>` : ''}
-            <td>${it.name}</td>
+            <td>${it.name}${it.ingredients_text ? ` <span class="ing-mark" title="${aiEsc(`Approved ingredients: ${it.ingredients_text}`)}" aria-label="Has an approved ingredient list">ING</span>` : ''}</td>
             <td>
               ${it.calories_per_100g != null ? it.calories_per_100g : '—'}
               ${it.calories_unverified ? `<span class="chip unverified" title="AI estimate -- flagged as implausible for this item's category/protein, no real recipe was available to ground it. Worth a manual check, or add a real recipe so re-estimating can use its actual ingredients.">unverified</span>` : ''}
@@ -1469,6 +1472,238 @@ function openCalorieImportPreview(plan, fileName, onDone) {
   overlay.querySelector('#cr-cancel').focus();
 }
 
+// ============================================================
+// Menu Ingredients -> "Save approved lists to the Dish Catalog" (Dish Catalog ingredients, M2;
+// lib/catalogIngredientsSave.js). The chef uploads her reviewed Menu Ingredients export(s); each dish's list is matched
+// to its catalog dish by exact name within its category and saved ONLY where she ticks, after this preview. Rows of a
+// dish that disagree are offered as versions -- the one on the most rows preselected, and every version says which rows
+// it came from, so choosing another is an informed choice. Shown in place of the Menu Ingredients screen while open.
+// ============================================================
+function csEntries(plan) {
+  return [...plan.disagree, ...plan.new, ...plan.changed];
+}
+
+function csInitSelections(plan) {
+  const sel = {};
+  for (const e of csEntries(plan)) sel[e.key] = { include: true, version: e.preselected };
+  return sel;
+}
+
+const csSections = (e) => e.sections.map(s => `<span class="chip daily">${aiEsc(ciSectionName(s))}</span>`).join(' ');
+const csList = (ingredients, allergens) => `<div class="cs-list">${aiEsc(ingredients)}</div>${allergens ? `<div class="cs-allergens">Allergens: ${aiEsc(allergens)}</div>` : ''}`;
+
+function csDisagreeRow(e) {
+  const sel = state.catalogIngredientsSave.sel[e.key];
+  return `
+    <tr data-key="${aiEsc(e.key)}" class="${sel.include ? '' : 'ci-off'}">
+      <td><input type="checkbox" class="ci-include" ${sel.include ? 'checked' : ''} aria-label="Save a list for ${aiEsc(e.name)}" /></td>
+      <td><strong>${aiEsc(e.name)}</strong><span class="ci-note">${aiEsc(e.categoryName)}${e.inactive ? ' · inactive dish' : ''}</span>${csSections(e)}</td>
+      <td><fieldset class="cs-versions"><legend class="rof-sr-only">Which list to save for ${aiEsc(e.name)}</legend>
+        ${e.versions.map((v, i) => `
+          <label class="cs-version ${i === sel.version ? 'cs-chosen' : ''}">
+            <input type="radio" name="cs-v-${aiEsc(e.key)}" value="${i}" ${i === sel.version ? 'checked' : ''} />
+            <span class="cs-version-body">
+              <span class="cs-reason">${aiEsc(v.reason)}${v.sameAsSaved ? ' · <em>the saved list</em>' : ''}${i === e.preselected ? ' · preselected' : ''}</span>
+              ${csList(v.ingredients, v.allergens)}
+            </span>
+          </label>`).join('')}
+        ${e.saved && !e.versions.some(v => v.sameAsSaved) ? `<div class="cs-saved">Saved now: ${aiEsc(e.saved.ingredients)}</div>` : ''}
+      </fieldset></td>
+    </tr>`;
+}
+
+function csListRow(e, kind) {
+  const sel = state.catalogIngredientsSave.sel[e.key];
+  const v = e.versions[0];
+  const saved = kind === 'changed'
+    ? `<div class="cs-saved"><span class="cs-tag">Saved${e.saved.updatedAt ? ` ${aiEsc(new Date(e.saved.updatedAt).toLocaleDateString())}` : ''}${e.saved.updatedBy ? ` by ${aiEsc(e.saved.updatedBy)}` : ''}</span> ${aiEsc(e.saved.ingredients)}${e.saved.allergens ? ` · Allergens: ${aiEsc(e.saved.allergens)}` : ''}</div><span class="cs-tag">This file</span>`
+    : '';
+  return `
+    <tr data-key="${aiEsc(e.key)}" class="${sel.include ? '' : 'ci-off'}">
+      <td><input type="checkbox" class="ci-include" ${sel.include ? 'checked' : ''} aria-label="Save the list for ${aiEsc(e.name)}" /></td>
+      <td><strong>${aiEsc(e.name)}</strong><span class="ci-note">${aiEsc(e.categoryName)} · ${aiEsc(v.reason)}${e.inactive ? ' · inactive dish' : ''}</span>${csSections(e)}</td>
+      <td>${saved}${csList(v.ingredients, v.allergens)}</td>
+    </tr>`;
+}
+
+function csTable(id, list, rowFn) {
+  return `<div class="cr-scroll"><table class="cr-table ci-table cs-table" id="${id}">
+    <thead><tr><th>Save</th><th>Dish</th><th>Ingredients</th></tr></thead>
+    <tbody>${list.map(rowFn).join('')}</tbody></table></div>`;
+}
+
+async function renderCatalogIngredientsSaveView(main) {
+  const cs = state.catalogIngredientsSave;
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Save approved lists to the Dish Catalog</h1><span class="page-description">Your reviewed Menu Ingredients export: each dish's list is saved on its Dish Catalog dish, only where you tick, after this preview.</span></div>
+      <div class="action-toolbar"><button class="secondary" id="cs-back">← Menu Ingredients</button></div>
+    </div>
+    <div class="ci-panel ci-controls">
+      <label class="ci-field">Menu Ingredients export(s)
+        <input type="file" id="cs-files" accept=".xlsx" multiple />
+      </label>
+      <button class="primary" id="cs-read" ${cs.files.length ? '' : 'disabled'}>Read files</button>
+      <span class="ci-chosen">${cs.files.length ? `${cs.files.length} file(s): ${cs.files.map(f => aiEsc(f.name)).join(', ')}` : 'No files chosen'}</span>
+    </div>
+    <div id="cs-status" class="ai-progress" role="status" aria-live="polite"></div>
+    <div id="cs-body"></div>
+  `;
+  document.getElementById('cs-back').addEventListener('click', () => {
+    Object.assign(state.catalogIngredientsSave, { open: false, plan: null, result: null, files: [], sel: {} });
+    renderMenuIngredientsView(main);
+  });
+  document.getElementById('cs-files').addEventListener('change', async (e) => {
+    try {
+      cs.files = await ciReadFiles(e.target.files);
+      Object.assign(cs, { plan: null, result: null, sel: {} });
+      renderCatalogIngredientsSaveView(main);
+    } catch (err) { alert(`Couldn't read those files: ${err.message}`); }
+  });
+  document.getElementById('cs-read').addEventListener('click', () => csPreview());
+  if (cs.result) csRenderResult();
+  else if (cs.plan) csRenderPlan();
+}
+
+async function csPreview() {
+  const cs = state.catalogIngredientsSave;
+  const status = document.getElementById('cs-status');
+  const btn = document.getElementById('cs-read');
+  btn.disabled = true;
+  status.textContent = 'Reading the files and the Dish Catalog…';
+  try {
+    const plan = await window.api.previewCatalogIngredientsSave({ files: cs.files });
+    if (plan.unavailable) { status.textContent = 'The Dish Catalog can\'t hold ingredient lists yet: the database update (migration 20261002100000) has not been applied.'; return; }
+    cs.plan = plan;
+    cs.sel = csInitSelections(plan);
+    status.textContent = '';
+    csRenderPlan();
+  } catch (err) {
+    status.textContent = `Couldn't read the files: ${err.message}`;
+  } finally { btn.disabled = false; }
+}
+
+function csRenderPlan() {
+  const cs = state.catalogIngredientsSave;
+  const plan = cs.plan;
+  const ns = plan.notSaved;
+  const body = document.getElementById('cs-body');
+  if (!plan.hasLists) {
+    body.innerHTML = `<div class="ci-panel"><strong>No ingredient lists in these files.</strong> Choose a Menu Ingredients export (the file "Export to Excel" makes on the Menu Ingredients screen, with its Ingredients column), not the plain menu.</div>`;
+    return;
+  }
+  body.innerHTML = `
+    <p class="ci-summary">${cs.files.length} file(s) · ${plan.rowsRead} dish rows ·
+      <button class="ci-jump" data-jump="cs-h-disagree"><strong>${plan.disagree.length} to choose</strong></button> ·
+      <button class="ci-jump" data-jump="cs-h-new"><strong>${plan.new.length} new</strong></button> ·
+      <button class="ci-jump" data-jump="cs-h-changed"><strong>${plan.changed.length} changed</strong></button> ·
+      ${plan.unchangedCount} already saved as they are ·
+      <button class="ci-jump" data-jump="cs-h-not">not saved</button></p>
+    ${plan.warnings.length ? `<details class="ci-details"><summary>Notes from reading the files (${plan.warnings.length})</summary><ul>${plan.warnings.map(w => `<li>${aiEsc(w)}</li>`).join('')}</ul></details>` : ''}
+
+    <h2 class="ci-h2" id="cs-h-disagree">Rows disagree: choose the list (${plan.disagree.length})</h2>
+    <p class="ci-hint">The same dish has different lists on different rows -- a section's copy was edited, or the school's rules took something out. The list on the most rows is preselected; each one says which rows it came from.</p>
+    ${plan.disagree.length ? csTable('cs-disagree', plan.disagree, csDisagreeRow) : '<p class="ci-empty">None: every dish has one list in these files.</p>'}
+
+    <h2 class="ci-h2" id="cs-h-new">New lists (${plan.new.length}) <span class="ci-bulk"><button class="secondary small" data-bulk="cs-new" data-on="1">Select all</button><button class="secondary small" data-bulk="cs-new" data-on="0">Select none</button></span> <button class="ci-jump ci-top" data-jump="cs-body">Back to top</button></h2>
+    <p class="ci-hint">Dishes with no saved list yet.</p>
+    ${plan.new.length ? csTable('cs-new', plan.new, e => csListRow(e, 'new')) : '<p class="ci-empty">None.</p>'}
+
+    <h2 class="ci-h2" id="cs-h-changed">Changed (${plan.changed.length}) <span class="ci-bulk"><button class="secondary small" data-bulk="cs-changed" data-on="1">Select all</button><button class="secondary small" data-bulk="cs-changed" data-on="0">Select none</button></span> <button class="ci-jump ci-top" data-jump="cs-body">Back to top</button></h2>
+    <p class="ci-hint">The file's list differs from the one saved on the dish. Ticked: the file's list replaces it (the old one stays in the history). Untick any you want to keep as saved -- for example when this is an older week's file.</p>
+    ${plan.changed.length ? csTable('cs-changed', plan.changed, e => csListRow(e, 'changed')) : '<p class="ci-empty">None.</p>'}
+
+    <h2 class="ci-h2" id="cs-h-not">Not saved <button class="ci-jump ci-top" data-jump="cs-body">Back to top</button></h2>
+    <div class="ci-panel cs-not">
+      <ul>
+        ${ns.duplicates.length ? `<li><strong>${ns.duplicates.length} dish(es) are in the Dish Catalog twice</strong>, so the list can't be put on one of them -- remove the duplicate, then save again:
+          <ul>${ns.duplicates.map(d => `<li>${aiEsc(d.name)}: ${d.candidates.map(c => `#${c.id} “${aiEsc(c.name)}”`).join(', ')}</li>`).join('')}</ul></li>` : ''}
+        ${ns.notInCatalog.length ? `<li><strong>${ns.notInCatalog.length} dish(es) are not in the Dish Catalog</strong> under that category. Add them with Dish Catalog → Import dishes from menus…, then save this file again:
+          <span class="cs-names">${ns.notInCatalog.map(d => `${aiEsc(d.name)} (${aiEsc(d.sections)})`).join(' · ')}</span></li>` : ''}
+        ${ns.blankDishes.length ? `<li>${ns.blankDishes.length} dish(es) have no list in the file (blank Ingredients): ${ns.blankDishes.map(aiEsc).join(' · ')}</li>` : ''}
+        <li>${ns.servedAsIs} Fruit Bar / Fruit Basket / Salad Bar row(s): served as is, never saved.</li>
+        ${ns.unclear ? `<li>${ns.unclear} row(s) with no Dish Catalog category (drinks, retired rows).</li>` : ''}
+      </ul>
+    </div>
+
+    <div class="ci-footer"><span id="cs-count"></span><button class="primary" id="cs-apply"></button></div>
+  `;
+  body.querySelectorAll('.ci-jump').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.jump).scrollIntoView({ block: 'start', behavior: 'smooth' })));
+  body.querySelectorAll('[data-bulk]').forEach(btn => btn.addEventListener('click', () => {
+    const on = btn.dataset.on === '1';
+    document.querySelectorAll(`#${btn.dataset.bulk} tr[data-key]`).forEach(tr => {
+      cs.sel[tr.dataset.key].include = on;
+      tr.querySelector('.ci-include').checked = on;
+      tr.classList.toggle('ci-off', !on);
+    });
+    csUpdateFooter();
+  }));
+  body.querySelectorAll('tr[data-key]').forEach(tr => {
+    const sel = cs.sel[tr.dataset.key];
+    tr.querySelector('.ci-include').addEventListener('change', (e) => { sel.include = e.target.checked; tr.classList.toggle('ci-off', !sel.include); csUpdateFooter(); });
+    tr.querySelectorAll('input[type="radio"]').forEach(r => r.addEventListener('change', () => {
+      sel.version = Number(r.value);
+      tr.querySelectorAll('.cs-version').forEach((l, i) => l.classList.toggle('cs-chosen', i === sel.version));
+    }));
+  });
+  document.getElementById('cs-apply').addEventListener('click', () => csApply());
+  csUpdateFooter();
+}
+
+function csSelectedPicks() {
+  const cs = state.catalogIngredientsSave;
+  if (!cs.plan) return [];
+  return csEntries(cs.plan).filter(e => cs.sel[e.key]?.include).map(e => ({ key: e.key, version: cs.sel[e.key].version }));
+}
+
+function csUpdateFooter() {
+  const cs = state.catalogIngredientsSave;
+  const btn = document.getElementById('cs-apply');
+  if (!btn || !cs.plan) return;
+  const picks = csSelectedPicks();
+  document.getElementById('cs-count').textContent = `${picks.length} selected`;
+  btn.textContent = picks.length ? `Save ${picks.length} list${picks.length === 1 ? '' : 's'} to the Dish Catalog` : 'Nothing selected';
+  btn.disabled = !picks.length || cs.busy;
+}
+
+async function csApply() {
+  const cs = state.catalogIngredientsSave;
+  const picks = csSelectedPicks();
+  cs.busy = true;
+  csUpdateFooter();
+  const status = document.getElementById('cs-status');
+  status.textContent = `Saving ${picks.length} list(s)…`;
+  try {
+    cs.result = await window.api.applyCatalogIngredientsSave({ token: cs.plan.token, picks });
+    cs.plan = null;
+    status.textContent = '';
+    csRenderResult();
+  } catch (err) {
+    status.textContent = `Couldn't save: ${err.message}`;
+  } finally {
+    cs.busy = false;
+    csUpdateFooter();
+  }
+}
+
+function csRenderResult() {
+  const r = state.catalogIngredientsSave.result;
+  const when = (at) => (at ? new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'just now');
+  document.getElementById('cs-body').innerHTML = `
+    <div class="ci-panel ci-result">
+      <h2 class="ci-h2">Done</h2>
+      <ul>
+        <li><strong>${r.saved.length}</strong> list(s) saved to the Dish Catalog.</li>
+        ${r.conflicts.length ? `<li class="ci-failed">${r.conflicts.length} not saved because someone saved that dish's list after this preview -- read the file again to see their list beside yours:
+          <ul>${r.conflicts.map(c => `<li>${aiEsc(c.name)}: changed by ${aiEsc(c.by || 'someone')}, ${aiEsc(when(c.at))}</li>`).join('')}</ul></li>` : ''}
+        ${r.failed.length ? `<li class="ci-failed">${r.failed.length} not saved:<ul>${r.failed.map(f => `<li>${aiEsc(f.name)}: ${aiEsc(f.error)}</li>`).join('')}</ul></li>` : ''}
+        ${r.historyError ? `<li class="ci-failed">The lists were saved, but their history rows could not be written (${aiEsc(r.historyError)}).</li>` : ''}
+      </ul>
+      <div class="ci-result-actions"><button class="primary" id="cs-done">Back to Menu Ingredients</button></div>
+    </div>`;
+  document.getElementById('cs-done').addEventListener('click', () => document.getElementById('cs-back').click());
+}
+
 // Dish Catalog "Created By" (menu_items.created_by_label): free text with suggestions -- every label already
 // used plus the recipe people (list-created-by-labels in main.js). One <datalist> in <body>, refreshed when
 // the catalog or the item form opens and after an inline edit. A failed lookup just leaves no suggestions.
@@ -1510,6 +1745,10 @@ async function openItemModal(existingItem) {
   const sectionCategories = await window.api.getCategoriesForSection(state.currentSection);
   const isEdit = !!existingItem;
   const portions = isEdit ? await window.api.getItemPortions(existingItem.id) : [];
+  // Dish Catalog ingredients (M2): the approved list fields appear once the migration is applied.
+  const ingredientsOn = await window.api.catalogIngredientsAvailable().catch(() => false);
+  const savedIngredients = isEdit ? (existingItem.ingredients_text || '') : '';
+  const savedAllergens = isEdit ? (existingItem.allergens_text || '') : '';
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -1531,6 +1770,16 @@ async function openItemModal(existingItem) {
           <input id="m-code" value="${isEdit ? aiEsc(existingItem.rc_code || '') : ''}" placeholder="e.g. RC or RG code" />
         </div>
       </div>
+      ${ingredientsOn ? `
+      <div class="field">
+        <label for="m-ingredients">Ingredients <span class="field-note">approved list, " - " between ingredients</span></label>
+        <textarea id="m-ingredients" rows="3" placeholder="e.g. chicken - basmati rice - onion - garlic">${aiEsc(savedIngredients)}</textarea>
+      </div>
+      <div class="field">
+        <label for="m-allergens">Allergens</label>
+        <input id="m-allergens" value="${aiEsc(savedAllergens)}" placeholder="e.g. gluten - dairy" />
+        ${isEdit && existingItem.ingredients_updated_at ? `<div class="field-note">Saved ${aiEsc(new Date(existingItem.ingredients_updated_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}${existingItem.ingredients_updated_by ? ` by ${aiEsc(existingItem.ingredients_updated_by)}` : ''}</div>` : ''}
+      </div>` : ''}
       <div class="field">
         <label>Meal period</label>
         <select id="m-period">
@@ -1744,8 +1993,17 @@ async function openItemModal(existingItem) {
       }
     }
 
+    // Sent only when she changed them, so an untouched form never trips the "changed since you opened it" check.
+    const tidyList = (v) => String(v ?? '').trim().replace(/\s+/g, ' ');
+    const ingredientsEl = overlay.querySelector('#m-ingredients');
+    const allergensEl = overlay.querySelector('#m-allergens');
+    const ingredientsPatch = ingredientsEl && (tidyList(ingredientsEl.value) !== tidyList(savedIngredients) || tidyList(allergensEl.value) !== tidyList(savedAllergens))
+      ? { ingredientsText: ingredientsEl.value, allergensText: allergensEl.value, ingredientsExpectedUpdatedAt: isEdit ? (existingItem.ingredients_updated_at || null) : null }
+      : {};
+
     const result = isEdit
       ? await window.api.updateItem({
+          ...ingredientsPatch,
           id: existingItem.id, name,
           categoryCode: categorySelect.value,
           proteinCode: proteinSelect.value || null,
@@ -1758,6 +2016,7 @@ async function openItemModal(existingItem) {
           rcCode: overlay.querySelector('#m-code').value,
         })
       : await window.api.addItem({
+          ...ingredientsPatch,
           name, categoryCode: categorySelect.value,
           proteinCode: proteinSelect.value || null,
           isDailyRepeating: dailyCheckbox.checked,
@@ -1778,6 +2037,7 @@ async function openItemModal(existingItem) {
 
     overlay.remove();
     renderView();
+    if (result && result.ingredientsWarning) alert(result.ingredientsWarning);
   });
 }
 
@@ -3599,6 +3859,7 @@ async function renderExportAllView(main) {
 // parse-and-suggest-menu-ingredients/export-menu-ingredients handlers).
 // ============================================================
 function renderMenuIngredientsView(main) {
+  if (state.catalogIngredientsSave.open) return renderCatalogIngredientsSaveView(main);
   const mi = state.menuIngredients;
   const hasUpload = mi.files.length > 0;
   const exportableFiles = mi.files.filter(f => f.rows && f.rows.length);
@@ -3606,12 +3867,13 @@ function renderMenuIngredientsView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Menu Ingredients Generator</h1><span class="page-description">Upload a menu, review AI-suggested ingredients, export -- nothing is saved</span></div>
+      <div><h1>Menu Ingredients Generator</h1><span class="page-description">Upload a menu, review AI-suggested ingredients, export. Approved lists can be saved to the Dish Catalog.</span></div>
     </div>
     <div class="generate-controls" style="align-items:center;">
       <button class="primary" id="mi-upload-btn">${hasUpload ? 'Upload Different File(s)' : 'Upload Menu File(s)'}</button>
       <input type="file" id="mi-file-input" accept=".xlsx" multiple hidden />
       ${exportableFiles.length ? `<button class="secondary" id="mi-export-btn">Export to Excel</button>` : ''}
+      <button class="secondary" id="mi-save-lists-btn" title="Upload your reviewed Menu Ingredients export: each dish's approved list is saved on its Dish Catalog dish, after a preview.">Save approved lists to the Dish Catalog…</button>
       <span id="mi-export-status" style="color:var(--neutral); font-size:12.5px;"></span>
     </div>
     <div id="mi-progress-wrap"></div>
@@ -3628,6 +3890,10 @@ function renderMenuIngredientsView(main) {
   // visible marker -- see renderMenuIngredientsFiles below -- since that's not a per-row gap, it's
   // the entire file missing from the export.
 
+  document.getElementById('mi-save-lists-btn').addEventListener('click', () => {
+    Object.assign(state.catalogIngredientsSave, { open: true, plan: null, result: null, sel: {}, files: [] });
+    renderCatalogIngredientsSaveView(main);
+  });
   document.getElementById('mi-upload-btn').addEventListener('click', () => {
     document.getElementById('mi-file-input').click();
   });

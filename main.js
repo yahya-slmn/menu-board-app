@@ -47,6 +47,7 @@ const { normalizeCreatedByLabel, listCreatedByLabels } = require('./lib/catalogC
 const { snackLunchOnlyHit } = require('./lib/categoryRules');
 const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWorkbook, planCalorieImport, loadImportTargets, applyCalorieImport } = require('./lib/calorieReview');
 const { planCatalogImport } = require('./lib/catalogImport');
+const { planIngredientsSave, applyIngredientSaves } = require('./lib/catalogIngredientsSave');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -494,6 +495,26 @@ ipcMain.handle('refresh-reference-data', async () => {
 // ---------------------------------------------------------------
 // IPC: item management (menu_items / item_portions -- Supabase)
 // ---------------------------------------------------------------
+// Dish Catalog ingredients (migration 20261002100000, applied by hand): until its columns exist, asking for them would
+// fail the whole Dish Catalog query, so every reader checks once whether they are there. A "yes" is remembered for the
+// session; a "no" is checked again next time (the migration may be applied while the app is open).
+let catalogIngredientsReady = false;
+async function catalogIngredientsAvailable() {
+  if (catalogIngredientsReady) return true;
+  const { error } = await supabase.from('menu_items').select('ingredients_text').limit(1);
+  if (!error) catalogIngredientsReady = true;
+  else if (error.code !== '42703' && !/ingredients_text/.test(error.message || '')) throw supaFail('catalog ingredients: check the columns', error);
+  return catalogIngredientsReady;
+}
+ipcMain.handle('catalog-ingredients-available', () => catalogIngredientsAvailable());
+const INGREDIENT_COLUMNS = 'ingredients_text, allergens_text, ingredients_updated_at, ingredients_updated_by, ingredients_source';
+
+// The signed-in login ("tetiana"), as AI Menu Approve records its approver.
+async function signedInLogin() {
+  const { data } = await supabase.auth.getUser();
+  return (data?.user?.email || '').split('@')[0] || null;
+}
+
 ipcMain.handle('get-items', async (e, sectionCode) => {
   const section = getSectionByCode(sectionCode);
   const ageGroupIds = getAgeGroupsForSection(section.id).map(a => a.id);
@@ -507,7 +528,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select('id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id, created_by_label')
+    .select(`id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id, created_by_label${await catalogIngredientsAvailable() ? `, ${INGREDIENT_COLUMNS}` : ''}`)
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
 
@@ -537,6 +558,11 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         // An AM / PM Snack with chicken or beef: kept in the catalog, never put on a new menu
         // (lib/categoryRules.js) -- the Dish Catalog tags it so it isn't silently missing from menus.
         snack_rule_blocked: !!snackLunchOnlyHit(cat?.code, pt?.code ?? null, [['name', mi.name]]),
+        // The saved, chef-approved Menu Ingredients list (undefined until the M2 migration is applied).
+        ingredients_text: mi.ingredients_text ?? null,
+        allergens_text: mi.allergens_text ?? null,
+        ingredients_updated_at: mi.ingredients_updated_at ?? null,
+        ingredients_updated_by: mi.ingredients_updated_by ?? null,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };
@@ -594,7 +620,7 @@ ipcMain.handle('list-created-by-labels', async () => listCreatedByLabels(await l
 // below) and reported back as { success: false, duplicate: true } instead of throwing, since
 // the same dish name legitimately recurs across many categories in this catalog and the
 // renderer needs to tell the user why the save didn't go through rather than have it silently fail.
-ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode, createdByLabel, rcCode }) => {
+ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyRepeating, caloriesPer100g, amSnackStyle, portions, sectionCode, createdByLabel, rcCode, ingredientsText, allergensText }) => {
   const category = getCategoryByCode(categoryCode);
   const createdBy = await normalizeCreatedByLabel(createdByLabel);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
@@ -668,8 +694,32 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       throw supaFail('add-item: insert item_portions', portErr);
     }
   }
-  return { success: true, itemId };
+  // An approved ingredient list typed in Add Item: saved with its history row, like any other save.
+  const ingredientsWarning = await saveManualIngredients({ itemId, name, ingredientsText, allergensText, expectedUpdatedAt: null, old: null });
+  return { success: true, itemId, ...(ingredientsWarning ? { ingredientsWarning } : {}) };
 });
+
+// Add / Edit Item's Ingredients / Allergens (Dish Catalog ingredients, M2): written only when sent and different from
+// the saved text, through the same compare-and-swap + history as a file save (source 'manual'). Returns a warning for
+// the form (another person saved the list since the form opened, or the history row failed), else null.
+async function saveManualIngredients({ itemId, name, ingredientsText, allergensText, expectedUpdatedAt, old }) {
+  if (ingredientsText === undefined && allergensText === undefined) return null;
+  if (!(await catalogIngredientsAvailable())) return null;
+  const tidy = (v) => String(v ?? '').trim().replace(/\s+/g, ' ');
+  const oldIngredients = old ? old.ingredients_text : null;
+  const oldAllergens = old ? old.allergens_text : null;
+  if (tidy(ingredientsText) === tidy(oldIngredients) && tidy(allergensText) === tidy(oldAllergens)) return null;
+  const r = await applyIngredientSaves({ db: supabase, who: await signedInLogin(), source: 'manual', saves: [
+    { itemId, name, ingredients: ingredientsText, allergens: allergensText, expectedUpdatedAt: expectedUpdatedAt ?? null, oldIngredients, oldAllergens },
+  ] });
+  if (r.conflicts.length) {
+    const c = r.conflicts[0];
+    return `The ingredient list was not saved: ${c.by || 'someone'} changed it${c.at ? ` at ${new Date(c.at).toLocaleString()}` : ''} after you opened this form. Your other changes are saved -- reopen the dish to see the new list.`;
+  }
+  if (r.failed.length) return `The ingredient list was not saved: ${r.failed[0].error}`;
+  if (r.historyError) log.warn(`[catalog ingredients] item ${itemId}: list saved, history row failed: ${r.historyError}`);
+  return null;
+}
 
 // Which sections' SECTION_SLOTS actually list this category code -- the same "does this
 // category belong here" definition the category-leak audit used, kept in one place so both
@@ -714,7 +764,7 @@ ipcMain.handle('check-category-change-impact', async (e, { itemId, newCategoryCo
 // sections/how-many rows would go stale (via check-category-change-impact above) and she's
 // explicitly confirmed -- never inferred or defaulted true, so a category save never deletes
 // portion data the chef hasn't seen and approved in the moment.
-ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions, createdByLabel, rcCode }) => {
+ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, isDailyRepeating, isActive, caloriesPer100g, amSnackStyle, removeInvalidSectionPortions, createdByLabel, rcCode, ingredientsText, allergensText, ingredientsExpectedUpdatedAt }) => {
   const category = getCategoryByCode(categoryCode);
   const protein = proteinCode ? getProteinByCode(proteinCode) : null;
   const resolvedAmSnackStyle = await resolveAmSnackStyle(categoryCode, name, amSnackStyle);
@@ -771,7 +821,15 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
     }
   }
 
-  return { success: true };
+  // Only when the form sends them (the Edit Item form does once the migration is applied); compared with what is saved
+  // NOW, and written only if nobody saved a list since the form opened (ingredientsExpectedUpdatedAt).
+  let ingredientsWarning = null;
+  if ((ingredientsText !== undefined || allergensText !== undefined) && await catalogIngredientsAvailable()) {
+    const { data: cur, error: curErr } = await supabase.from('menu_items').select('ingredients_text, allergens_text').eq('id', id).maybeSingle();
+    if (curErr) throw supaFail('update-item: read the saved ingredient list', curErr);
+    ingredientsWarning = await saveManualIngredients({ itemId: id, name, ingredientsText, allergensText, expectedUpdatedAt: ingredientsExpectedUpdatedAt, old: cur });
+  }
+  return { success: true, ...(ingredientsWarning ? { ingredientsWarning } : {}) };
 });
 
 // menu_day_items.item_id -> menu_items.id is ON DELETE RESTRICT (added directly in Supabase),
@@ -1250,6 +1308,61 @@ ipcMain.handle('apply-catalog-import', async (e, { token, createdBy, picks }) =>
     }
   }
   return { created, sectionsAdded, failed, createdByLabel };
+});
+
+// Dish Catalog ingredients, M2: "Save approved lists to the Dish Catalog" (Menu Ingredients screen). The preview reads
+// the chef's Menu Ingredients export(s) and the live catalog and plans one entry per catalog dish
+// (lib/catalogIngredientsSave.js); apply writes ONLY the ticked dishes of that stored plan, each with the version she
+// chose, through the compare-and-swap on ingredients_updated_at, and appends a history row per save.
+let catalogIngredientsPlan = null; // { token, plan, fileNames }
+
+async function loadCatalogForIngredients() {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('menu_items').select(`id, name, category_id, is_active, ${INGREDIENT_COLUMNS}`).order('id').range(from, from + 999);
+    if (error) throw supaFail('catalog ingredients: load menu_items', error);
+    all.push(...data);
+    if (data.length < 1000) break;
+  }
+  return all.map(it => ({ ...it, category_code: getCategoryById(it.category_id)?.code }));
+}
+
+ipcMain.handle('preview-catalog-ingredients-save', async (e, { files }) => {
+  if (!(await catalogIngredientsAvailable())) return { unavailable: true };
+  const parsed = [];
+  const warnings = [];
+  for (const f of files) {
+    const fileName = String(f.name || '').replace(/\.xlsx$/i, '');
+    const { workbook, warnings: loadWarnings } = await loadWorkbookFromBuffer(Buffer.from(f.base64, 'base64'));
+    const { rows, warnings: parseWarnings } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+    [...loadWarnings, ...parseWarnings].forEach(w => warnings.push(`${fileName}: ${w}`));
+    parsed.push({ fileName, rows });
+  }
+  const catalog = await loadCatalogForIngredients();
+  const categories = getCategories().map(c => ({ code: c.code, name: c.name }));
+  const plan = planIngredientsSave({ files: parsed, catalog, categories });
+  catalogIngredientsPlan = { token: crypto.randomUUID(), plan, fileNames: files.map(f => f.name) };
+  return { token: catalogIngredientsPlan.token, warnings, ...plan };
+});
+
+// picks: [{ key, version }] -- keys of plan entries, version = the index of the list she chose for that dish.
+ipcMain.handle('apply-catalog-ingredients-save', async (e, { token, picks }) => {
+  if (!catalogIngredientsPlan || catalogIngredientsPlan.token !== token) throw new Error('That preview is out of date -- read the file again.');
+  const { plan, fileNames } = catalogIngredientsPlan;
+  catalogIngredientsPlan = null;
+  const byKey = new Map([...plan.disagree, ...plan.new, ...plan.changed].map(entry => [entry.key, entry]));
+  const saves = [];
+  for (const { key, version } of picks) {
+    const entry = byKey.get(key);
+    const v = entry && entry.versions[Number(version) || 0];
+    if (!v) continue;
+    saves.push({ itemId: entry.itemId, name: entry.name, ingredients: v.ingredients, allergens: v.allergens, expectedUpdatedAt: entry.expectedUpdatedAt,
+      oldIngredients: entry.saved ? entry.saved.ingredients : null, oldAllergens: entry.saved ? entry.saved.allergens : null });
+  }
+  const result = await applyIngredientSaves({ db: supabase, saves, who: await signedInLogin(), source: 'menu_upload', sourceFile: fileNames.join(', ') });
+  if (result.historyError) log.warn(`[catalog ingredients] ${result.saved.length} list(s) saved, history rows failed: ${result.historyError}`);
+  if (result.conflicts.length || result.failed.length) log.warn('[catalog ingredients] not saved:', { conflicts: result.conflicts, failed: result.failed });
+  return result;
 });
 
 ipcMain.handle('estimate-missing-calories', async (e) => runCalorieBackfill({
