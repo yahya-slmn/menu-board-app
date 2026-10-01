@@ -3902,7 +3902,7 @@ function renderMenuIngredientsReview(container, rows, ctx) {
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-ingredients-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
                         ${miShareNote(row, ctx)}
-                        ${row.followsRef ? '' : `${row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}`}
+                        ${row.servedAsIs ? '<div class="mi-basis">Served as is: no ingredients generated</div>' : ''}${row.followsRef ? '' : `${row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}`}
                       </td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-allergens-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />

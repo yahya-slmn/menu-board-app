@@ -28,7 +28,7 @@ const { estimateDensity, toDensityItem } = require('./lib/estimateDensity');
 const { estimateDensityCached } = require('./lib/densityCache');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
 const { matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
-const { dishesForSuggestion, toPayloadItem, cleanSuggestion, rowSeafoodAllowed } = require('./lib/menuIngredientsRequest');
+const { dishesForSuggestion, toPayloadItem, cleanSuggestion, rowSeafoodAllowed, isServedAsIsRow } = require('./lib/menuIngredientsRequest');
 const { planShares, shareName, rowKey: shareRowKey, sameAsLabels } = require('./lib/menuIngredientsShare');
 const { matchSeafoodTerms } = require('./lib/seafoodFilter');
 const {
@@ -1567,11 +1567,14 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
   const allRows = [];
   for (const f of ok) {
     f.annotated = f.rows.map((r) => {
-      const est = answers.get(shareName(r.dishName));
+      // Fruit Bar / Fruit Basket / Salad Bar: served as is -- never sent, blank, even when another row shares its name.
+      const servedAsIs = isServedAsIsRow(r);
+      const est = servedAsIs ? null : answers.get(shareName(r.dishName));
       const res = est ? cleanSuggestion(est, { seafoodAllowed: rowSeafoodAllowed(r) }) : null;
       const row = {
         ...r,
         fileIndex: f.fileIndex,
+        servedAsIs,
         ingredients: res ? res.ingredients : '',
         allergens: res ? res.allergens : '',
         // On screen only: basis ("Regional: Kabsa (Saudi)" / "General") and every segment the school's rules took

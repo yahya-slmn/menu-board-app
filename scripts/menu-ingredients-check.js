@@ -13,10 +13,14 @@
 //      never a student row after a Staff / CEO one, and only when both rows' own filtered results are identical.
 //      The chef's tuna case: one shared AI answer, KG-LP's row has no tuna and a red note, Staff's keeps its tuna, and
 //      neither follows the other, whatever the tab order.
+//   E. Served as is (2026-10-01): Fruit Bar / Fruit Basket / Salad Bar rows, in every section, are never sent to the
+//      AI and never share -- matched by CATEGORY ("Fruit (a Selection of Seasonal Fruits)" under Fruit Basket), with
+//      ONE list shared with the Recipe Generator (whose own exclusions are unchanged).
 // Pure functions only: no login, no database, no AI.
 const { matchSpicyTerms } = require('../lib/spicyFilter');
 const { filterMenuIngredients } = require('../lib/menuIngredientFilters');
-const { dishesForSuggestion, toPayloadItem, basisText, cleanSuggestion, rowSeafoodAllowed } = require('../lib/menuIngredientsRequest');
+const { dishesForSuggestion, toPayloadItem, basisText, cleanSuggestion, rowSeafoodAllowed, isServedAsIsRow } = require('../lib/menuIngredientsRequest');
+const { isExcludedCategory, isServedAsIsCategory } = require('../lib/recipeGenerator');
 const { planShares, rowKey, sameAsLabels } = require('../lib/menuIngredientsShare');
 
 const failures = [];
@@ -146,6 +150,32 @@ expect(lab.get('0|KG - LP|2'), "Daycare's Cheese Croissant", 'a following row na
 expect(lab.has('0|Staff|3'), false, 'a row edited for its own section gets no "Same as"');
 expect(lab.has('0|Daycare|2'), false, 'a source gets no "Same as"');
 expect(lab.get('1|MS - UP (B-G)|2'), "Daycare's Cheese Croissant (Week A.xlsx)", 'a source in another file is named with its file');
+
+// ---- E. served as is ----------------------------------------------------------------------------------------
+const servedRows = [
+  { sheetName: 'KG - LP', category: 'Fruit Basket', period: 'Breakfast', dishName: 'Fruit (a Selection of Seasonal Fruits)' },
+  { sheetName: 'MS - UP (B-G)', category: 'Fruit Basket', period: 'Breakfast', dishName: 'Fruit (a Choice of Fresh Fruit)' },
+  { sheetName: 'KG - LP', category: 'Salad Bar', period: 'Lunch', dishName: 'Salad Bar' },
+  { sheetName: 'Daycare', category: 'Fruit Bar', period: 'Lunch', dishName: 'Melon Cubes' },
+  { sheetName: 'Staff', category: 'Fruit Basket', period: 'Lunch', dishName: 'Cut Fruits (Pineapple, Watermelon, Sweet Melon)' },
+  { sheetName: 'CEO', category: 'Fruits', period: 'Lunch', dishName: 'Papaya Slice' },
+  { sheetName: 'Daycare', category: 'PM Snack', period: 'PM Snack', dishName: 'Fruits Salad' },
+  { sheetName: 'Staff', category: 'Sweets', period: 'Lunch', dishName: 'Fruit Cake' },
+];
+expect(dishesForSuggestion(servedRows).map((d) => d.name), ['Papaya Slice', 'Fruits Salad', 'Fruit Cake'],
+  'Fruit Basket / Salad Bar / Fruit Bar rows (any section, any wording) are not sent; CEO Fruits, a fruit salad and a fruit cake are');
+expect(servedRows.map(isServedAsIsRow), [true, true, true, true, true, false, false, false], 'served as is, by category');
+expect(dishesForSuggestion([{ sheetName: 'Daycare', category: 'Fruit Bar', dishName: 'Melon Cubes' }, { sheetName: 'Daycare', category: 'PM Snack', dishName: 'melon  cubes' }]).map((d) => d.category),
+  ['PM Snack'], 'the same name under a real category is still sent, with that row\'s context');
+const servedShares = planShares([
+  { fileIndex: 0, sheetName: 'KG - LP', rowNumber: 5, date: '13-09-2026', dishName: 'Fruit (a Selection of Seasonal Fruits)', ingredients: '', allergens: '', servedAsIs: true },
+  { fileIndex: 0, sheetName: 'MS - UP (B-G)', rowNumber: 5, date: '13-09-2026', dishName: 'Fruit (a Selection of Seasonal Fruits)', ingredients: '', allergens: '', servedAsIs: true },
+]);
+expect(servedShares.size, 0, 'two blank served-as-is rows the same day never show "Same as"');
+expect(['Bread', 'Milk', 'Juice', 'Beverages', 'Fruit Bar', 'Fruit Basket', 'Salad Bar', 'Lunch Main Course'].map(isExcludedCategory),
+  [true, true, true, true, true, true, true, false], 'the Recipe Generator\'s exclusions are unchanged');
+expect(['Bread', 'Milk', 'Juice', 'Beverages', 'Fruit Bar', 'Fruit Basket', 'Salad Bar', 'Fruits'].map(isServedAsIsCategory),
+  [false, false, false, false, true, true, true, false], 'only the three served-as-is categories are shared with Menu Ingredients');
 
 if (failures.length) {
   console.log(`FAILED (${failures.length} of ${count}):\n  ${failures.join('\n  ')}`);
