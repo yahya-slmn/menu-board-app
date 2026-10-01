@@ -5135,6 +5135,11 @@ function buildProcessFromSaved(proc) {
           quantity: ri.quantity ?? '',
           unit: ri.unit || '',
           method: ri.method || '',
+          // Recipe Generator only (Phase F): where the row came from and a chef-confirmed override; kept on save only
+          // while the name is unchanged (originalName) -- a row she renames or types is hers, with no marker.
+          origin: ri.origin ?? null,
+          overridePolicy: ri.override_policy ?? null,
+          originalName: ri.ingredient_name,
         }))
       : [makeEmptyIngredientRow()],
     wastes: (proc.wastes || []).map(w => ({
@@ -5192,6 +5197,39 @@ function buildProcessFromImported(proc) {
 // extracted ingredient name is English again, so there's nothing left for a second column to
 // hold. `ns` picks which namespace's ingredient table the autocomplete searches (Recipe Book's
 // `ingredients` vs Recipe Extractor's `extracted_ingredients`) -- never cross-matched.
+// Recipe Generator drafts (Phase F): a small marker under an ingredient that the AI ADDED to the chef's reviewed list
+// (with what allergen it may bring -- flag only, decided with the chef), or one of HER ingredients kept although the
+// nut filter matched it ("chef-confirmed override"). Nothing for her own rows or other recipe types.
+const ADDED_ALLERGEN_HINTS = [
+  ['dairy', /\b(milk|butter|cream|cheese|yogh?urt|labneh|ghee|kashta)\b/i],
+  ['gluten', /\b(flour|bread|pasta|semolina|bulgh?ur|couscous|breadcrumbs?|wheat|barley|noodles?)\b/i],
+  ['egg', /\beggs?\b/i],
+  ['soy', /\b(soy|tofu)\b/i],
+];
+// The draft's own flags (generated_recipes.review_flags, Phase F): her reviewed ingredients the recipe still left out
+// after a retry, and those removed because the dish is on a student menu (seafood -- never overridden).
+function reviewFlagsHtml(flags) {
+  if (!flags) return '';
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const parts = [];
+  if ((flags.missing || []).length) parts.push(`<div><strong>Missing from the reviewed ingredient list:</strong> ${flags.missing.map(esc).join(', ')} -- add it below, or leave it out if it isn't needed.</div>`);
+  if ((flags.seafoodRemoved || []).length) parts.push(`<div><strong>Seafood removed (student menu):</strong> ${flags.seafoodRemoved.map(esc).join(', ')} -- if this dish is really Staff's, correct the menu's section.</div>`);
+  return parts.length ? `<div class="rf-review-flags" role="status">${parts.join('')}</div>` : '';
+}
+
+function reviewRowChipHtml(row) {
+  const unchanged = String(row.name || '').trim() === String(row.originalName || '').trim();
+  if (!unchanged) return '';
+  if (row.overridePolicy) {
+    return `<div class="rf-review-chip rf-review-override" title="On the chef's reviewed list, kept although the ${row.overridePolicy} filter matched its name">chef-confirmed override (${row.overridePolicy} policy)</div>`;
+  }
+  if (row.origin === 'added') {
+    const hints = ADDED_ALLERGEN_HINTS.filter(([, re]) => re.test(row.name || '')).map(([a]) => a);
+    return `<div class="rf-review-chip rf-review-added" title="Not on the reviewed ingredient list: the AI added it for the method">added by AI${hints.length ? ` · may add ${hints.join(', ')}` : ''}</div>`;
+  }
+  return '';
+}
+
 function renderProcessIngredientRows(ns, process, tbodyEl, onChange) {
   tbodyEl.innerHTML = process.ingredientRows.map(row => `
     <tr data-row="${row.localId}">
@@ -6903,7 +6941,7 @@ function renderGeneratedIngredientRows(process, tbodyEl, onChange) {
   tbodyEl.innerHTML = process.ingredientRows.map(row => `
     <tr data-row="${row.localId}">
       <td class="row-drag-handle-cell"><span class="row-drag-handle" data-drag-handle="${row.localId}" draggable="true" title="Drag to reorder">⠿</span></td>
-      <td><input class="rg-ing-name" value="${row.name}" dir="auto" /></td>
+      <td><input class="rg-ing-name" value="${row.name}" dir="auto" />${reviewRowChipHtml(row)}</td>
       <td><input class="rg-ing-qty" value="${formatIngredientQty(row.quantity)}" /></td>
       <td><input class="rg-ing-unit" value="${row.unit}" /></td>
       <td><input class="rg-ing-method" value="${row.method}" dir="auto" /></td>
@@ -6974,6 +7012,7 @@ async function renderGeneratedRecipeFormView(main, ns) {
       <button class="secondary" id="rg-back-btn">${ns.backLabel}</button>
     </div>
     ${isDraft ? `<div style="color:var(--neutral); font-size:12.5px; margin:-10px 0 14px;">Generated from "${recipe.source_menu_label}" -- source dish: "${recipe.source_dish_name}". Review and edit below, then Confirm &amp; Save to assign an RG- code.</div>` : ''}
+    ${reviewFlagsHtml(recipe.review_flags)}
 
     <div class="generate-controls">
       <div class="field recipe-name-field"><label>Recipe Name</label><input id="rg-name" value="${recipe.name || ''}" dir="auto" /></div>
@@ -7252,12 +7291,18 @@ async function saveGeneratedRecipeForm(ns, { confirm }) {
       }),
       ingredients: proc.ingredientRows
         .filter(r => r.name.trim() !== '')
-        .map(r => ({
-          name: r.name.trim(),
-          quantity: r.quantity ? parseFloat(r.quantity) : null,
-          unit: r.unit || null,
-          method: r.method || null,
-        })),
+        .map(r => {
+          // Phase F markers survive a save only while the row keeps the name it came with.
+          const unchanged = r.name.trim() === String(r.originalName || '').trim();
+          return {
+            name: r.name.trim(),
+            quantity: r.quantity ? parseFloat(r.quantity) : null,
+            unit: r.unit || null,
+            method: r.method || null,
+            origin: unchanged ? r.origin ?? null : null,
+            overridePolicy: unchanged ? r.overridePolicy ?? null : null,
+          };
+        }),
     })),
   };
 

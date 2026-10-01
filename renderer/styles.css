@@ -1656,3 +1656,9 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 /* Recipe Generator: dishes generated without the chef's reviewed ingredient list (a plain menu upload). */
 .rg-review-notice { margin: 0 0 14px; padding: 10px 14px; border: 1px solid #e6cf9c; border-radius: 10px; background: #fbf4e4; color: var(--ink); font-size: 13px; line-height: 1.5; }
 .rg-review-dismiss { margin-left: 8px; padding: 0; border: 0; background: none; color: var(--sage); font: inherit; font-size: 12.5px; font-weight: 600; text-decoration: underline; cursor: pointer; }
+/* Recipe Generator drafts (Phase F): what the AI added to the chef's reviewed list, her confirmed overrides, and the
+   draft's flags (missing reviewed ingredients, seafood removed for a student menu). */
+.rf-review-chip { margin-top: 3px; font-size: 11px; line-height: 1.3; }
+.rf-review-added { color: var(--gold); }
+.rf-review-override { color: var(--sage-dark); font-weight: 600; }
+.rf-review-flags { margin: 0 0 14px; padding: 10px 14px; border: 1px solid #e6cf9c; border-radius: 10px; background: #fbf4e4; font-size: 13px; line-height: 1.5; display: grid; gap: 4px; }

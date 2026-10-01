@@ -266,7 +266,7 @@ re-reads the file they came from with the same rules (a Staff lunch main from it
 writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. `npm test` = the round trip + `scripts/recipe-groups-check.js`
 (the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
 (read-only) lists where every dish and every Staff main of real menus lands. Pipeline plan (phases A-F): A and B done; C Menu
-Ingredients prompt v2.2 built (live with the next release), D cross-section sharing done, E Recipe Generator reads the reviewed list (prompt live with the release), E / F Recipe Generator keeps the chef-reviewed ingredient list.
+Ingredients prompt v2.2 built (live with the next release), D cross-section sharing done, E Recipe Generator reads the reviewed list (prompt live with the release), F keeps it (done), E / F Recipe Generator keeps the chef-reviewed ingredient list.
 
 **Menu Ingredients Generator prompt v2.2** (2026-10-01, pipeline Phase C; **built, NOT deployed live**: the live
 `suggest-dish-ingredients` stays on the old prompt (v11) until the app release from this branch, and both go out the SAME
@@ -318,8 +318,21 @@ and a banner ("12 of 40 dishes had no reviewed ingredient list ... the AI chose 
 Trial (`scripts/mi-trial-export.js` -> a v2.2 Menu Ingredients export of a real menu with chef-style edits;
 `scripts/rg-prompt-trial.js`, the live prompt vs the temporary `generate-dish-recipes-trial`): 272/273 reviewed
 ingredients kept verbatim on the v2.2 file (today's prompt: 70%), 117/118 on an older real export (today: 65%); the
-additions are method basics. Phase F (code check of every reviewed ingredient + retry + flag, per-ingredient origin,
-chef-confirmed override) is still to come. Release day also deletes `generate-dish-recipes-trial`.
+additions are method basics. Phase F (below) keeps the list. Release day also deletes `generate-dish-recipes-trial`.
+
+**Recipe Generator keeps the reviewed list** (2026-10-01, pipeline Phase F; needs migration 20261001100000, applied BY
+HAND -- until then drafts save without the markers). `lib/reviewedRecipe.js` (pure): each recipe ingredient's `origin`
+is worked out in CODE by name against the reviewed list (case / spacing aside): 'reviewed', 'added' (the AI added it),
+null with no list (`generated_recipe_ingredients.origin`). A recipe that leaves out one of her ingredients (exact name;
+"sugar syrup" split into sugar + water counts) is retried once; still incomplete -> the attempt leaving out fewer is saved
+with `generated_recipes.review_flags.missing` (`settleRetry`). Filters (`markRecipeIngredients`): a NUT / sesame match on
+HER ingredient is kept, `override_policy` 'nut' ("chef-confirmed override" -- a false positive she corrected); an AI-added
+one is removed. Student SEAFOOD is always removed, hers too -- NO override (decided with the chef: seafood she put back on
+a student dish signals the dish is on the wrong section's menu); hers is flagged `review_flags.seafoodRemoved` ("if this
+dish is really Staff's, correct the menu's section"), and a dish the model skips as seafood is named in the warnings.
+The draft form (`renderGeneratedIngredientRows`) shows "added by AI" (+ "may add dairy / gluten / egg / soy", flag only)
+and the override chip; the flags sit above the form. The markers survive a save only while a row keeps its name
+(`originalName`): a row she renames or types is hers, with no marker.
 
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its

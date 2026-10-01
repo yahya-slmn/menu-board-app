@@ -53,6 +53,7 @@ const {
 } = require('./lib/recipeGenerator');
 const { categoryGroupFor, categoryGroupInfo, categoryGroupOfRecipe, staffMainGroup } = require('./lib/recipeCategoryGroups');
 const { planRegroup } = require('./lib/recipeRegroup');
+const { missingReviewed, namesOfProcesses, markRecipeIngredients, reviewFlagsValue, settleRetry } = require('./lib/reviewedRecipe');
 
 let mainWindow;
 let loginWindow;
@@ -1934,6 +1935,23 @@ async function resolveWasteTypeId({ name, percent }, wasteTypeCache) {
 // (undefined column) -- and the Recipe Generator carries on without it (drafts saved without a group, lists grouped
 // by category text). Remembered for the session once seen; a restart re-checks.
 let categoryGroupColumnMissing = false;
+// Same for the Phase F review tracking columns (20261001100000): generated_recipe_ingredients.origin / override_policy
+// and generated_recipes.review_flags.
+let reviewColumnsMissing = false;
+function isMissingColumn(error, column) {
+  const text = `${error?.code || ''} ${error?.message || ''}`;
+  return /PGRST204|42703/.test(text) && text.includes(column);
+}
+// Inserts generated_recipe_ingredients rows; without the review columns (migration not applied), again without them.
+async function insertGeneratedIngredientRows(rows, context) {
+  let { error } = await supabase.from('generated_recipe_ingredients').insert(rows);
+  if (error && !reviewColumnsMissing && (isMissingColumn(error, 'origin') || isMissingColumn(error, 'override_policy'))) {
+    reviewColumnsMissing = true;
+    log.warn('[recipe-generator] review tracking columns are missing (migration 20261001100000 not applied) -- saving without them');
+    ({ error } = await supabase.from('generated_recipe_ingredients').insert(rows.map(({ origin, override_policy, ...r }) => r)));
+  }
+  if (error) throw supaFail(`${context}: insert generated_recipe_ingredients`, error);
+}
 function isMissingCategoryGroupColumn(error) {
   const text = `${error?.code || ''} ${error?.message || ''}`;
   return /PGRST204|42703/.test(text) && /source_category_group/.test(text);
@@ -1947,14 +1965,17 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
   // ingredient row only needs a SEPARATE check when this is true -- see lib/seafoodFilter.js's own
   // header comment for why this gating is what makes an otherwise-blunt keyword match safe here.
   const isStudentSeafoodBanned = isStudentSection(dish.section);
-  const processesRaw = (gen.processes && gen.processes.length > 0 ? gen.processes : [{ name: gen.name || dish.name, ingredients: [], method_steps: [], wastes: [] }])
+  // The nut / seafood filters, the chef's reviewed list respected (lib/reviewedRecipe.js, Phase F): each kept ingredient
+  // gets its origin ('reviewed' / 'added' / null), a nut match on one of HER ingredients is kept as a chef-confirmed
+  // override, student seafood is always removed (hers flagged), and her ingredients the recipe left out are flagged.
+  const marked = markRecipeIngredients(gen.processes || [], { reviewed: dish.reviewedIngredients, studentSeafoodBanned: isStudentSeafoodBanned });
+  if (marked.removed.length) log.info(`[recipe-generator] "${dish.name}": filters removed ${marked.removed.map((x) => `${x.name} (${x.policy})`).join(', ')}`);
+  const processesRaw = (marked.processes.length > 0 ? marked.processes : [{ name: gen.name || dish.name, ingredients: [], method_steps: [], wastes: [] }])
     .map((proc) => ({
       name: proc.name || dish.name,
       method: (proc.method_steps || []).join('\n'),
       ingredients: (proc.ingredients || [])
-        .filter((ing) => matchNutTerms(ing.name).length === 0)
-        .filter((ing) => !isStudentSeafoodBanned || matchSeafoodTerms(ing.name).length === 0)
-        .map((ing) => ({ name: ing.name, quantity: ing.quantity, unit: ing.unit, method: ing.method })),
+        .map((ing) => ({ name: ing.name, quantity: ing.quantity, unit: ing.unit, method: ing.method, origin: ing.origin ?? null, overridePolicy: ing.overridePolicy ?? null })),
       wastes: (proc.wastes || []).filter((w) => w.name && w.name.trim()),
     }))
     // A process that lost every ingredient to the nut/seafood filter and has no method either is
@@ -1980,15 +2001,24 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
     created_at: new Date().toISOString(),
   };
   const insertDraft = (row) => supabase.from('generated_recipes').insert(row).select('id').single();
-  let { data: inserted, error: insErr } = await insertDraft(
-    categoryGroupColumnMissing ? draftRow : { ...draftRow, source_category_group: dish.categoryGroup || null },
-  );
-  // generated_recipes.source_category_group (20260930100000, applied by hand) not there yet: save without it -- the
-  // lists then group this recipe by its category text instead.
-  if (insErr && !categoryGroupColumnMissing && isMissingCategoryGroupColumn(insErr)) {
-    categoryGroupColumnMissing = true;
-    log.warn('[recipe-generator] generated_recipes.source_category_group is missing (migration 20260930100000 not applied) -- saving drafts without it');
-    ({ data: inserted, error: insErr } = await insertDraft(draftRow));
+  const reviewFlags = reviewFlagsValue(marked.flags);
+  const withNewColumns = () => ({
+    ...draftRow,
+    ...(categoryGroupColumnMissing ? {} : { source_category_group: dish.categoryGroup || null }),
+    ...(reviewColumnsMissing ? {} : { review_flags: reviewFlags }),
+  });
+  // Columns from migrations applied by hand (20260930100000 source_category_group, 20261001100000 review_flags): one
+  // that isn't there yet is left out and the insert retried -- whichever is missing, in any order.
+  let { data: inserted, error: insErr } = await insertDraft(withNewColumns());
+  for (let attempt = 0; insErr && attempt < 2; attempt++) {
+    if (!categoryGroupColumnMissing && isMissingCategoryGroupColumn(insErr)) {
+      categoryGroupColumnMissing = true;
+      log.warn('[recipe-generator] generated_recipes.source_category_group is missing (migration 20260930100000 not applied) -- saving drafts without it');
+    } else if (!reviewColumnsMissing && isMissingColumn(insErr, 'review_flags')) {
+      reviewColumnsMissing = true;
+      log.warn('[recipe-generator] review tracking columns are missing (migration 20261001100000 not applied) -- saving drafts without them');
+    } else break;
+    ({ data: inserted, error: insErr } = await insertDraft(withNewColumns()));
   }
   if (insErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipes', insErr);
   const recipeId = inserted.id;
@@ -2009,10 +2039,10 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
       unit: ing.unit || null,
       method: ing.method || null,
       sort_order: i,
+      ...(reviewColumnsMissing ? {} : { origin: ing.origin ?? null, override_policy: ing.overridePolicy ?? null }),
     }));
     if (ingredientRows.length) {
-      const { error: ingErr } = await supabase.from('generated_recipe_ingredients').insert(ingredientRows);
-      if (ingErr) throw supaFail('persistGeneratedRecipeDraft: insert generated_recipe_ingredients', ingErr);
+      await insertGeneratedIngredientRows(ingredientRows, 'persistGeneratedRecipeDraft');
     }
 
     const wasteRows = [];
@@ -2245,12 +2275,13 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
       try {
         recipes = await generateDishRecipes({ items: payloadItems, existingWasteTypeNames });
       } catch (err) {
-        return { created: [], missing: batchDishes, declined: [], error: err.message };
+        return { created: [], missing: batchDishes, declined: [], incomplete: [], error: err.message };
       }
       const byIndex = new Map(recipes.map((r) => [r.index, r]));
       const created = [];
       const missing = [];
       const declined = [];
+      const incomplete = [];
       for (let idx = 0; idx < batchDishes.length; idx++) {
         const dish = batchDishes[idx];
         const gen = byIndex.get(idx);
@@ -2269,9 +2300,13 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
           continue;
         }
         if (gen.skipReason) { declined.push({ dish, reason: gen.skipReason }); continue; }
+        // Phase F: a recipe that leaves out one of the chef's reviewed ingredients (exact name, case / spacing aside)
+        // is incomplete -- retried once below; if still incomplete, saved flagged with what is missing.
+        const absent = missingReviewed(dish.reviewedIngredients, namesOfProcesses(gen.processes));
+        if (absent.length) { incomplete.push({ dish, gen, absent }); continue; }
         created.push({ dish, gen });
       }
-      return { created, missing, declined, error: null };
+      return { created, missing, declined, incomplete, error: null };
     }
 
     const batches = chunk(uniqueDishes, RECIPE_GEN_BATCH_SIZE);
@@ -2286,13 +2321,19 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
       if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
       let toPersist = result.created;
       let declined = result.declined;
-      if (result.missing.length) {
-        e.sender.send('recipe-generator-progress', { message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
-        const retry = await generateBatch(result.missing);
-        toPersist = [...toPersist, ...retry.created];
-        declined = [...declined, ...retry.declined];
-        if (retry.missing.length) {
-          failures.push(`${retry.missing.length} dish(es) still missing a recipe after retry -- skipped: ${retry.missing.map((d) => d.name).slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
+      const retryDishes = [...result.missing, ...result.incomplete.map((x) => x.dish)];
+      if (retryDishes.length) {
+        e.sender.send('recipe-generator-progress', { message: `Retrying ${retryDishes.length} dish(es) from batch ${b + 1} that didn't come back complete the first time…` });
+        const retry = await generateBatch(retryDishes);
+        // After the retry: complete answers, else the attempt that leaves out FEWER of her ingredients (saved flagged);
+        // a dish whose retry failed outright keeps its first, incomplete, recipe (lib/reviewedRecipe.js settleRetry).
+        const settled = settleRetry(result.incomplete, retry);
+        toPersist = [...toPersist, ...retry.created, ...settled.persist];
+        const done = settled.done;
+        declined = [...declined, ...retry.declined.filter((d) => !done.has(d.dish))];
+        const lost = retry.missing.filter((d) => !done.has(d));
+        if (lost.length) {
+          failures.push(`${lost.length} dish(es) still missing a recipe after retry -- skipped: ${lost.map((d) => d.name).slice(0, 10).join(', ')}${lost.length > 10 ? '…' : ''}`);
         }
       }
       if (declined.length) {
@@ -2359,11 +2400,14 @@ async function fetchGeneratedRecipeWithProcesses(id) {
   let ingredientRows = [];
   let wasteRows = [];
   if (processIds.length) {
-    const { data, error: ingErr } = await supabase
-      .from('generated_recipe_ingredients')
-      .select('id, process_id, name, quantity, unit, method, sort_order')
-      .in('process_id', processIds)
-      .order('sort_order');
+    // origin / override_policy (Phase F) come from a migration applied by hand: left out while missing.
+    const loadIngredients = (cols) => supabase.from('generated_recipe_ingredients').select(cols).in('process_id', processIds).order('sort_order');
+    const base = 'id, process_id, name, quantity, unit, method, sort_order';
+    let { data, error: ingErr } = await loadIngredients(reviewColumnsMissing ? base : `${base}, origin, override_policy`);
+    if (ingErr && !reviewColumnsMissing && (isMissingColumn(ingErr, 'origin') || isMissingColumn(ingErr, 'override_policy'))) {
+      reviewColumnsMissing = true;
+      ({ data, error: ingErr } = await loadIngredients(base));
+    }
     if (ingErr) throw supaFail('fetchGeneratedRecipeWithProcesses: load generated_recipe_ingredients', ingErr);
     ingredientRows = data;
 
@@ -2417,6 +2461,9 @@ async function fetchGeneratedRecipeWithProcesses(id) {
       unit: ri.unit,
       method: ri.method,
       sort_order: ri.sort_order,
+      // Phase F: 'reviewed' / 'added' / null, and a chef-confirmed override ('nut') -- shown on the draft form.
+      origin: ri.origin ?? null,
+      override_policy: ri.override_policy ?? null,
     };
     if (!ingredientsByProcess.has(ri.process_id)) ingredientsByProcess.set(ri.process_id, []);
     ingredientsByProcess.get(ri.process_id).push(ingredient);
@@ -2732,12 +2779,13 @@ ipcMain.handle('save-generated-recipe', async (e, payload) => {
         unit: ing.unit || null,
         method: ing.method || null,
         sort_order: idx,
+        // Phase F markers, carried through the form (a row she typed or renamed comes back with none).
+        ...(reviewColumnsMissing ? {} : { origin: ing.origin ?? null, override_policy: ing.overridePolicy ?? null }),
       });
     }
   }
   if (ingredientRows.length) {
-    const { error: insIngErr } = await supabase.from('generated_recipe_ingredients').insert(ingredientRows);
-    if (insIngErr) throw supaFail('save-generated-recipe: insert generated_recipe_ingredients', insIngErr);
+    await insertGeneratedIngredientRows(ingredientRows, 'save-generated-recipe');
   }
 
   const wasteRows = [];
