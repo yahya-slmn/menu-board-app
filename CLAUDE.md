@@ -263,10 +263,8 @@ Cubes" under Fruit Bar), nor Staff's "Water/soft drink" row.
 Recipes from before groups were saved are grouped by a guess from their category text (Staff "Main Dish" -> Other). The
 Drafts folder's "Re-group from the original menu..." (`preview-` / `apply-regroup-generated-recipes`, `lib/recipeRegroup.js`)
 re-reads the file they came from with the same rules (a Staff lunch main from its SAVED ingredients, no AI), previews, and
-writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. "Looks like: ..."
-under a recipe name: a near-identical name in the same menu and group (`lookAlikes`, containment or Dice >= 0.75, any word
-count) -- two recipes for one dish worded two ways; noted, never merged. `npm test` = the round trip + `scripts/recipe-groups-check.js`
-(98 checks on the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
+writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. `npm test` = the round trip + `scripts/recipe-groups-check.js`
+(the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
 (read-only) lists where every dish and every Staff main of real menus lands. Pipeline plan (phases A-F): A and B done; C Menu
 Ingredients prompt v2, D cross-section sharing, E / F Recipe Generator keeps the chef-reviewed ingredient list.
 

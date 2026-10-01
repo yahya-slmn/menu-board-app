@@ -5,12 +5,11 @@
 //   B. A Staff lunch main no student dish shares -> Main Hot Dish or Starch / Side Vegetables (staffMainGroup):
 //      meat or fish in the name (the chef's real dish names, including the ones the old keyword list missed), meat or
 //      fish in the ingredients, else the AI's role, else the plain-side-name fallback.
-//   C. "Looks like" pairs: the real near-duplicate spellings are noted, different dishes are not.
-//   D. The re-group planner: old recipes matched back to their menu file, Staff lunch mains decided from their saved
+//   C. The re-group planner: old recipes matched back to their menu file, Staff lunch mains decided from their saved
 //      ingredients, a recipe not in the file left out.
 // Pure functions only: no login, no database, no files.
 const { isExcludedCategory, isReadyMadeItem } = require('../lib/recipeGenerator');
-const { staffMainGroup, isLookAlike, categoryGroupInfo, CATEGORY_GROUPS } = require('../lib/recipeCategoryGroups');
+const { staffMainGroup, categoryGroupInfo, CATEGORY_GROUPS } = require('../lib/recipeCategoryGroups');
 const { planRegroup } = require('../lib/recipeRegroup');
 
 const failures = [];
@@ -60,17 +59,7 @@ expect(categoryGroupInfo('AM_SNACK_BREAKFAST').label, 'Breakfast', 'AM_SNACK_BRE
 expect(categoryGroupInfo('BREAKFAST').key, 'AM_SNACK_BREAKFAST', 'the pre-merge BREAKFAST key');
 expect(CATEGORY_GROUPS[0].key, 'AM_SNACK_BREAKFAST', 'Breakfast is the first group');
 
-// ---- C. look-alikes -----------------------------------------------------------------------------------------
-for (const [a, b] of [['Pizza Margarita dino', 'Pizza Margarita'], ['Chocolate danish', 'Choco danish'], ['Cheddar Cheese Croissants', 'Cheddar croissant'],
-  ['crepes ,,fish shape with cheese /honey &berries', 'crepes with cheese /honey &berries'], ['Vegan Grill Vegetable Wrap', 'Grilled Vegetables Wrap Vegan'],
-  ['Boiled Eggs \'\'chick" with Cheese/ cucumber /tomato/pita bred', 'Boiled Eggs with Cheese/ cucumber /tomato/pita bred'], ['Kiri & Halloumi Tomato Sandwich', 'Halloumi & Tomato Sandwich']]) {
-  expect(isLookAlike(a, b), true, `look-alike "${a}" / "${b}"`);
-}
-for (const [a, b] of [['Beef Kofta', 'Chicken Kofta'], ['White Rice', 'Saffron Tomato Rice'], ['Lentil Soup', 'Lentil Curry with White Rice'], ['Cheese Croissant', 'Cheese Croissant']]) {
-  expect(isLookAlike(a, b), false, `not a look-alike "${a}" / "${b}"`);
-}
-
-// ---- D. re-group planner ------------------------------------------------------------------------------------
+// ---- C. re-group planner ------------------------------------------------------------------------------------
 // Parsed rows of a menu (lib/menuIngredients.js parseWorkbookDishes shape), one day.
 const row = (sheetName, period, category, dishName, n) => ({ sheetName, rowNumber: n, date: '04-10-2026', weekday: 'SUNDAY', category, dishName, layout: sheetName === 'Staff' ? 'STAFF' : 'SCHOOL', period });
 const rows = [

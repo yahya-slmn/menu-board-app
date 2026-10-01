@@ -27,7 +27,8 @@ const SCHOOL_VOCAB = ['AM Snack', 'Milk', 'Lunch Bread', 'Lunch Main Course', 'L
 const args = process.argv.slice(2);
 const outAt = args.indexOf('--out');
 const outFile = outAt >= 0 ? args[outAt + 1] : null;
-const files = args.filter((a, i) => a !== '--out' && i !== outAt + 1).map((f) => f.replace(/^~(?=$|\/)/, os.homedir()));
+// Everything except --out and the path after it (with no --out, every argument is a menu file).
+const files = args.filter((a, i) => !(outAt >= 0 && (i === outAt || i === outAt + 1))).map((f) => f.replace(/^~(?=$|\/)/, os.homedir()));
 if (!files.length) { console.error('Usage: node scripts/recipe-groups-scan.js <menu.xlsx> ... [--out report.txt]'); process.exit(2); }
 
 const lines = [];

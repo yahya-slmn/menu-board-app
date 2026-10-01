@@ -4285,7 +4285,7 @@ async function renderRecipeListView(main, ns) {
               <tr>
                 <td><input type="checkbox" class="recipe-row-check" data-select="${r.id}" data-month="${group.key}" ${selected.has(r.id) ? 'checked' : ''} /></td>
                 <td>${r.code}</td>
-                <td>${r.name}${recipeLookAlikeHtml(r)}</td>
+                <td>${r.name}</td>
                 <td>${r.category || '–'}</td>
                 <td>${r.prepared_by || '–'}</td>
                 <td>${r.date_created || '–'}</td>
@@ -6249,12 +6249,6 @@ function sortDayGroups(entries) { // entries: [[dayLabel|null, rows], ...] in fi
 // within a group, recipes keep the list's own order. Returns table-body HTML: a day heading row (only when some row
 // has a day -- a list with none gets category headings alone), a category heading row, then rowMarkup(recipe) per row.
 const rgEscape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// "Looks like: ..." under a recipe's name: another recipe of the same menu and group worded almost the same (main.js
-// looks_like). Two recipes for one dish that the dedup couldn't join -- shown, never merged; she deletes the extra one.
-function recipeLookAlikeHtml(r) {
-  const names = r.looks_like || [];
-  return names.length ? `<div class="rg-lookalike">Looks like: ${names.map(rgEscape).join(' · ')}</div>` : '';
-}
 
 function recipeDayCategoryRowsHtml(recipes, colspan, rowMarkup) {
   const byDay = new Map();
@@ -6460,7 +6454,7 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   function rowMarkup(d) {
     return `
       <tr>
-        <td>${d.name}${recipeLookAlikeHtml(d)}</td>
+        <td>${d.name}</td>
         <td>${d.category || '–'}</td>
         <td>${d.source_menu_label || '–'}</td>
         <td>${new Date(d.created_at).toLocaleDateString()}</td>

@@ -49,15 +49,8 @@ const MATERIALS = [
 ];
 // Recipe Generator lists, shaped as main.js returns them (listGeneratedRecipesWithGroups: the saved group, else a guess from
 // the category text). Days deliberately out of order and a Staff "Main Dish" with its group saved, plus one without.
-const { categoryGroupOfRecipe, lookAlikes } = require('../../lib/recipeCategoryGroups.js');
+const { categoryGroupOfRecipe } = require('../../lib/recipeCategoryGroups.js');
 const withGroup = (r) => { const g = categoryGroupOfRecipe(r); return { ...r, category_group: g.key, category_group_label: g.label, category_group_order: g.order, category_group_saved: !!r.source_category_group }; };
-// looks_like within one menu and group, as main.js listGeneratedRecipesWithGroups adds it.
-function withLookAlikes(rows) {
-  const buckets = new Map();
-  for (const r of rows) { const k = `${r.source_menu_label}|${r.category_group}`; if (!buckets.has(k)) buckets.set(k, []); buckets.get(k).push(r); }
-  for (const list of buckets.values()) { const a = lookAlikes(list.map((r) => r.name)); for (const r of list) r.looks_like = a.get(r.name) || []; }
-  return rows;
-}
 const GEN_MENU = '13_09_2026 week_4.xlsx';
 const GEN = [
   ['Monday 05-10-2026', 'Chicken Freekeh with Roasted Vegetables and Yogurt Sauce', 'Lunch Main', 'MAIN'],
@@ -74,16 +67,13 @@ const GEN = [
   ['Sunday 04-10-2026', 'Oat Cookies', 'PM Snack', null],
   ['Monday 05-10-2026', 'Spinach Fatayer', 'AM Snack', 'AM_SNACK_BREAKFAST'],
   ['Monday 05-10-2026', 'Grilled Chicken Caesar-style Salad', 'Option 3', 'LUNCH_BOX'],
-  // A shared dish worded two ways (two recipes; each shows "Looks like: ..."), and a Staff main made before groups were
-  // saved (no group: Other, and the folder offers "Re-group from the original menu...").
-  ['Monday 05-10-2026', 'Pizza Margarita dino', 'AM Snack', 'AM_SNACK_BREAKFAST'],
-  ['Monday 05-10-2026', 'Pizza Margarita', 'Main Dish', 'AM_SNACK_BREAKFAST'],
+  // A Staff main made before groups were saved (no group: Other, and the folder offers "Re-group from the original menu...").
   ['Monday 05-10-2026', 'Lentil Curry with Rice Vegan', 'Main Dish', null],
 ];
 const genRow = ([day, name, category, group], i) => withGroup({ id: 500 + i, name, category, source_menu_label: GEN_MENU, source_dish_name: name,
   source_day_label: day, source_category_group: group, created_at: '2026-09-30T10:00:00Z', code: `RG-${String(100 + i).padStart(5, '0')}`, date_created: '2026-09-30' });
-const GEN_DRAFTS = withLookAlikes(GEN.map(genRow));
-const GEN_CONFIRMED = withLookAlikes(GEN.map((r, i) => genRow(r, i + 100)));
+const GEN_DRAFTS = GEN.map(genRow);
+const GEN_CONFIRMED = GEN.map((r, i) => genRow(r, i + 100));
 
 const handlers = {
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,

@@ -49,7 +49,7 @@ const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
 } = require('./lib/recipeGenerator');
-const { categoryGroupFor, categoryGroupInfo, categoryGroupOfRecipe, staffMainGroup, lookAlikes } = require('./lib/recipeCategoryGroups');
+const { categoryGroupFor, categoryGroupInfo, categoryGroupOfRecipe, staffMainGroup } = require('./lib/recipeCategoryGroups');
 const { planRegroup } = require('./lib/recipeRegroup');
 
 let mainWindow;
@@ -2497,18 +2497,6 @@ async function listGeneratedRecipesWithGroups(context, status, columns, orderBy)
     // the Drafts folder's "Re-group from the original menu..." can fill in.
     return { ...r, category_group: g.key, category_group_label: g.label, category_group_order: g.order, category_group_saved: !!r.source_category_group };
   });
-  // looks_like: the same dish worded two ways in one menu gets two recipes (the dedup only merges same-word-count
-  // spellings), so near-identical names within one source menu and one group are NOTED here -- never merged.
-  const buckets = new Map();
-  for (const r of rows) {
-    const key = `${r.source_menu_label || ''}|${r.category_group}`;
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(r);
-  }
-  for (const list of buckets.values()) {
-    const alike = lookAlikes(list.map((r) => r.name));
-    for (const r of list) r.looks_like = [...new Set(alike.get(r.name) || [])];
-  }
   return rows;
 }
 
