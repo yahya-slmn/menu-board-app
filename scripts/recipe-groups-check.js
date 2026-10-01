@@ -8,7 +8,7 @@
 //   C. The re-group planner: old recipes matched back to their menu file, Staff lunch mains decided from their saved
 //      ingredients, a recipe not in the file left out.
 // Pure functions only: no login, no database, no files.
-const { isExcludedCategory, isReadyMadeItem } = require('../lib/recipeGenerator');
+const { isExcludedCategory, isReadyMadeItem, dedupeWithinUpload, reviewedIngredientsOf } = require('../lib/recipeGenerator');
 const { staffMainGroup, categoryGroupInfo, CATEGORY_GROUPS } = require('../lib/recipeCategoryGroups');
 const { planRegroup } = require('../lib/recipeRegroup');
 
@@ -93,6 +93,37 @@ const got = Object.fromEntries(plan.assignments.map((a) => [a.id, a.group]));
 const want = { 1: 'AM_SNACK_BREAKFAST', 2: 'AM_SNACK_BREAKFAST', 3: 'MAIN', 4: 'SIDES', 5: 'SIDES', 6: 'MAIN', 7: 'MAIN', 8: 'LUNCH_BOX' };
 for (const [id, g] of Object.entries(want)) expect(got[id], g, `re-group recipe ${id} (${recipes[id - 1].name})`);
 expect(plan.notFound.map((n) => n.id).sort().join(','), '10,9', 're-group: not found in the file');
+
+// ---- D. reviewed lists (Phase E): one recipe per dish AND list -------------------------------------------------
+const rv = (sheetName, section, dishName, list, extra = {}) => ({ sheetName, section, dishName, category: 'Lunch Main Course', period: 'Lunch',
+  dayLabel: 'Monday 05-10-2026', categoryGroup: 'MAIN', reviewedIngredients: reviewedIngredientsOf(list), ...extra });
+expect(JSON.stringify(reviewedIngredientsOf('Brown bread - butter -  - butter ')), JSON.stringify(['Brown bread', 'butter']), 'reviewed list from a cell');
+expect(reviewedIngredientsOf(''), null, 'an empty cell is no list');
+const dd = dedupeWithinUpload([
+  rv('MS - UP (B-G)', 'MS_UP', 'Zucchini Gratin', 'zucchini - eggs - milk - parmesan cheese'),
+  rv('KG - LP', 'KG_LP', 'zucchini gratin', 'Parmesan Cheese - zucchini - milk - eggs'),                   // same list, other order / case
+  rv('Staff', 'STAFF', 'Zucchini Gratin', 'zucchini - milk - butter - all-purpose flour', { category: 'Main Dish' }), // edited for Staff
+  rv('Daycare', 'DAYCARE', 'Zucchini Gratin', null),                                                       // no list: joins the first
+  rv('MS - UP (B-G)', 'MS_UP', 'Brown Bread Toast', null),
+  rv('Staff', 'STAFF', 'Brown Bread Toast', 'brown bread - butter', { category: 'Main Dish' }),           // a list for a version without one
+]);
+const zg = dd.filter((d) => /zucchini gratin/i.test(d.name));
+expect(zg.length, 2, 'Zucchini Gratin: one recipe per reviewed list (MS-UP / KG-LP share one, Staff edited its own)');
+expect(JSON.stringify(zg.map((d) => d.recipeName)), JSON.stringify([null, 'Zucchini Gratin (Staff)']), 'the edited version gets a distinct recipe name');
+expect(((zg[1] && zg[1].reviewedIngredients) || []).join(' - '), 'zucchini - milk - butter - all-purpose flour', "Staff's version keeps its own list");
+expect(zg[0].section, 'MS_UP', 'the shared version stays the school one');
+const bt = dd.filter((d) => /brown bread toast/i.test(d.name));
+expect(bt.length, 1, 'a version without a list takes the first list that comes, no second recipe');
+expect(bt[0].reviewedIngredients && bt[0].reviewedIngredients.join(' - '), 'brown bread - butter', 'and carries it');
+const plain = dedupeWithinUpload([rv('KG - LP', 'KG_LP', 'Rice', null), rv('MS - UP (B-G)', 'MS_UP', 'rice', null)]);
+expect(plain.length, 1, 'plain menu (no lists): merged by name, as before');
+expect(plain[0].reviewedIngredients, null, 'and carries no list');
+const clash = dedupeWithinUpload([
+  rv('Staff', 'STAFF', 'Lentil Soup', 'lentils - onion', { dayLabel: 'Sunday 04-10-2026' }),
+  rv('Staff', 'STAFF', 'Lentil Soup', 'lentils - carrot', { dayLabel: 'Monday 05-10-2026' }),
+  rv('Staff', 'STAFF', 'Lentil Soup', 'lentils - cumin', { dayLabel: 'Tuesday 06-10-2026' }),
+]);
+expect(JSON.stringify(clash.map((d) => d.recipeName)), JSON.stringify([null, 'Lentil Soup (Staff)', 'Lentil Soup (Staff, Tuesday 06-10-2026)']), 'names stay distinct within one section');
 
 if (failures.length) {
   console.log(`FAILED (${failures.length} of ${count}):\n  ${failures.join('\n  ')}`);

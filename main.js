@@ -49,7 +49,7 @@ const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWor
 const { planCatalogImport } = require('./lib/catalogImport');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
-  normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection,
+  normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
 } = require('./lib/recipeGenerator');
 const { categoryGroupFor, categoryGroupInfo, categoryGroupOfRecipe, staffMainGroup } = require('./lib/recipeCategoryGroups');
 const { planRegroup } = require('./lib/recipeRegroup');
@@ -1969,7 +1969,8 @@ async function persistGeneratedRecipeDraft({ dish, gen, sourceMenuLabel, wasteTy
 
   const draftRow = {
     status: 'draft',
-    name: gen.name || dish.name,
+    // A later version of a name (a different reviewed list, e.g. edited for Staff) keeps its distinct name.
+    name: dish.recipeName || gen.name || dish.name,
     category: dish.category || null,
     quantity_produced: producedNet > 0 ? `${producedNet} G` : null,
     date_created: new Date().toISOString().slice(0, 10),
@@ -2185,6 +2186,9 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
       // Worked out here, from the row's own label AND meal period (Staff's "Main Dish" is Breakfast's or Lunch's), and
       // saved with the draft -- the period isn't stored anywhere else.
       categoryGroup: categoryGroupFor({ category: r.category, period: r.period }),
+      // The chef's reviewed list, when the file is a Menu Ingredients export (its Ingredients column); null for a
+      // plain menu. Dedup keeps a different list for the same dish as its own recipe (Phase E).
+      reviewedIngredients: reviewedIngredientsOf(r.ingredientsText),
     })),
   );
 
@@ -2233,6 +2237,9 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
         separateDressing: isSaladCategory(d.category),
         // A Staff lunch main no student dish shares: the model says whether it is a main or a side (ROLE_RULE).
         askRole: !!d.staffMainRole,
+        // The chef's reviewed ingredient list (Phase E): the recipe must use every one, name unchanged, and may only
+        // add what the method needs (REVIEWED_LIST_RULE). Absent for a dish with no reviewed list.
+        ...(d.reviewedIngredients ? { reviewedIngredients: d.reviewedIngredients } : {}),
       }));
       let recipes;
       try {
@@ -2254,6 +2261,13 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
         // this for her review, don't attempt a substitute-protein version (unlike the nut policy,
         // which does substitute) and don't retry it as "missing" either -- the model DID answer,
         // it just correctly declined.
+        // A dish whose reviewed list has no seafood is not a seafood dish, whatever the model says (Phase E trial: a
+        // batch of 8 once skipped "Pasta Primavera with beef" as seafood; alone it never did) -- treated as not
+        // answered, so it goes through the retry below instead of being dropped.
+        if (gen.skipReason && dish.reviewedIngredients && !dish.reviewedIngredients.some((x) => matchSeafoodTerms(x).length)) {
+          missing.push(dish);
+          continue;
+        }
         if (gen.skipReason) { declined.push({ dish, reason: gen.skipReason }); continue; }
         created.push({ dish, gen });
       }
@@ -2321,6 +2335,9 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
 
   return {
     success: true, createdCount, dishCount: uniqueDishes.length, failures,
+    // For the banner: dishes whose ingredients the chef reviewed (from a Menu Ingredients export) and those she didn't.
+    reviewedCount: uniqueDishes.filter((d) => d.reviewedIngredients).length,
+    unreviewedCount: uniqueDishes.filter((d) => !d.reviewedIngredients).length,
   };
 });
 

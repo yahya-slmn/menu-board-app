@@ -64,6 +64,9 @@ interface DishItem {
   // Computed in main.js: true only for a Staff lunch "Main Dish" no student dish shares (see ROLE_RULE). The app
   // files that recipe under Main Hot Dish or Starch / Side Vegetables by the "role" returned for it.
   askRole: boolean;
+  // Phase E (2026-10-01): the chef's reviewed ingredient list from a Menu Ingredients export, when there is one
+  // (main.js reviewedIngredientsOf). See REVIEWED_LIST_RULE. Absent for an older app or a plain menu.
+  reviewedIngredients?: string[];
 }
 
 const RECIPE_SCHEMA = {
@@ -176,6 +179,17 @@ When "separateDressing" is true (the dish is in a Salad category) and the salad 
 
 When "separateDressing" is false or absent, ignore this rule: follow the normal process rule (one process for a simple dish) even if the dish happens to include a dressing.`;
 
+// Added 2026-10-01 (Menu Ingredients -> Recipe Generator pipeline, Phase E). The chef reviews each dish's ingredients
+// in the Menu Ingredients Generator first; the recipe must then be built on HER list, not a fresh guess. The model may
+// only add what the method needs. Her level of detail wins over DECOMPOSITION_RULE ("brown bread" stays one ingredient).
+// The app checks in code that every listed ingredient is there (Phase F).
+const REVIEWED_LIST_RULE = `Some items carry "reviewedIngredients": the ingredient list a chef has already reviewed for this dish. For such an item:
+- Use EVERY ingredient on that list, each with its name exactly as written (same words; you may only change letter case). Never drop one, never rename or reword one, never split one into its parts, never replace one with something else.
+- The chef's level of detail wins over the decomposition rule: if the list says "brown bread", "puff pastry" or "tomato sauce", that is ONE ingredient row with that name -- do not break it into flour, yeast, butter or the like.
+- You may ADD only what the method truly needs and the list leaves out -- e.g. oil to fry or grease, water to boil or bind, salt for seasoning. Add nothing else.
+- The school's restrictions still apply to anything you add.
+Items without "reviewedIngredients" follow the normal rules.`;
+
 // Added 2026-09-30 (Recipe Generator category groups). Staff's lunch "Main Dish" row holds both the centre of the plate
 // and plain accompaniments (rice, potatoes, vegetables) under one label; the app groups recipes by what the dish IS on
 // the plate, so for the Staff mains no student dish shares (askRole, decided in main.js) the model says which. Meat or
@@ -246,10 +260,13 @@ ${SALAD_DRESSING_RULE}
 
 ${ROLE_RULE}
 
+${REVIEWED_LIST_RULE}
+
 For each dish, generate:
 - "name": the dish name (use the given name, cleaned up if needed).
 - "skipReason": see the seafood restriction above -- null unless you are genuinely declining this specific item.
 - "role": see the role rule above -- "main" or "side" only for an item with "askRole" true, otherwise null.
+- For an item with "reviewedIngredients": every listed ingredient appears, name unchanged (see the reviewed-list rule above); you only add what the method needs.
 - "processes": one or more named sub-recipes. Use exactly ONE process, named after the dish itself, for a simple dish (except a dish flagged "separateDressing", which follows the salad rule above). Split into multiple named processes (e.g. "Dough", "Filling", "Topping") only when the dish genuinely has distinct components that would be prepared separately in a real kitchen. Empty array only when "skipReason" is set.
 - Each process's "ingredients": every real base ingredient it needs, each with a realistic quantity for a normal/standard batch of this dish (NOT scaled to any particular total -- just a natural, realistic recipe). See the units rule above for how quantity/unit must be expressed -- it applies to every ingredient, no exceptions. "method" on an ingredient is a short prep note (e.g. "diced", "melted"), or null if none.
 - Each process's "method_steps": one array entry per distinct preparation step, in order.
@@ -306,6 +323,12 @@ Deno.serve(async (req) => {
     return ok({ success: false, error: `Too many items to generate (max ${MAX_ITEMS})` });
   }
   for (const it of items) {
+    if (it && it.reviewedIngredients != null) {
+      const list = it.reviewedIngredients;
+      if (!Array.isArray(list) || list.length > 60 || list.some((x) => typeof x !== "string" || !x.trim() || x.length > MAX_NAME_LENGTH)) {
+        return ok({ success: false, error: "An item's reviewedIngredients must be a list of up to 60 short ingredient names" });
+      }
+    }
     if (!it || typeof it.index !== "number" || typeof it.name !== "string" || !it.name.trim()) {
       return ok({ success: false, error: "Every item needs a numeric index and a non-empty name" });
     }

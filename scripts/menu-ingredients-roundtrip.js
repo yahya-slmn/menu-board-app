@@ -14,6 +14,7 @@
 //      Ingredients and one Allergens column, with the new values.
 //   4. An Ingredients column moved LEFT of the dish column is still never read as the dish column (before the
 //      parser named these columns, a left-most tie-break picked it).
+//   4b. A day whose header lost its "Ingredients" label (older exports) still reads its list from the sheet's column.
 //   5. Every category the Recipe Generator makes recipes for lands in its category group (lib/recipeCategoryGroups.js)
 //      from the label and meal period as they read back from the export -- Staff's "Main Dish" by its period. The
 //      school categories carry their REAL printed names ("Lunch Main Course", "Lunch Starch/Side"...).
@@ -188,6 +189,18 @@ async function reload(workbook) {
     const moved = await parseWorkbookDishes(await reload(wb), schoolCategoryNames);
     check(moved.rows.map((r) => r.dishName).join(',') === 'Chicken Freekeh,Vermicelli Rice', `Ingredients moved left: read dishes "${moved.rows.map((r) => r.dishName).join(', ')}"`);
     check(moved.rows[0] && moved.rows[0].ingredientsText === 'chicken thighs - freekeh - onion - olive oil', 'Ingredients moved left: ingredients not read from their own column');
+
+    // ---- 4b. a day whose header lost its Ingredients label (files exported before the parser read "date + note")
+    const legacy = new ExcelJS.Workbook();
+    const lw = legacy.addWorksheet('Staff');
+    lw.addRow(['MONDAY', '28-09-2026', 'Main Dish', 'Ingredients', 'Allergens']);
+    lw.addRow(['Breakfast', 'Main Dish', 'Shakshuka', 'eggs - tomatoes - onion', 'egg']);
+    lw.addRow(['TUESDAY', '29-09-2026 Arminian Day', '', 'lavash bread - grilled meat - tomatoes', 'gluten']); // label overwritten
+    lw.addRow(['Breakfast', 'Main Dish', 'Crepe with Cottage Cheese', 'all-purpose flour - eggs - milk - cottage cheese', 'gluten - egg - dairy']);
+    const lr = await parseWorkbookDishes(await reload(legacy), schoolCategoryNames);
+    const tue = lr.rows.find((r) => r.date === '29-09-2026');
+    check(tue && tue.dishName === 'Crepe with Cottage Cheese', `legacy day: dish read as "${tue && tue.dishName}"`);
+    check(tue && tue.ingredientsText === 'all-purpose flour - eggs - milk - cottage cheese', `legacy day: ingredients "${tue && tue.ingredientsText}" (the sheet's own Ingredients column)`);
 
     // ---- 5. category groups from what the export says ------------------------------------------------------
     // A row's own label and period -> its group (categories the Recipe Generator skips -- bread, milk, juice, fruit,

@@ -6202,6 +6202,23 @@ function renderRecipeGeneratorView(main) {
   return renderRecipeGeneratorTabs(main, ns);
 }
 
+// The banner under the upload button after an upload with dishes the chef hadn't reviewed (Phase E): their
+// ingredients are the AI's own guess, not her Menu Ingredients review. Stays until the next upload or until dismissed.
+function renderRgReviewNotice(s) {
+  const el = document.getElementById('rg-review-notice');
+  if (!el) return;
+  const n = s.reviewNotice;
+  el.innerHTML = !n ? '' : `
+    <div class="rg-review-notice" role="status">
+      <strong>${n.unreviewed === n.total ? 'No reviewed ingredient list' : `${n.unreviewed} of ${n.total} dishes had no reviewed ingredient list`}</strong>
+      in "${String(n.fileName).replace(/</g, '&lt;')}" -- ${n.unreviewed === n.total ? 'the AI chose every recipe\'s ingredients' : 'the AI chose their ingredients'}.
+      For recipes built on reviewed ingredients, upload the file exported from the Menu Ingredients Generator.
+      <button type="button" class="rg-review-dismiss" aria-label="Dismiss">Dismiss</button>
+    </div>`;
+  const btn = el.querySelector('.rg-review-dismiss');
+  if (btn) btn.addEventListener('click', () => { s.reviewNotice = null; renderRgReviewNotice(s); });
+}
+
 async function renderRecipeGeneratorTabs(main, ns) {
   const s = state[ns.stateKey];
   main.innerHTML = `
@@ -6213,6 +6230,7 @@ async function renderRecipeGeneratorTabs(main, ns) {
     </div>
     <input type="file" id="rg-file-input" accept=".xlsx" hidden />
     <div id="rg-progress-wrap"></div>
+    <div id="rg-review-notice"></div>
     ${s.fileName ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">Last upload: "${s.fileName}"</div>` : ''}
     <div class="mode-toggle" style="margin-bottom:16px; max-width:360px;">
       <button type="button" class="mode-toggle-btn ${s.activeTab === 'drafts' ? 'active' : ''}" data-rg-tab="drafts">Drafts</button>
@@ -6220,6 +6238,7 @@ async function renderRecipeGeneratorTabs(main, ns) {
     </div>
     <div id="rg-tab-content"></div>
   `;
+  renderRgReviewNotice(s);
 
   document.getElementById('rg-upload-btn').addEventListener('click', () => {
     document.getElementById('rg-file-input').click();
@@ -6258,7 +6277,13 @@ async function renderRecipeGeneratorTabs(main, ns) {
       // createdCount when a batch genuinely failed/timed out (see `failures`), not because
       // anything was intentionally skipped.
       const summary = `Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s).`;
-      alert(`${summary} Review them in the Drafts tab.${warningNote}`);
+      // Phase E: dishes with no reviewed ingredient list (a plain menu, not a Menu Ingredients export) are generated as
+      // before, from the AI's own guess -- said plainly, here and in a banner that stays until the next upload.
+      s.reviewNotice = result.unreviewedCount ? { fileName: file.name, unreviewed: result.unreviewedCount, total: result.dishCount } : null;
+      const reviewNote = result.unreviewedCount
+        ? `\n\n${result.unreviewedCount} of ${result.dishCount} dish(es) had no reviewed ingredient list, so the AI chose their ingredients.` : '';
+      alert(`${summary} Review them in the Drafts tab.${reviewNote}${warningNote}`);
+      renderRgReviewNotice(s);
       s.activeTab = 'drafts';
       s.draftFolder = null;
       renderRecipeGeneratorTabs(main, ns);

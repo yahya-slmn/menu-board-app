@@ -266,7 +266,7 @@ re-reads the file they came from with the same rules (a Staff lunch main from it
 writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. `npm test` = the round trip + `scripts/recipe-groups-check.js`
 (the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
 (read-only) lists where every dish and every Staff main of real menus lands. Pipeline plan (phases A-F): A and B done; C Menu
-Ingredients prompt v2.2 built (live with the next release), D cross-section sharing done, E / F Recipe Generator keeps the chef-reviewed ingredient list.
+Ingredients prompt v2.2 built (live with the next release), D cross-section sharing done, E Recipe Generator reads the reviewed list (prompt live with the release), E / F Recipe Generator keeps the chef-reviewed ingredient list.
 
 **Menu Ingredients Generator prompt v2.2** (2026-10-01, pipeline Phase C; **built, NOT deployed live**: the live
 `suggest-dish-ingredients` stays on the old prompt (v11) until the app release from this branch, and both go out the SAME
@@ -303,6 +303,23 @@ the same section on another day (confirmed with the chef). Two safety conditions
 CEO row (edits only flow to rows as strict or less strict), and a row follows only when its own filtered result equals
 the source's, so "Same as" is always true. Red removal notes and the basis show only on rows holding their own result.
 September x4: 318 of 1,545 rows follow (KG-LP -> MS-UP 144, Daycare -> KG-LP 59, -> MS-UP 56, school -> Staff 59).
+
+**Recipe Generator reads the reviewed list** (2026-10-01, pipeline Phase E; the prompt rule is **built, NOT deployed
+live** -- it goes out with the release, like Phase C). Uploading a Menu Ingredients export: each row's Ingredients cell
+becomes `reviewedIngredients` (`reviewedIngredientsOf`; a day whose header lost its "Ingredients" label -- older exports
+-- takes the sheet's own column, `parseWorkbookDishes`). `dedupeWithinUpload` merges rows only when the name matches AND
+the reviewed lists match (case / spacing / order ignored), so a copy edited for one section gets its own recipe, named
+"Dish (Staff)" (or "(Staff, <day>)") via `recipeName`; a row with no list joins its name's first version, as before.
+Each generation item carries `reviewedIngredients`; `generate-dish-recipes` REVIEWED_LIST_RULE: every listed ingredient,
+name unchanged, never dropped / renamed / split, the chef's level of detail wins over the decomposition rule, and only
+what the method needs may be added. A seafood skip is accepted only if the reviewed list has seafood (else the dish is
+retried: a batch of 8 once skipped "Pasta Primavera with beef"). An upload with dishes that had no list shows an alert
+and a banner ("12 of 40 dishes had no reviewed ingredient list ... the AI chose their ingredients"); nothing is refused.
+Trial (`scripts/mi-trial-export.js` -> a v2.2 Menu Ingredients export of a real menu with chef-style edits;
+`scripts/rg-prompt-trial.js`, the live prompt vs the temporary `generate-dish-recipes-trial`): 272/273 reviewed
+ingredients kept verbatim on the v2.2 file (today's prompt: 70%), 117/118 on an older real export (today: 65%); the
+additions are method basics. Phase F (code check of every reviewed ingredient + retry + flag, per-ingredient origin,
+chef-confirmed override) is still to come. Release day also deletes `generate-dish-recipes-trial`.
 
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its
