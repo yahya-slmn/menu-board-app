@@ -266,7 +266,7 @@ re-reads the file they came from with the same rules (a Staff lunch main from it
 writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. `npm test` = the round trip + `scripts/recipe-groups-check.js`
 (the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
 (read-only) lists where every dish and every Staff main of real menus lands. Pipeline plan (phases A-F): A and B done; C Menu
-Ingredients prompt v2.2 built (live with the next release), D cross-section sharing, E / F Recipe Generator keeps the chef-reviewed ingredient list.
+Ingredients prompt v2.2 built (live with the next release), D cross-section sharing done, E / F Recipe Generator keeps the chef-reviewed ingredient list.
 
 **Menu Ingredients Generator prompt v2.2** (2026-10-01, pipeline Phase C; **built, NOT deployed live**: the live
 `suggest-dish-ingredients` stays on the old prompt (v11) until the app release from this branch, and both go out the SAME
@@ -288,6 +288,21 @@ the live prompt with the one deployed as the TEMPORARY `suggest-dish-ingredients
 it at the live deploy) and writes an Excel report. On September week_04: cooked dishes 7.4 -> 9.8 ingredients, school
 mains 9.2 -> 12.8, 45 of 265 dishes regional. Release-day steps: deploy `suggest-dish-ingredients` (`--use-api`), delete
 the trial function, release the app.
+
+**Menu Ingredients cross-section sharing** (2026-10-01, pipeline Phase D). An upload is read in three steps (main.js
+`parse-and-suggest-menu-ingredients`): read + parse every file; ONE suggestion pass for the whole upload -- one AI call
+per dish name ignoring case and spacing, whatever files / sections it is on (September x4: 833 calls, was 1,010 per
+file); then each row gets that answer cleaned for its OWN section (`cleanSuggestion` with `rowSeafoodAllowed`: Staff's
+Tuna Sandwich keeps its tuna, KG-LP's loses it with a red note -- prompt v2.2 lists a real seafood dish's real
+ingredients, so one answer serves both). A row serving the same dish the same DAY as an earlier row of another section
+(another sheet, or another file of the upload) FOLLOWS it (`lib/menuIngredientsShare.js` `planShares`): read-only, "Same
+as Daycare's Cheese Croissant -- not repeated" (+ the file name when another file), "Edit for this section" makes it her
+own editable copy, "Use Daycare's again" re-links it to the source's current text; editing the source updates every row
+still following it, on screen and in the rows the export sends, so the exported file has full text on every row. Never
+the same section on another day (confirmed with the chef). Two safety conditions: a student row never follows a Staff /
+CEO row (edits only flow to rows as strict or less strict), and a row follows only when its own filtered result equals
+the source's, so "Same as" is always true. Red removal notes and the basis show only on rows holding their own result.
+September x4: 318 of 1,545 rows follow (KG-LP -> MS-UP 144, Daycare -> KG-LP 59, -> MS-UP 56, school -> Staff 59).
 
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its

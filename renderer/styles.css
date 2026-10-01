@@ -1648,3 +1648,8 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
    recipe basis the AI used ("Regional: Kabsa (Saudi)" / "General") -- on screen only, never exported. */
 .mi-removed-note { margin-top: 4px; font-size: 11.5px; color: var(--danger); }
 .mi-basis { margin-top: 4px; font-size: 11.5px; color: var(--neutral); }
+/* A row following another section's same-day row ("Same as Daycare's ... -- not repeated"): read-only boxes, a muted
+   note, and a quiet text button to edit it for this section or go back. */
+.mi-share-note { margin-top: 4px; font-size: 11.5px; color: var(--neutral); }
+.mi-share-btn { margin-left: 6px; padding: 0; border: 0; background: none; color: var(--sage); font: inherit; font-size: 11.5px; font-weight: 600; text-decoration: underline; cursor: pointer; }
+.mi-ingredients-input[readonly], .mi-allergens-input[readonly] { background: var(--paper-dim); color: var(--neutral); }

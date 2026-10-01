@@ -28,7 +28,8 @@ const { estimateDensity, toDensityItem } = require('./lib/estimateDensity');
 const { estimateDensityCached } = require('./lib/densityCache');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
 const { matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
-const { dishesForSuggestion, toPayloadItem, cleanSuggestion } = require('./lib/menuIngredientsRequest');
+const { dishesForSuggestion, toPayloadItem, cleanSuggestion, rowSeafoodAllowed } = require('./lib/menuIngredientsRequest');
+const { planShares, shareName, rowKey: shareRowKey } = require('./lib/menuIngredientsShare');
 const { matchSeafoodTerms } = require('./lib/seafoodFilter');
 const {
   loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients,
@@ -1431,12 +1432,9 @@ function schoolCategoryVocabulary() {
   return [...codes].map(code => getCategoryByCode(code)?.name).filter(Boolean);
 }
 
-// Extracted so a whole batch of dishes (across every file in the upload) shares the same AI-call
-// logic, not scoped to any one file -- has no dependency on which file it's currently running for.
-// batchDishes: lib/menuIngredientsRequest.js dishesForSuggestion entries (name + its context). Every answer goes
-// through the school's rules IN CODE (cleanSuggestion -> lib/menuIngredientFilters.js: nut / sesame, spicy, halal,
-// and seafood for a dish students eat), whatever the prompt managed; each removal is kept for the row's note.
-// Never applied to Recipe Extractor (extract-recipe) -- that transcribes a REAL recipe.
+// One batch of dishes (from every file in the upload) to suggest-dish-ingredients. batchDishes: lib/
+// menuIngredientsRequest.js dishesForSuggestion entries (name + its first row's context). Returns the RAW answers by
+// dish key -- each row is cleaned for its own section afterwards (cleanSuggestion), never here.
 async function suggestBatch(batchDishes) {
   const payloadItems = batchDishes.map((dish, idx) => toPayloadItem(dish, idx));
   let estimates;
@@ -1451,7 +1449,7 @@ async function suggestBatch(batchDishes) {
   batchDishes.forEach((dish, idx) => {
     const est = byIndex.get(idx);
     if (!est) { missing.push(dish); return; }
-    written.set(dish.name, cleanSuggestion(est, dish));
+    written.set(dish.key, est);
   });
   return { written, missing, error: null };
 }
@@ -1462,20 +1460,11 @@ function chunk(arr, size) {
   return out;
 }
 
-// Processes ONE uploaded file end to end: read -> parse -> AI-suggest ingredients/allergens per
-// unique dish name -> nut-filter -> annotate every row. Populates menuIngredientsFiles[fileIndex]
-// on success, so export-menu-ingredients can find this exact file's in-memory workbook later by
-// the same fileIndex the renderer already has. Every progress event is tagged with fileIndex (and
-// fileName, for convenience) so the renderer can route it to that file's own progress row --
-// mirrors clean-menus-for-sharing's own fileIndex-tagged 'clean-menu-progress' below for the same
-// reason: N files uploaded together each need independently visible status. Returns
-// { cancelled: true } the moment uploadToken is superseded by a newer upload (checked at the same
-// checkpoints the original single-file version of this used to check), so the caller's loop over
-// files can stop immediately rather than wasting further AI calls on results nobody will see. A
-// file that fails to load/parse does NOT cancel the batch -- it returns success:false for just
-// that file so the remaining files still get processed, same "one bad file never blocks the
-// others" philosophy as cleanOneMenuFile.
-async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName }, uploadToken) {
+// Step 1 of an upload, per file: read -> parse. Every progress event is tagged with fileIndex so the renderer routes
+// it to that file's own progress row. Returns { cancelled: true } the moment uploadToken is superseded by a newer
+// upload; a file that fails to load / parse returns success: false for just that file, so the remaining files still
+// get processed ("one bad file never blocks the others").
+async function readMenuIngredientsFile(e, fileIndex, { base64, fileName }, uploadToken) {
   const send = (payload) => e.sender.send('menu-ingredients-progress', { fileIndex, fileName, ...payload });
   miLog(`[file ${fileIndex} "${fileName}"] STARTING`);
   send({ message: 'Reading file…' });
@@ -1509,88 +1498,8 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
     send({ stage: 'error', message: error });
     return { fileIndex, fileName, success: false, error };
   }
-  if (uploadToken !== menuIngredientsToken) {
-    miLog(`[file ${fileIndex} "${fileName}"] bailing out after parse -- superseded by a newer upload`);
-    return { cancelled: true };
-  }
-
-  // One request per dish name (exact trimmed match) so a dish repeating across many days/rows only costs one AI
-  // call -- its suggestion is broadcast back to every row sharing that exact name below. Each dish carries its first
-  // row's category / section / meal period, and seafood only when no row of it is a student's.
-  const uniqueDishes = dishesForSuggestion(rows);
-  send({ message: `Found ${rows.length} dish row(s) across ${uniqueDishes.length} unique dish(es) -- starting AI suggestions…` });
-
-  const nameToResult = new Map(); // dish name -> cleanSuggestion(...)
-  const failures = [...loadWarnings, ...parseWarnings];
-  const batches = chunk(uniqueDishes, MENU_INGREDIENTS_BATCH_SIZE);
-  miLog(`[file ${fileIndex} "${fileName}"] ${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE} dishes each`);
-  for (let b = 0; b < batches.length; b++) {
-    // Bails out the moment a newer upload has superseded this one, rather than burning further
-    // AI batches (and further wall-clock time) on results nobody will ever see.
-    if (uploadToken !== menuIngredientsToken) {
-      miLog(`[file ${fileIndex} "${fileName}"] bailing out before batch ${b + 1} -- superseded by a newer upload`);
-      return { cancelled: true };
-    }
-    const batch = batches[b];
-    send({ message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length });
-    const result = await suggestBatch(batch);
-    miLog(`[file ${fileIndex} "${fileName}"] batch ${b + 1}/${batches.length} FINISHED -- written=${result.written.size}, missing=${result.missing.length}, error=${result.error || 'none'}`);
-    for (const [name, value] of result.written) nameToResult.set(name, value);
-    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
-    if (result.missing.length) {
-      // One retry pass, same convention as estimate-missing-calories/estimate-missing-am-snack-
-      // styles -- only the specific dishes that didn't come back, not the whole batch again. No
-      // current/total here -- see those handlers' own comment on why a retry step stays
-      // message-only (freezes the bar at its current position instead of moving it).
-      send({ message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
-      const retry = await suggestBatch(result.missing);
-      miLog(`[file ${fileIndex} "${fileName}"] batch ${b + 1}/${batches.length} retry FINISHED -- written=${retry.written.size}, still missing=${retry.missing.length}`);
-      for (const [name, value] of retry.written) nameToResult.set(name, value);
-      if (retry.missing.length) {
-        const names = retry.missing.map((d) => d.name);
-        failures.push(`${names.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${names.slice(0, 10).join(', ')}${names.length > 10 ? '…' : ''}`);
-      }
-    }
-  }
-
-  if (uploadToken !== menuIngredientsToken) {
-    miLog(`[file ${fileIndex} "${fileName}"] bailing out after all batches -- superseded by a newer upload`);
-    return { cancelled: true };
-  }
-
-  send({ stage: 'done', message: `Done -- suggested ingredients for ${nameToResult.size} of ${uniqueDishes.length} unique dishes.`, current: batches.length, total: batches.length });
-
-  // removedTerms / removedAllergenTerms: every segment the school's rules took out of this dish's suggestion, with the
-  // policy (nut, spicy, halal, seafood) -- shown per row so a chef can put one back when she knows the dish is fine,
-  // per the school's instruction that this never happen silently. basis: "Regional: Kabsa (Saudi)" / "General", shown
-  // on screen only (the exported file keeps just Ingredients / Allergens).
-  const annotatedRows = rows.map(r => {
-    const res = nameToResult.get(r.dishName);
-    return {
-      ...r,
-      ingredients: res ? res.ingredients : '',
-      allergens: res ? res.allergens : '',
-      basis: res ? res.basis : '',
-      removedTerms: res ? res.removed.map(({ segment, policy }) => ({ segment, policy })) : [],
-      removedAllergenTerms: res ? res.removedAllergens.map(({ segment, policy }) => ({ segment, policy })) : [],
-    };
-  });
-  menuIngredientsFiles.set(fileIndex, { fileName, workbook, dishColumnBySheet });
-  // The renderer no longer shows `failures` as a banner (see renderMenuIngredientsView in
-  // renderer.js -- the yellow warnings box was removed), so this log is now the ONLY place that
-  // detail survives. log.warn (not a bare console.log) specifically because electron-log's file
-  // transport persists this to ~/Library/Logs/menu-generator/main.log even in a packaged build
-  // with no attached terminal -- a bare console.log would vanish the moment the app quits, which
-  // defeats "still traceable if a dish's ingredients look wrong later".
-  if (failures.length) log.warn(`[menu-ingredients] [file ${fileIndex} "${fileName}"] ${failures.length} warning(s) from this upload:`, failures);
-  // Separate from `failures` on purpose -- these are safety-policy actions (the school's rules), not
-  // parsing/AI-availability issues, and unlike `failures` they're ALSO shown per-row in the UI (not
-  // silently dropped), so this log exists to make the same information searchable/durable across sessions.
-  const policyDetail = [...nameToResult.entries()]
-    .filter(([, res]) => res.removed.length || res.removedAllergens.length)
-    .map(([name, res]) => ({ dish: name, removed: [...res.removed, ...res.removedAllergens].map((x) => `${x.segment} (${x.policy}: ${x.terms.join(', ')})`) }));
-  if (policyDetail.length) log.warn(`[menu-ingredients] [file ${fileIndex} "${fileName}"] policy filters removed term(s) from ${policyDetail.length} dish(es):`, policyDetail);
-  return { fileIndex, fileName, success: true, rows: annotatedRows, failures };
+  send({ message: `Found ${rows.length} dish row(s) -- waiting for the ingredient suggestions…` });
+  return { fileIndex, fileName, success: true, workbook, dishColumnBySheet, rows, failures: [...loadWarnings, ...parseWarnings] };
 }
 
 // `files` is an array of { base64, fileName }, one per file selected in a single upload action --
@@ -1599,6 +1508,13 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
 // SAME uploadToken (generated client-side, one per upload attempt) -- a second upload started
 // before this one finishes supersedes the whole batch, not just one file within it, same
 // all-or-nothing replace semantics the single-file version of this handler always had.
+//
+// Three steps (Phase D, 2026-10-01): (1) read + parse every file; (2) ONE suggestion pass for the whole upload -- one
+// AI call per dish name ignoring case and spacing, whichever files and sections it is on; batches sequential (each is
+// a real AI call); (3) per file, each row gets the answer cleaned for its OWN section (the school's rules, a red note
+// per removal), and a row serving the same dish the same day as an earlier row of another section FOLLOWS it
+// (lib/menuIngredientsShare.js planShares: never a student row after a Staff / CEO one, and only when both rows' own
+// cleaned results are identical, so "Same as ..." is always true).
 ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadToken }) => {
   miLog(`handler ENTERED, uploadToken=${uploadToken}, ${files.length} file(s)`);
   // Claims "current upload" status immediately -- any earlier call still in flight will see its
@@ -1607,23 +1523,92 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
   menuIngredientsToken = uploadToken;
   menuIngredientsFiles = new Map();
 
-  const results = [];
+  // ---- 1. read + parse every file
+  const read = [];
   for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
-    // Sequential, not Promise.allSettled/concurrent, on purpose -- unlike clean-menus-for-sharing
-    // (pure local CPU work), each file here makes real AI calls against the same Anthropic Edge
-    // Function, so running N files' worth of batches in parallel would multiply that concurrency
-    // uncontrolled. One file's own dish batches were already sequential before this change; this
-    // just keeps that same one-call-at-a-time discipline across files too.
-    const result = await processOneMenuIngredientsFile(e, fileIndex, files[fileIndex], uploadToken);
-    if (result.cancelled) {
-      miLog(`bailing out at file ${fileIndex} -- superseded by a newer upload`);
-      return { success: false, cancelled: true };
-    }
-    results.push(result);
+    const result = await readMenuIngredientsFile(e, fileIndex, files[fileIndex], uploadToken);
+    if (result.cancelled) return { success: false, cancelled: true };
+    read.push(result);
   }
-  miLog(`handler RETURNING success=true -- ${results.filter(r => r.success).length}/${files.length} file(s) succeeded`);
+  const ok = read.filter((f) => f.success);
+  const sendAll = (payload) => ok.forEach((f) => e.sender.send('menu-ingredients-progress', { fileIndex: f.fileIndex, fileName: f.fileName, ...payload }));
+
+  // ---- 2. one suggestion per dish across the upload
+  const uniqueDishes = dishesForSuggestion(ok.flatMap((f) => f.rows));
+  const answers = new Map(); // dish key -> raw answer
+  const failures = [];
+  const batches = chunk(uniqueDishes, MENU_INGREDIENTS_BATCH_SIZE);
+  miLog(`${uniqueDishes.length} unique dish(es) across ${ok.length} file(s), ${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE}`);
+  for (let b = 0; b < batches.length; b++) {
+    // Bails out the moment a newer upload has superseded this one, rather than burning further
+    // AI batches (and further wall-clock time) on results nobody will ever see.
+    if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+    const batch = batches[b];
+    sendAll({ message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${uniqueDishes.length} dishes in this upload)…`, current: b + 1, total: batches.length });
+    const result = await suggestBatch(batch);
+    miLog(`batch ${b + 1}/${batches.length} FINISHED -- written=${result.written.size}, missing=${result.missing.length}, error=${result.error || 'none'}`);
+    for (const [key, est] of result.written) answers.set(key, est);
+    if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
+    if (result.missing.length) {
+      // One retry pass, only the dishes that didn't come back. No current/total: a retry step stays message-only.
+      sendAll({ message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
+      const retry = await suggestBatch(result.missing);
+      for (const [key, est] of retry.written) answers.set(key, est);
+      if (retry.missing.length) {
+        const names = retry.missing.map((d) => d.name);
+        failures.push(`${names.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${names.slice(0, 10).join(', ')}${names.length > 10 ? '…' : ''}`);
+      }
+    }
+  }
+  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+
+  // ---- 3. each row cleaned for its own section; same-day rows of another section follow the first one
+  const allRows = [];
+  for (const f of ok) {
+    f.annotated = f.rows.map((r) => {
+      const est = answers.get(shareName(r.dishName));
+      const res = est ? cleanSuggestion(est, { seafoodAllowed: rowSeafoodAllowed(r) }) : null;
+      const row = {
+        ...r,
+        fileIndex: f.fileIndex,
+        ingredients: res ? res.ingredients : '',
+        allergens: res ? res.allergens : '',
+        // On screen only: basis ("Regional: Kabsa (Saudi)" / "General") and every segment the school's rules took
+        // out of this row's suggestion, with its policy -- never silent, so she can type one back.
+        basis: res ? res.basis : '',
+        removedTerms: res ? res.removed.map(({ segment, policy }) => ({ segment, policy })) : [],
+        removedAllergenTerms: res ? res.removedAllergens.map(({ segment, policy }) => ({ segment, policy })) : [],
+        policyLog: res ? [...res.removed, ...res.removedAllergens] : [],
+      };
+      allRows.push(row);
+      return row;
+    });
+  }
+  const follows = planShares(allRows);
+  for (const row of allRows) {
+    const source = follows.get(shareRowKey(row));
+    // followsRef: the row this one shows read-only ("Same as Daycare's ... -- not repeated") until she edits it.
+    row.followsRef = source ? { fileIndex: source.fileIndex, sheetName: source.sheetName, rowNumber: source.rowNumber } : null;
+  }
+
+  const results = read.map((f) => {
+    if (!f.success) return f;
+    menuIngredientsFiles.set(f.fileIndex, { fileName: f.fileName, workbook: f.workbook, dishColumnBySheet: f.dishColumnBySheet });
+    const fileFailures = [...f.failures, ...failures];
+    // The renderer doesn't show `failures`, so this log is the ONLY place that detail survives (electron-log's file
+    // transport persists log.warn in a packaged build too).
+    if (fileFailures.length) log.warn(`[menu-ingredients] [file ${f.fileIndex} "${f.fileName}"] ${fileFailures.length} warning(s) from this upload:`, fileFailures);
+    // Safety-policy actions, also shown per row in the UI; logged so they stay searchable across sessions.
+    const policyDetail = f.annotated.filter((r) => r.policyLog.length)
+      .map((r) => ({ dish: r.dishName, sheet: r.sheetName, removed: r.policyLog.map((x) => `${x.segment} (${x.policy}: ${x.terms.join(', ')})`) }));
+    if (policyDetail.length) log.warn(`[menu-ingredients] [file ${f.fileIndex} "${f.fileName}"] policy filters removed term(s) on ${policyDetail.length} row(s):`, policyDetail);
+    e.sender.send('menu-ingredients-progress', { fileIndex: f.fileIndex, fileName: f.fileName, stage: 'done', message: `Done -- ${f.annotated.length} row(s).` });
+    return { fileIndex: f.fileIndex, fileName: f.fileName, success: true, rows: f.annotated.map(({ policyLog, ...r }) => r), failures: fileFailures };
+  });
+  miLog(`handler RETURNING success=true -- ${ok.length}/${files.length} file(s) succeeded, ${uniqueDishes.length} dish(es), ${follows.size} following row(s)`);
   return { success: true, files: results, uploadToken };
 });
+
 
 // The exported file is always named after the ORIGINAL uploaded file, not a generic default --
 // "13_09_2026 week_4.xlsx" in -> "13_09_2026 week_4_Ingredients.xlsx" out, whether it's the only

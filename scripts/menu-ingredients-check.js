@@ -8,10 +8,16 @@
 //      comments written as ingredients ("... omitted") dropped.
 //   C. dishesForSuggestion / toPayloadItem (lib/menuIngredientsRequest.js): one request per dish name, the first
 //      row's context, seafood allowed only when no row is a student's; basisText.
+//   D. Cross-section sharing (lib/menuIngredientsShare.js planShares, Phase D): a row follows the first row of the same
+//      dish (case / spacing ignored) the same DAY in another section or file -- never the same section on another day,
+//      never a student row after a Staff / CEO one, and only when both rows' own filtered results are identical.
+//      The chef's tuna case: one shared AI answer, KG-LP's row has no tuna and a red note, Staff's keeps its tuna, and
+//      neither follows the other, whatever the tab order.
 // Pure functions only: no login, no database, no AI.
 const { matchSpicyTerms } = require('../lib/spicyFilter');
 const { filterMenuIngredients } = require('../lib/menuIngredientFilters');
-const { dishesForSuggestion, toPayloadItem, basisText } = require('../lib/menuIngredientsRequest');
+const { dishesForSuggestion, toPayloadItem, basisText, cleanSuggestion, rowSeafoodAllowed } = require('../lib/menuIngredientsRequest');
+const { planShares, rowKey } = require('../lib/menuIngredientsShare');
 
 const failures = [];
 let count = 0;
@@ -71,7 +77,7 @@ const dishes = dishesForSuggestion([
   row('Week 5 menu', 'Lunch', 'Lunch Main Course', 'Fish Fingers'),
 ]);
 expect(dishes.map((d) => d.name), ['Cheese Croissant', 'Grilled Salmon', 'Tuna Pasta', 'Fish Fingers'], 'one request per dish name, first-seen order');
-expect(dishes[0], { name: 'Cheese Croissant', category: 'AM Snack', section: 'Daycare', period: 'Breakfast', seafoodAllowed: false }, "a shared dish carries its first row's context");
+expect(dishes[0], { key: 'cheese croissant', name: 'Cheese Croissant', category: 'AM Snack', section: 'Daycare', period: 'Breakfast', seafoodAllowed: false }, "a shared dish carries its first row's context");
 expect(dishes[1].seafoodAllowed, true, 'adults only (Staff + CEO): seafood allowed');
 expect(dishes[2].seafoodAllowed, false, 'also on a student sheet (KG-LP): no seafood');
 expect(dishes[3].seafoodAllowed, false, "a sheet whose section can't be told: the safe default, no seafood");
@@ -79,6 +85,51 @@ expect(toPayloadItem(dishes[1], 4), { index: 4, name: 'Grilled Salmon', category
 expect(basisText({ kind: 'regional', dish: 'Kabsa', cuisine: 'Saudi' }), 'Regional: Kabsa (Saudi)', 'basis regional');
 expect(basisText({ kind: 'general', dish: null, cuisine: null }), 'General', 'basis general');
 expect(basisText(undefined), '', 'no basis (an older deployment)');
+
+// ---- D. cross-section sharing -------------------------------------------------------------------------------
+expect(dishesForSuggestion([row('Daycare', 'Lunch', 'Lunch Main Course', 'Mashed Potato'), row('KG - LP', 'Lunch', 'Lunch Starch/Side', 'mashed  potato')]).length, 1, 'one request for names differing only by case / spacing');
+// Rows as main.js builds them: the shared raw answer, cleaned for each row's own section.
+const tunaAnswer = { ingredients: 'tuna - mayonnaise - celery - brown bread', allergens: 'fish - egg - gluten', basis: { kind: 'general', dish: null, cuisine: null } };
+const plainAnswer = { ingredients: 'butter - flour - akkawi cheese', allergens: 'gluten - dairy', basis: { kind: 'general', dish: null, cuisine: null } };
+let n = 0;
+const built = (fileIndex, sheetName, dishName, date, answer) => {
+  const r = { fileIndex, sheetName, rowNumber: ++n, date, dishName };
+  const c = cleanSuggestion(answer, { seafoodAllowed: rowSeafoodAllowed(r) });
+  return { ...r, ingredients: c.ingredients, allergens: c.allergens, removed: c.removed };
+};
+const D1 = '04-10-2026', D2 = '05-10-2026';
+for (const [order, staffFirst] of [['school tab first', false], ['Staff tab first', true]]) {
+  n = 0;
+  const kg = built(0, 'KG - LP', 'Tuna Sandwich', D1, tunaAnswer);
+  const staff = built(0, 'Staff', 'Tuna Sandwich', D1, tunaAnswer);
+  const rowsIn = staffFirst ? [staff, kg] : [kg, staff];
+  const links = planShares(rowsIn);
+  expect(kg.ingredients, 'mayonnaise - celery - brown bread', `${order}: KG-LP Tuna Sandwich shows no tuna`);
+  expect(kg.removed.map((x) => `${x.segment}:${x.policy}`), ['tuna:seafood'], `${order}: KG-LP row has its red note`);
+  expect(kg.allergens, 'egg - gluten', `${order}: KG-LP allergens without fish`);
+  expect(staff.ingredients, 'tuna - mayonnaise - celery - brown bread', `${order}: Staff Tuna Sandwich keeps its tuna`);
+  expect(links.has(rowKey(kg)) || links.has(rowKey(staff)), false, `${order}: neither tuna row follows the other`);
+}
+n = 0;
+const dc = built(0, 'Daycare', 'Cheese Croissant', D1, plainAnswer);
+const kgSame = built(0, 'KG - LP', 'cheese  croissant', D1, plainAnswer);         // same day, other section, case / space differ
+const staffSame = built(0, 'Staff', 'Cheese Croissant', D1, plainAnswer);         // same day: Staff after school, same result
+const dcNextDay = built(0, 'Daycare', 'Cheese Croissant', D2, plainAnswer);       // same section, another day
+const kgNextDay = built(0, 'KG - LP', 'Cheese Croissant', D2, plainAnswer);       // follows Daycare's NEXT-day row, not day 1's
+const sameSheet = built(0, 'Daycare', 'Cheese Croissant', D1, plainAnswer);       // same sheet, same day: no
+const otherFile = built(1, 'MS - UP (B-G)', 'Cheese Croissant', D1, plainAnswer); // another file of the upload, same day
+const edgeStaff = built(1, 'Staff', 'Fruit Salad', D1, plainAnswer);
+const edgeKg = built(1, 'KG - LP', 'Fruit Salad', D1, plainAnswer);              // student row after a Staff one, equal text
+const links = planShares([dc, kgSame, staffSame, dcNextDay, kgNextDay, sameSheet, otherFile, edgeStaff, edgeKg]);
+const src = (r) => (links.get(rowKey(r)) ? rowKey(links.get(rowKey(r))) : null);
+expect(src(kgSame), rowKey(dc), 'KG-LP follows Daycare the same day (case / spacing ignored)');
+expect(src(staffSame), rowKey(dc), 'Staff follows the school row when its own result is the same');
+expect(src(dcNextDay), null, 'the same section on another day stays its own row');
+expect(src(kgNextDay), rowKey(dcNextDay), "another section's next-day row follows that day's source");
+expect(src(sameSheet), null, 'the same sheet the same day: no following');
+expect(src(otherFile), rowKey(dc), 'a row of another file of the upload follows (same day)');
+expect(src(edgeKg), null, 'a student row never follows a Staff / CEO row');
+expect(links.has(rowKey(dc)) || links.has(rowKey(edgeStaff)), false, 'a source never follows');
 
 if (failures.length) {
   console.log(`FAILED (${failures.length} of ${count}):\n  ${failures.join('\n  ')}`);

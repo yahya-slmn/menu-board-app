@@ -3810,8 +3810,17 @@ function renderMenuIngredientsFiles(container, files) {
       <div id="mi-file-review-${i}"></div>
     </div>
   `).join('');
+  // One lookup across every file of the upload: a row may follow a row of another file (same day, another section).
+  const ctx = { container, files, byKey: new Map(), followersOf: new Map(), multi };
+  for (const f of files) for (const r of f.rows || []) ctx.byKey.set(miRowKey(r), r);
+  for (const r of ctx.byKey.values()) {
+    if (!r.followsRef) continue;
+    const k = miRowKey(r.followsRef);
+    if (!ctx.followersOf.has(k)) ctx.followersOf.set(k, []);
+    ctx.followersOf.get(k).push(r);
+  }
   files.forEach((f, i) => {
-    if (f.rows && f.rows.length) renderMenuIngredientsReview(document.getElementById(`mi-file-review-${i}`), f.rows);
+    if (f.rows && f.rows.length) renderMenuIngredientsReview(document.getElementById(`mi-file-review-${i}`), f.rows, ctx);
     else if (!multi) {
       document.getElementById(`mi-file-review-${i}`).innerHTML = `<div style="color:var(--danger, #c0392b); font-size:13px;">${(f.error || 'No rows found').replace(/</g, '&lt;')}</div>`;
     }
@@ -3845,7 +3854,19 @@ function miRemovedNotes(removed) {
   }).join('');
 }
 
-function renderMenuIngredientsReview(container, rows) {
+// Same dish, same day, another section (main.js planShares; lib/menuIngredientsShare.js): such a row FOLLOWS the first
+// one -- shows its ingredients read-only with "Same as Daycare's ... -- not repeated" -- until she presses "Edit for
+// this section" (row.unlinked: her own copy, editable) or goes back with "Use Daycare's again". Editing the source
+// updates every row still following it, in the data the export sends too, so the exported file always carries full
+// text on every row. A following row's own filtered result was identical to the source's when the menu was read, and
+// a student row never follows a Staff / CEO one, so what a following row shows is always right for its section.
+const miRowKey = (r) => `${r.fileIndex}|${r.sheetName}|${r.rowNumber}`;
+function miSourceLabel(source, row, ctx) {
+  const file = source.fileIndex !== row.fileIndex && ctx.multi ? ` (${(ctx.files.find((f) => f.fileIndex === source.fileIndex) || {}).fileName || 'another file'})` : '';
+  return `${source.sheetName}'s ${source.dishName}${file}`;
+}
+
+function renderMenuIngredientsReview(container, rows, ctx) {
   const bySheet = new Map();
   for (const row of rows) {
     if (!bySheet.has(row.sheetName)) bySheet.set(row.sheetName, new Map());
@@ -3879,13 +3900,13 @@ function renderMenuIngredientsReview(container, rows) {
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.category || ''}</td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.dishName}</td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
-                        <input class="mi-ingredients-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
-                        ${row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}
-                        ${miRemovedNotes(row.removedTerms)}
+                        <input class="mi-ingredients-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
+                        ${miShareNote(row, ctx)}
+                        ${row.followsRef ? '' : `${row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}`}
                       </td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
-                        <input class="mi-allergens-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
-                        ${miRemovedNotes(row.removedAllergenTerms)}
+                        <input class="mi-allergens-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
+                        ${row.followsRef ? '' : miRemovedNotes(row.removedAllergenTerms)}
                       </td>
                     </tr>
                   `).join('')}
@@ -3908,13 +3929,46 @@ function renderMenuIngredientsReview(container, rows) {
     const isIngredients = e.target.classList.contains('mi-ingredients-input');
     const isAllergens = e.target.classList.contains('mi-allergens-input');
     if (!isIngredients && !isAllergens) return;
-    const sheetName = e.target.dataset.sheet;
-    const rowNumber = parseInt(e.target.dataset.row, 10);
-    const row = rows.find(r => r.sheetName === sheetName && r.rowNumber === rowNumber);
-    if (!row) return;
-    if (isIngredients) row.ingredients = e.target.value;
-    else row.allergens = e.target.value;
+    const row = ctx.byKey.get(`${e.target.dataset.file}|${e.target.dataset.sheet}|${e.target.dataset.row}`);
+    if (!row || miFollowing(row)) return;
+    const field = isIngredients ? 'ingredients' : 'allergens';
+    row[field] = e.target.value;
+    // Every row still following this one takes the new text -- in the data the export sends, and on screen.
+    for (const f of ctx.followersOf.get(miRowKey(row)) || []) {
+      if (f.unlinked) continue;
+      f[field] = row[field];
+      const input = ctx.container.querySelector(`.mi-${field}-input[data-file="${f.fileIndex}"][data-sheet="${CSS.escape(f.sheetName)}"][data-row="${f.rowNumber}"]`);
+      if (input) input.value = row[field];
+    }
   });
+  container.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-mi-unlink], [data-mi-relink]');
+    if (!btn) return;
+    const row = ctx.byKey.get(btn.dataset.miUnlink || btn.dataset.miRelink);
+    if (!row) return;
+    if (btn.dataset.miUnlink) {
+      row.unlinked = true; // her own copy now: it keeps the current text and becomes editable
+    } else {
+      const source = ctx.byKey.get(miRowKey(row.followsRef));
+      row.unlinked = false;
+      row.ingredients = source.ingredients;
+      row.allergens = source.allergens;
+    }
+    renderMenuIngredientsFiles(ctx.container, ctx.files);
+  });
+}
+
+const miFollowing = (row) => !!row.followsRef && !row.unlinked;
+// The muted line under a row that follows another section's row: what it follows, and the way to edit it / go back.
+function miShareNote(row, ctx) {
+  if (!row.followsRef) return '';
+  const source = ctx.byKey.get(miRowKey(row.followsRef));
+  if (!source) return '';
+  const label = miEsc(miSourceLabel(source, row, ctx));
+  const key = miEsc(miRowKey(row));
+  return row.unlinked
+    ? `<div class="mi-share-note">Edited for this section <button type="button" class="mi-share-btn" data-mi-relink="${key}">Use ${miEsc(source.sheetName)}'s again</button></div>`
+    : `<div class="mi-share-note">Same as ${label} -- not repeated <button type="button" class="mi-share-btn" data-mi-unlink="${key}">Edit for this section</button></div>`;
 }
 
 // ============================================================
