@@ -3824,6 +3824,27 @@ function renderMenuIngredientsFiles(container, files) {
 // structure"). Each ingredients/allergens <input> mutates its own row object's `ingredients`/
 // `allergens` field in place on input (see the delegated listener below) -- since
 // exportMenuIngredients is later called with this exact same rows array/objects.
+// What the school's rules took out of a suggestion (main.js removedTerms / removedAllergenTerms, lib/menuIngredientFilters.js),
+// one red note per policy, never silent: she can type a term back when she knows this dish is fine.
+const MI_POLICY_NOTES = {
+  nut: ['nut policy', 'nut-free'],
+  spicy: ['no-spicy policy', 'mild'],
+  halal: ['halal policy', 'halal'],
+  seafood: ['no seafood for students', 'right for this section'],
+};
+const miEsc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function miRemovedNotes(removed) {
+  const byPolicy = new Map();
+  for (const { segment, policy } of removed || []) {
+    if (!byPolicy.has(policy)) byPolicy.set(policy, []);
+    byPolicy.get(policy).push(segment);
+  }
+  return [...byPolicy].map(([policy, segments]) => {
+    const [label, safeWord] = MI_POLICY_NOTES[policy] || [policy, 'fine'];
+    return `<div class="mi-removed-note">⚠ removed (${label}): ${segments.map(miEsc).join(', ')} -- edit the box above to add back if you know this dish is ${safeWord}</div>`;
+  }).join('');
+}
+
 function renderMenuIngredientsReview(container, rows) {
   const bySheet = new Map();
   for (const row of rows) {
@@ -3859,17 +3880,12 @@ function renderMenuIngredientsReview(container, rows) {
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.dishName}</td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-ingredients-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
-                        ${row.removedNutTerms && row.removedNutTerms.length ? `
-                          <div style="margin-top:4px; font-size:11.5px; color:var(--danger);">
-                            ⚠ removed (nut policy): ${row.removedNutTerms.map(t => t.replace(/</g, '&lt;')).join(', ')} -- edit the box above to add back if you know this dish is nut-free
-                          </div>` : ''}
+                        ${row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}
+                        ${miRemovedNotes(row.removedTerms)}
                       </td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-allergens-input" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
-                        ${row.removedAllergenNutTerms && row.removedAllergenNutTerms.length ? `
-                          <div style="margin-top:4px; font-size:11.5px; color:var(--danger);">
-                            ⚠ removed (nut policy): ${row.removedAllergenNutTerms.map(t => t.replace(/</g, '&lt;')).join(', ')} -- edit the box above to add back if you know this dish is nut-free
-                          </div>` : ''}
+                        ${miRemovedNotes(row.removedAllergenTerms)}
                       </td>
                     </tr>
                   `).join('')}

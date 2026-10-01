@@ -16,6 +16,12 @@
 // same call just produced, which is both cheaper (one Anthropic call instead of two per batch)
 // and more accurate than guessing allergens from the dish name alone in isolation.
 //
+// Prompt v2 (2026-10-01, Menu Ingredients -> Recipe Generator pipeline Phase C): each item also carries its menu
+// context (category, section, meal period, seafoodAllowed); lists are COMPLETE, not "concise"; a recognised regional
+// dish follows its well-established recipe and says so in "basis"; the mild (no chili), halal and per-item seafood
+// rules join the nut rule. The app applies all four rules again in code (lib/menuIngredientFilters.js). An item with
+// only index + name (an older app build) gets no seafood rule and a general answer, as before.
+//
 // Deploy: see the project README / deployment notes for the exact `supabase` CLI steps.
 // Requires the ANTHROPIC_API_KEY secret to be set (`supabase secrets set ANTHROPIC_API_KEY=...`).
 
@@ -31,7 +37,21 @@ const MAX_NAME_LENGTH = 200;
 interface DishItem {
   index: number;
   name: string;
+  // Context from the menu row (lib/menuIngredientsRequest.js), all optional: an older app sends name only.
+  category?: string;
+  section?: string;
+  period?: string;
+  // false = a dish students eat (no seafood); true = adults only; absent = not said (older app): no seafood rule.
+  seafoodAllowed?: boolean;
 }
+
+// v2.1 (2026-10-01, after the first trial): each ingredient once; forbidden ingredients never named, not even as
+// "-free"; more placeholder words; composite dishes listed fully; the category says what kind of dish it is.
+// v2.2 (2026-10-01, confirmed with the chef): a real seafood dish on a student menu is listed with its REAL ingredients
+// -- the app's seafood filter removes them with a visible note, so the menu mistake shows -- never with an invented
+// substitute protein (the trial turned "Tuna Sandwich" into chickpeas with no warning). Only a fish-SHAPED dish gets
+// its real non-seafood ingredients. Same principle as the Recipe Generator, which skips and flags such a dish.
+const PROMPT_VERSION = "mi-v2.2-2026-10-01";
 
 const SUGGEST_SCHEMA = {
   type: "object",
@@ -44,8 +64,19 @@ const SUGGEST_SCHEMA = {
           index: { type: "integer" },
           ingredients: { type: "string" },
           allergens: { type: "string" },
+          // See REGIONAL_RULE: what the list is based on.
+          basis: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["regional", "general"] },
+              dish: { anyOf: [{ type: "string" }, { type: "null" }] },
+              cuisine: { anyOf: [{ type: "string" }, { type: "null" }] },
+            },
+            required: ["kind", "dish", "cuisine"],
+            additionalProperties: false,
+          },
         },
-        required: ["index", "ingredients", "allergens"],
+        required: ["index", "ingredients", "allergens", "basis"],
         additionalProperties: false,
       },
     },
@@ -137,6 +168,45 @@ Example -- WRONG (the named protein, lamb, is missing entirely):
 Example -- RIGHT (every component named in the dish -- lamb, green beans, carrots -- is represented):
 "Lamb with Green Beans and Carrots" -> "lamb - green beans - carrots - olive oil - garlic - salt - pepper"`;
 
+// v2: the old prompt asked for "main ingredients", "reasonably concise -- typically 5 to 14", which the chef found
+// too simplified. A list a kitchen can cook from names every real component.
+const COMPLETE_LIST_RULE = `List the COMPLETE ingredients of the dish -- everything a cook would actually put in it, not just the main components: the main ingredients, every fat or oil, every liquid (water, stock, milk, cream), every aromatic (onion, garlic, ginger), every herb and spice, the seasonings (salt, black pepper), any sauce's own components (per the decomposition rule), and the garnish. There is no upper limit. A dish with more than one component (a marinade and a sauce, a filling and a dough, a stuffed or layered dish, a main with its rice) must list every component's ingredients: such a dish naturally runs to 15-25 ingredients, and a list of 8-10 for it is too short. Name EACH ingredient ONCE, even when two components both use it (garlic in the marinade and in the sauce is "garlic", once). A ready-made spice blend sold and used as one product (seven spices, baharat, kabsa spice, garam masala, curry powder) is ONE ingredient, named as itself. Do not pad the list with things the dish would not contain.`;
+
+// v2: the model guessed generic versions of well-known regional dishes. Asking it to CLASSIFY first, in a field the
+// chef sees ("Regional: Kabsa (Saudi)"), keeps "use the real recipe" concrete and checkable.
+const REGIONAL_RULE = `First decide what the dish is, and report it in "basis":
+- If the name is a recognised REGIONAL dish -- Middle Eastern, Levantine, Gulf, Egyptian, Turkish, Persian, North African, or another clearly named cuisine (kabsa, mandi, maqluba, mujaddara, fattoush, tabbouleh, molokhia, freekeh, shish tawook, kibbeh, koshari, kofta, mansaf, shakshuka...) -- set "basis" to {"kind": "regional", "dish": the dish's usual name, "cuisine": its cuisine (e.g. "Saudi", "Levantine", "Egyptian")}, and list the ingredients of the version most commonly cooked in homes and restaurants of that cuisine, with its standard core ingredients named precisely (e.g. dried black lime / loomi, freekeh, sumac, akkawi cheese, seven spices) -- not a westernised or generic version.
+- Otherwise (a general or international dish -- pasta, a sandwich, a roast, a salad with no regional name) set "basis" to {"kind": "general", "dish": null, "cuisine": null} and list a standard version.
+The school's rules always win over tradition: drop or substitute anything they forbid (nuts, sesame, chili, pork, alcohol), even when the traditional recipe has it. Seafood follows its own rule below.
+
+Examples:
+"Chicken Kabsa" -> basis {"kind": "regional", "dish": "Kabsa", "cuisine": "Saudi"}; ingredients "chicken - basmati rice - onion - tomatoes - tomato paste - garlic - carrot - dried black lime - kabsa spice - cinnamon stick - cardamom pods - bay leaves - vegetable oil - chicken stock - salt - black pepper - raisins" (no chili; no almond or nut garnish).
+"Mujaddara" -> basis {"kind": "regional", "dish": "Mujaddara", "cuisine": "Levantine"}; ingredients "brown lentils - long-grain rice - onions - olive oil - cumin - salt - black pepper - water".
+"Fattoush" -> basis {"kind": "regional", "dish": "Fattoush", "cuisine": "Levantine"}; ingredients "romaine lettuce - tomatoes - cucumbers - radishes - green onions - parsley - mint - pita bread - sumac - olive oil - lemon juice - garlic - pomegranate molasses - dried mint - salt".
+"Maqluba" -> basis {"kind": "regional", "dish": "Maqluba", "cuisine": "Palestinian"}; ingredients "chicken - long-grain rice - eggplant - cauliflower - potatoes - tomatoes - onion - garlic - seven spices - turmeric - cinnamon - vegetable oil - chicken stock - salt - black pepper" (the traditional toasted nut garnish is left out).
+"Chicken Alfredo" -> basis {"kind": "general", "dish": null, "cuisine": null}; ingredients "fettuccine - chicken breast - butter - garlic - heavy cream - parmesan cheese - milk - olive oil - parsley - salt - black pepper".`;
+
+// v2.1: the first trial wrote "sesame-free seed garnish (sunflower seeds)" and "pine-free breadcrumb topping" -- the
+// app's filters then remove the whole substitute (the word "sesame" is in it). Never naming them avoids that.
+const FORBIDDEN_WORDING_RULE = `Never write the name of a forbidden ingredient at all -- not even to say it is absent or replaced: no "sesame-free", "nut-free", "pine-free", "pine-shaped", "tahini-free", "alcohol-free", "pork-free", "chili-free", "without nuts". Just name the safe ingredient you use instead ("sunflower seeds", "breadcrumbs", "sunflower seed butter").`;
+
+// Same wording as generate-menu-dishes' MILD_RULE (the school-wide no-spicy rule), plus the Middle Eastern chilies
+// lib/spicyFilter.js added 2026-10-01.
+const MILD_RULE = `MILD FOOD ONLY -- no spicy or hot food for anyone, adults included. Never use chili in any form (fresh, flakes, powder, sweet chili sauce), Aleppo pepper, pul biber, urfa biber (isot), hot pepper paste (biber salcasi), jalapeno, habanero, cayenne, chipotle, sriracha, harissa, gochujang, sambal, shatta, zhug, peri-peri, buffalo sauce, cajun or jerk seasoning, crushed red pepper, hot sauce, hot paprika, vindaloo or madras curry. Warm, aromatic, non-hot seasonings are welcome: cumin, coriander, sweet or smoked paprika, cinnamon, cardamom, baharat, seven spices, black pepper.`;
+
+// Same as generate-menu-dishes' HALAL_RULE (first paragraph).
+const HALAL_RULE = `HALAL ONLY -- every dish: no pork or pork products (pork, ham, bacon, lard, pancetta, prosciutto) and no alcohol in any form, including cooking wine, beer, rum, sherry, marsala, mirin, sake or liqueur. Use vinegar such as apple cider vinegar, never wine vinegar; gelatin must be halal gelatin (or agar). Never mention pork or alcohol at all, not even to say it is absent.`;
+
+// Per item, like generate-dish-recipes' seafoodAllowed: only an item that says false is restricted.
+const SEAFOOD_RULE = `An item may carry "seafoodAllowed". When it is false (a dish students eat):
+- A dish that only has a fish or seafood SHAPE or name for fun (a fish-shaped sandwich, "crab" cut-outs, a fish-shaped pancake) contains no seafood: give its real, non-seafood ingredients.
+- A dish that IS a seafood dish (tuna sandwich, shrimp pasta, grilled salmon, fish fingers) is a menu-planning mistake for a student menu. Do NOT turn it into a different dish: never replace the fish or seafood with another protein (no chicken, chickpeas, tofu or anything else in its place). List its real ingredients exactly as you would for adults, seafood included -- the app removes the seafood itself and shows the chef a warning, so the mistake is seen and fixed on the menu.
+When "seafoodAllowed" is true, or absent, there is no seafood restriction: list the dish's real ingredients.`;
+
+// v2: the dish's place on the menu tells the model what kind of dish it is ("Pumpkin & Red Beans" as a lunch main
+// vs a side; "Cheese Croissant" as a breakfast item).
+const CONTEXT_RULE = `Each item may also carry where it is served: "category" (the menu category or item label, e.g. "Lunch Main Course", "AM Snack", "Main Dish", "Option 1"), "section" (who eats it: Daycare = toddlers, KG-LP and MS-UP = school children, Staff and CEO = adults) and "period" (Breakfast, Lunch, Lunch Box). Use them to understand what kind of dish this is and how it is served -- not as ingredients. The category settles an ambiguous name: under a Soup category, "Oats Soup" is a soup (a savoury broth with oats), not porridge; under a Lunch Main, a dish is a full main course.`;
+
 // Allergens are derived from the SAME decomposed ingredient list buildPrompt() asks for above
 // (that's why this is one call, not a separate Edge Function -- see index.ts's header comment)
 // rather than guessed independently from the dish name, which is both cheaper and more accurate:
@@ -162,19 +232,33 @@ Example (matches the Pizza example above):
 function buildPrompt(items: DishItem[]): string {
   return `${NUT_RESTRICTION}
 
-For each school/staff cafeteria dish name below, suggest a plausible list of its main ingredients, based on general culinary knowledge of similar dishes (no recipe or quantities are provided or expected).
+${MILD_RULE}
+
+${HALAL_RULE}
+
+${FORBIDDEN_WORDING_RULE}
+
+For each school / staff cafeteria dish below, give its ingredients, based on general culinary knowledge of the dish (no recipe or quantities are provided or expected).
+
+${CONTEXT_RULE}
+
+${SEAFOOD_RULE}
+
+${REGIONAL_RULE}
+
+${COMPLETE_LIST_RULE}
 
 ${DECOMPOSITION_RULE}
 
 ${COMPLETENESS_RULE}
 
-Format each dish's ingredients as a SINGLE string of ingredient names separated by " - " (space, hyphen, space), all lowercase, no quantities/measurements/units, no "and" before the last item, ordered roughly by prominence (main ingredients first, seasonings/condiments last). Keep each list reasonably concise -- typically 5 to 14 ingredients; a composite dish whose base preparation (dough, batter, filling) has been decomposed per the rule above will naturally run longer than a simple dish, and that's expected. Example format: "zucchini - red onions - shallots - olive oil - butter - salt".
+Format each dish's ingredients as a SINGLE string of ingredient names separated by " - " (space, hyphen, space), all lowercase, no quantities/measurements/units, no "and" before the last item, ordered roughly by prominence (main ingredients first, seasonings/garnish last).
 
 ${ALLERGEN_RULE}
 
 Each item carries its own "index" number. Return exactly one entry per item, each carrying that SAME index number back -- even if two items have identical or very similar names, they are distinct entries and each needs its own separate suggestion. Every index from 0 to ${items.length - 1} must appear exactly once in your output; do not merge, skip, duplicate, or invent entries.
 
-Remember: absolutely no nuts or nut-derived ingredients anywhere in your output -- neither in the ingredients list nor as an allergen -- per the restriction stated at the top. Per the decomposition rule above, never leave a non-bread sub-preparation (batter, breading, filling, etc.) as a standalone placeholder ingredient -- always break it down into its real base ingredients -- and only decompose bread/dough itself when it's the dish's own preparation focus, not when it's just a carrier alongside the dish's real focus. And per the completeness rule above, double-check that every component named in the dish's own title -- protein included -- actually appears in your ingredient list before finalizing.
+Remember: no nuts, sesame or their derivatives anywhere (neither as an ingredient nor as an allergen), and never their names, not even as "-free"; nothing spicy or hot; nothing that is not halal. Where "seafoodAllowed" is false, a fish-SHAPED dish has no seafood, and a real seafood dish keeps its real ingredients -- never a substitute protein. Never leave a sub-preparation as a placeholder ingredient -- "dough", "flatbread dough", "batter", "breading", "filling", "patties", "topping", "marinade", "sauce" for a sauce made in the dish -- break it down into what it is made of, and never decompose bread itself. Each ingredient once. Every component named in the dish's title, protein included, must appear. List the COMPLETE ingredients, and set "basis" for every item.
 
 Items (JSON array): ${JSON.stringify(items)}`;
 }
@@ -212,6 +296,14 @@ Deno.serve(async (req) => {
     return ok({ success: false, error: `Too many items to suggest (max ${MAX_ITEMS})` });
   }
   for (const it of items) {
+    for (const key of ["category", "section", "period"] as const) {
+      if (it && it[key] != null && (typeof it[key] !== "string" || it[key]!.length > MAX_NAME_LENGTH)) {
+        return ok({ success: false, error: `An item's ${key} must be a short string` });
+      }
+    }
+    if (it && it.seafoodAllowed != null && typeof it.seafoodAllowed !== "boolean") {
+      return ok({ success: false, error: "An item's seafoodAllowed must be true or false" });
+    }
     if (!it || typeof it.index !== "number" || typeof it.name !== "string" || !it.name.trim()) {
       return ok({ success: false, error: "Every item needs a numeric index and a non-empty name" });
     }
@@ -231,14 +323,15 @@ Deno.serve(async (req) => {
     // tool-call-leaks-into-text-instead-of-tool_use pitfall when thinking is off).
     const response = await client.messages.create({
       model: "claude-sonnet-5",
-      max_tokens: 8192,
+      // Complete lists run longer than the old concise ones (batches are 20 now, not 50).
+      max_tokens: 16000,
       thinking: { type: "disabled" },
       // A system prompt (unique to this function -- no other Edge Function here uses one) is
       // weighted more heavily by the model than the same instruction inline in the user message,
       // which is exactly what a hard safety constraint like this needs. Repeated inline in
       // buildPrompt() too, right next to the formatting rules -- see NUT_RESTRICTION's own
       // comment for why both places carry it.
-      system: NUT_RESTRICTION,
+      system: `${NUT_RESTRICTION}\n\n${MILD_RULE}\n\n${HALAL_RULE}\n\n${FORBIDDEN_WORDING_RULE}`,
       messages: [
         { role: "user", content: buildPrompt(items) },
       ],
@@ -261,7 +354,7 @@ Deno.serve(async (req) => {
     // Deliberately NOT failing the whole batch just because estimates.length !== items.length --
     // same reconcile-by-index, retry-only-the-gaps approach as estimate-calories/
     // estimate-am-snack-style.
-    return ok({ success: true, data });
+    return ok({ success: true, data: { ...data, prompt_version: PROMPT_VERSION } });
   } catch (err) {
     console.error("[suggest-dish-ingredients] failed:", err);
     return ok({ success: false, error: String((err as Error)?.message || err) });

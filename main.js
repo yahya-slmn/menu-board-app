@@ -27,7 +27,8 @@ const { estimateAmSnackStyle } = require('./lib/estimateAmSnackStyle');
 const { estimateDensity, toDensityItem } = require('./lib/estimateDensity');
 const { estimateDensityCached } = require('./lib/densityCache');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
-const { filterNutIngredients, matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
+const { matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
+const { dishesForSuggestion, toPayloadItem, cleanSuggestion } = require('./lib/menuIngredientsRequest');
 const { matchSeafoodTerms } = require('./lib/seafoodFilter');
 const {
   loadWorkbookFromBuffer, parseWorkbookDishes, restructureAndAppendIngredients,
@@ -1397,7 +1398,8 @@ let menuIngredientsFiles = new Map();
 // can never win the export or waste further AI calls once eclipsed. export-menu-ingredients below
 // performs the same check before writing.
 let menuIngredientsToken = null;
-const MENU_INGREDIENTS_BATCH_SIZE = 50;
+// 20 (was 50, 2026-10-01): a complete ingredient list per dish is longer, and 50 to a call pushed the answers short.
+const MENU_INGREDIENTS_BATCH_SIZE = 20;
 // Same 45s backstop every AI Edge Function call already has (estimateCalories/
 // suggestDishIngredients/translateTexts) -- ExcelJS's own workbook.xlsx.load() had NONE, so a
 // pathological file (or a genuinely stuck read) could hang this step forever with zero signal,
@@ -1431,38 +1433,27 @@ function schoolCategoryVocabulary() {
 
 // Extracted so a whole batch of dishes (across every file in the upload) shares the same AI-call
 // logic, not scoped to any one file -- has no dependency on which file it's currently running for.
-async function suggestBatch(batchNames) {
-  const payloadItems = batchNames.map((name, idx) => ({ index: idx, name }));
+// batchDishes: lib/menuIngredientsRequest.js dishesForSuggestion entries (name + its context). Every answer goes
+// through the school's rules IN CODE (cleanSuggestion -> lib/menuIngredientFilters.js: nut / sesame, spicy, halal,
+// and seafood for a dish students eat), whatever the prompt managed; each removal is kept for the row's note.
+// Never applied to Recipe Extractor (extract-recipe) -- that transcribes a REAL recipe.
+async function suggestBatch(batchDishes) {
+  const payloadItems = batchDishes.map((dish, idx) => toPayloadItem(dish, idx));
   let estimates;
   try {
     estimates = await suggestDishIngredients({ items: payloadItems });
   } catch (err) {
-    return { written: new Map(), missing: batchNames, error: err.message, removedByName: new Map() };
+    return { written: new Map(), missing: batchDishes, error: err.message };
   }
   const byIndex = new Map(estimates.map(est => [est.index, est]));
   const written = new Map();
   const missing = [];
-  // Mandatory nut/sesame-policy safety net (Misk school-wide restriction) -- runs on EVERY
-  // suggestion regardless of how well the prompt/system instruction in
-  // suggest-dish-ingredients/index.ts was followed, since an LLM instruction is never a hard
-  // guarantee on its own. See lib/nutFilter.js for the full blocklist/false-positive reasoning.
-  // Applied to BOTH the ingredients string and the allergens string (same reasoning as
-  // ALLERGEN_RULE's own comment in index.ts -- "nut"/"sesame" must never surface as a flagged
-  // allergen either, even if a stray one slips past the prompt). Never applied to Recipe
-  // Extractor (extract-recipe) -- that transcribes a REAL recipe, so stripping a genuine
-  // nut/sesame mention there would hide a true ingredient rather than block a fabricated one.
-  const removedByName = new Map();
-  batchNames.forEach((name, idx) => {
+  batchDishes.forEach((dish, idx) => {
     const est = byIndex.get(idx);
-    if (!est) { missing.push(name); return; }
-    const ingredientsFilter = filterNutIngredients(est.ingredients);
-    const allergensFilter = filterNutIngredients(est.allergens);
-    written.set(name, { ingredients: ingredientsFilter.cleaned, allergens: allergensFilter.cleaned });
-    if (ingredientsFilter.removed.length || allergensFilter.removed.length) {
-      removedByName.set(name, { ingredients: ingredientsFilter.removed, allergens: allergensFilter.removed });
-    }
+    if (!est) { missing.push(dish); return; }
+    written.set(dish.name, cleanSuggestion(est, dish));
   });
-  return { written, missing, error: null, removedByName };
+  return { written, missing, error: null };
 }
 
 function chunk(arr, size) {
@@ -1523,17 +1514,15 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
     return { cancelled: true };
   }
 
-  // Dedup dish names (exact trimmed match) so a dish repeating across many days/rows only costs
-  // one AI call -- its suggestion is broadcast back to every row sharing that exact name below.
-  const uniqueNames = [...new Set(rows.map(r => r.dishName))];
-  send({ message: `Found ${rows.length} dish row(s) across ${uniqueNames.length} unique dish(es) -- starting AI suggestions…` });
+  // One request per dish name (exact trimmed match) so a dish repeating across many days/rows only costs one AI
+  // call -- its suggestion is broadcast back to every row sharing that exact name below. Each dish carries its first
+  // row's category / section / meal period, and seafood only when no row of it is a student's.
+  const uniqueDishes = dishesForSuggestion(rows);
+  send({ message: `Found ${rows.length} dish row(s) across ${uniqueDishes.length} unique dish(es) -- starting AI suggestions…` });
 
-  const nameToIngredients = new Map();
-  const nameToAllergens = new Map();
-  const nameToRemovedNutTerms = new Map();
-  const nameToRemovedAllergenNutTerms = new Map();
+  const nameToResult = new Map(); // dish name -> cleanSuggestion(...)
   const failures = [...loadWarnings, ...parseWarnings];
-  const batches = chunk(uniqueNames, MENU_INGREDIENTS_BATCH_SIZE);
+  const batches = chunk(uniqueDishes, MENU_INGREDIENTS_BATCH_SIZE);
   miLog(`[file ${fileIndex} "${fileName}"] ${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE} dishes each`);
   for (let b = 0; b < batches.length; b++) {
     // Bails out the moment a newer upload has superseded this one, rather than burning further
@@ -1546,14 +1535,7 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
     send({ message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${batch.length} dishes)…`, current: b + 1, total: batches.length });
     const result = await suggestBatch(batch);
     miLog(`[file ${fileIndex} "${fileName}"] batch ${b + 1}/${batches.length} FINISHED -- written=${result.written.size}, missing=${result.missing.length}, error=${result.error || 'none'}`);
-    for (const [name, value] of result.written) {
-      nameToIngredients.set(name, value.ingredients);
-      nameToAllergens.set(name, value.allergens);
-    }
-    for (const [name, removed] of result.removedByName) {
-      if (removed.ingredients.length) nameToRemovedNutTerms.set(name, removed.ingredients);
-      if (removed.allergens.length) nameToRemovedAllergenNutTerms.set(name, removed.allergens);
-    }
+    for (const [name, value] of result.written) nameToResult.set(name, value);
     if (result.error) failures.push(`Batch ${b + 1} (${batch.length} dishes): ${result.error}`);
     if (result.missing.length) {
       // One retry pass, same convention as estimate-missing-calories/estimate-missing-am-snack-
@@ -1563,16 +1545,10 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
       send({ message: `Retrying ${result.missing.length} dish(es) from batch ${b + 1} that didn't come back the first time…` });
       const retry = await suggestBatch(result.missing);
       miLog(`[file ${fileIndex} "${fileName}"] batch ${b + 1}/${batches.length} retry FINISHED -- written=${retry.written.size}, still missing=${retry.missing.length}`);
-      for (const [name, value] of retry.written) {
-        nameToIngredients.set(name, value.ingredients);
-        nameToAllergens.set(name, value.allergens);
-      }
-      for (const [name, removed] of retry.removedByName) {
-        if (removed.ingredients.length) nameToRemovedNutTerms.set(name, removed.ingredients);
-        if (removed.allergens.length) nameToRemovedAllergenNutTerms.set(name, removed.allergens);
-      }
+      for (const [name, value] of retry.written) nameToResult.set(name, value);
       if (retry.missing.length) {
-        failures.push(`${retry.missing.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${retry.missing.slice(0, 10).join(', ')}${retry.missing.length > 10 ? '…' : ''}`);
+        const names = retry.missing.map((d) => d.name);
+        failures.push(`${names.length} dish(es) still missing a suggestion after retry -- left blank, fill in manually: ${names.slice(0, 10).join(', ')}${names.length > 10 ? '…' : ''}`);
       }
     }
   }
@@ -1582,21 +1558,23 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
     return { cancelled: true };
   }
 
-  send({ stage: 'done', message: `Done -- suggested ingredients for ${nameToIngredients.size} of ${uniqueNames.length} unique dishes.`, current: batches.length, total: batches.length });
+  send({ stage: 'done', message: `Done -- suggested ingredients for ${nameToResult.size} of ${uniqueDishes.length} unique dishes.`, current: batches.length, total: batches.length });
 
-  // `removedNutTerms` is the flat list of ORIGINAL segment text the nut filter stripped for this
-  // exact dish name (e.g. ["toasted walnuts", "peanut butter"]) -- surfaced to the renderer so a
-  // chef can see it per-row and manually re-add a specific term if they know their version is
-  // actually nut-free, per the school's explicit instruction that this never happen silently.
-  // `removedAllergenNutTerms` is the same, but for the allergens column (e.g. a stray "nut" word
-  // the model wrote as an allergen despite ALLERGEN_RULE forbidding it).
-  const annotatedRows = rows.map(r => ({
-    ...r,
-    ingredients: nameToIngredients.get(r.dishName) || '',
-    allergens: nameToAllergens.get(r.dishName) || '',
-    removedNutTerms: (nameToRemovedNutTerms.get(r.dishName) || []).map((x) => x.segment),
-    removedAllergenNutTerms: (nameToRemovedAllergenNutTerms.get(r.dishName) || []).map((x) => x.segment),
-  }));
+  // removedTerms / removedAllergenTerms: every segment the school's rules took out of this dish's suggestion, with the
+  // policy (nut, spicy, halal, seafood) -- shown per row so a chef can put one back when she knows the dish is fine,
+  // per the school's instruction that this never happen silently. basis: "Regional: Kabsa (Saudi)" / "General", shown
+  // on screen only (the exported file keeps just Ingredients / Allergens).
+  const annotatedRows = rows.map(r => {
+    const res = nameToResult.get(r.dishName);
+    return {
+      ...r,
+      ingredients: res ? res.ingredients : '',
+      allergens: res ? res.allergens : '',
+      basis: res ? res.basis : '',
+      removedTerms: res ? res.removed.map(({ segment, policy }) => ({ segment, policy })) : [],
+      removedAllergenTerms: res ? res.removedAllergens.map(({ segment, policy }) => ({ segment, policy })) : [],
+    };
+  });
   menuIngredientsFiles.set(fileIndex, { fileName, workbook, dishColumnBySheet });
   // The renderer no longer shows `failures` as a banner (see renderMenuIngredientsView in
   // renderer.js -- the yellow warnings box was removed), so this log is now the ONLY place that
@@ -1605,22 +1583,13 @@ async function processOneMenuIngredientsFile(e, fileIndex, { base64, fileName },
   // with no attached terminal -- a bare console.log would vanish the moment the app quits, which
   // defeats "still traceable if a dish's ingredients look wrong later".
   if (failures.length) log.warn(`[menu-ingredients] [file ${fileIndex} "${fileName}"] ${failures.length} warning(s) from this upload:`, failures);
-  // Separate from `failures` on purpose -- this is a safety-policy action (Misk's no-nuts rule),
-  // not a parsing/AI-availability issue, and unlike `failures` it's ALSO shown per-row in the UI
-  // (not silently dropped), so this log exists to make the same information searchable/durable
-  // across sessions, not to compensate for the UI hiding it.
-  if (nameToRemovedNutTerms.size) {
-    const detail = [...nameToRemovedNutTerms.entries()].map(([name, removed]) => ({
-      dish: name, removed: removed.map((x) => `${x.segment} (${x.matchedLabels.join(', ')})`),
-    }));
-    log.warn(`[menu-ingredients] [file ${fileIndex} "${fileName}"] nut-policy filter removed ingredient(s) from ${nameToRemovedNutTerms.size} dish(es):`, detail);
-  }
-  if (nameToRemovedAllergenNutTerms.size) {
-    const detail = [...nameToRemovedAllergenNutTerms.entries()].map(([name, removed]) => ({
-      dish: name, removed: removed.map((x) => `${x.segment} (${x.matchedLabels.join(', ')})`),
-    }));
-    log.warn(`[menu-ingredients] [file ${fileIndex} "${fileName}"] nut-policy filter removed allergen tag(s) from ${nameToRemovedAllergenNutTerms.size} dish(es):`, detail);
-  }
+  // Separate from `failures` on purpose -- these are safety-policy actions (the school's rules), not
+  // parsing/AI-availability issues, and unlike `failures` they're ALSO shown per-row in the UI (not
+  // silently dropped), so this log exists to make the same information searchable/durable across sessions.
+  const policyDetail = [...nameToResult.entries()]
+    .filter(([, res]) => res.removed.length || res.removedAllergens.length)
+    .map(([name, res]) => ({ dish: name, removed: [...res.removed, ...res.removedAllergens].map((x) => `${x.segment} (${x.policy}: ${x.terms.join(', ')})`) }));
+  if (policyDetail.length) log.warn(`[menu-ingredients] [file ${fileIndex} "${fileName}"] policy filters removed term(s) from ${policyDetail.length} dish(es):`, policyDetail);
   return { fileIndex, fileName, success: true, rows: annotatedRows, failures };
 }
 

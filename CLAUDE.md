@@ -266,7 +266,28 @@ re-reads the file they came from with the same rules (a Staff lunch main from it
 writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. `npm test` = the round trip + `scripts/recipe-groups-check.js`
 (the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
 (read-only) lists where every dish and every Staff main of real menus lands. Pipeline plan (phases A-F): A and B done; C Menu
-Ingredients prompt v2, D cross-section sharing, E / F Recipe Generator keeps the chef-reviewed ingredient list.
+Ingredients prompt v2.2 built (live with the next release), D cross-section sharing, E / F Recipe Generator keeps the chef-reviewed ingredient list.
+
+**Menu Ingredients Generator prompt v2.2** (2026-10-01, pipeline Phase C; **built, NOT deployed live**: the live
+`suggest-dish-ingredients` stays on the old prompt (v11) until the app release from this branch, and both go out the SAME
+day -- decided so older app builds never get the new prompt without its code filters and context). Each dish is sent once
+per name with its first row's context (`lib/menuIngredientsRequest.js` `dishesForSuggestion` / `toPayloadItem`: category,
+section, meal period, `seafoodAllowed` = no row of it on a student sheet, unknown sheet = student), 20 per call (was 50).
+The prompt (`PROMPT_VERSION` mi-v2.2) asks for the COMPLETE list (every fat, liquid, aromatic, seasoning, garnish; each
+ingredient once; spice blends one ingredient), classifies each dish in `basis` (regional with dish + cuisine, anchored on
+kabsa / mujaddara / fattoush / maqluba / Chicken Alfredo, or general; shown on screen only, never exported), and carries
+the mild (no chili), halal and no-"-free"-wording rules beside the nut rule. Seafood for students: a fish-SHAPED dish gets
+real non-seafood ingredients; a real seafood dish keeps its REAL ingredients (never a substitute protein -- the trial
+turned "Tuna Sandwich" into chickpeas silently) so the app's filter removes them with a visible note. Every answer then
+goes through `lib/menuIngredientFilters.js` in code: comments written as ingredients ("... omitted") dropped, a forbidden
+word named only as absent ("sesame-free seed garnish", "pine-free ...") loses just that wording, repeats dropped, then nut /
+sesame, spicy (the shared `lib/spicyFilter.js`, which since 2026-10-01 also has Aleppo pepper, pul biber, urfa biber /
+isot and hot pepper paste -- the AI Menu Generator uses the same list), halal and student seafood removed, each removal a
+red note per policy on the review screen. `scripts/mi-prompt-trial.js <menu.xlsx>` (read-only; costs two AI runs) compares
+the live prompt with the one deployed as the TEMPORARY `suggest-dish-ingredients-trial` function (never committed; delete
+it at the live deploy) and writes an Excel report. On September week_04: cooked dishes 7.4 -> 9.8 ingredients, school
+mains 9.2 -> 12.8, 45 of 265 dishes regional. Release-day steps: deploy `suggest-dish-ingredients` (`--use-api`), delete
+the trial function, release the app.
 
 **Classification (`lib/classify.js`):** keyword-based heuristics that
 auto-suggest a new item's category/protein/daily-repeating flag from its
