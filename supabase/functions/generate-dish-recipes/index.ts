@@ -186,7 +186,7 @@ When "separateDressing" is false or absent, ignore this rule: follow the normal 
 const REVIEWED_LIST_RULE = `Some items carry "reviewedIngredients": the ingredient list a chef has already reviewed for this dish. For such an item:
 - Use EVERY ingredient on that list, each with its name exactly as written (same words; you may only change letter case). Never drop one, never rename or reword one, never split one into its parts, never replace one with something else.
 - The chef's level of detail wins over the decomposition rule: if the list says "brown bread", "puff pastry" or "tomato sauce", that is ONE ingredient row with that name -- do not break it into flour, yeast, butter or the like.
-- You may ADD only what the method truly needs and the list leaves out -- e.g. oil to fry or grease, water to boil or bind, salt for seasoning. Add nothing else.
+- You may ADD only what the method truly needs and the list leaves out -- e.g. oil to fry or grease, water the dish keeps (see the water rule), salt for seasoning. Add nothing else.
 - The school's restrictions still apply to anything you add.
 Items without "reviewedIngredients" follow the normal rules.`;
 
@@ -226,6 +226,12 @@ const UNITS_RULE = `Every ingredient's quantity MUST be expressed in grams ("g")
 // uniformly, which is fine since a plain staple name means the same simple thing in any section.
 const PLAIN_STAPLE_RULE = `When a dish name is a plain, unqualified staple with no preparation style stated (e.g. "White Rice", "Rice", "Pasta", "Potatoes"), assume the SIMPLEST, most standard preparation -- e.g. "White Rice" means plain white STEAMED (or boiled) rice, not fried rice, rice pilaf, biryani, or any other elaborate preparation. Only generate a fancier preparation when the dish name itself actually says so (e.g. "Fried Rice", "Rice Pilaf", "Biryani").`;
 
+// Added 2026-10-01 (with the move to Opus 5.5). Every row is scaled to the recipe's 150 g Net Weight, so a row for water
+// that is poured away (pasta or vegetable boiling water, blanching, a steamer or water bath) inflated the recipe and
+// shrank every real ingredient: the trial found it in 36 of 196 recipes, up to 8 kg on pasta. Water the dish keeps
+// (absorbed by rice / grains / pulses, a soup, a sauce, a dough or batter) is a real ingredient and stays.
+const WATER_RULE = `Water is an ingredient row ONLY for water that stays in the finished dish: water absorbed in cooking (rice, bulgur, freekeh, couscous, oats, lentils and pulses cooked by absorption), the liquid of a soup, stew or sauce, or water in a dough, batter, syrup or drink. Give only the amount that stays in the dish. Never list water that is drained or discarded -- the boiling water for pasta, noodles, potatoes or vegetables, blanching or soaking water, a steamer, or a water bath. Describe that step in the method ("cook the pasta in boiling salted water, drain") without an ingredient row for the water. This applies to items with "reviewedIngredients" too: if the chef's list names water, keep the row, with only the water that stays in the dish.`;
+
 // Waste has no DB access here (this function is Anthropic-only, no Supabase client) -- the
 // matching decision is inherently semantic ("Baking Waste" and "Oven Loss" might mean the same
 // thing, might not), so it's handed to the model rather than attempted as a string-similarity
@@ -253,6 +259,8 @@ ${DECOMPOSITION_RULE}
 ${UNITS_RULE}
 
 ${PLAIN_STAPLE_RULE}
+
+${WATER_RULE}
 
 ${SEAFOOD_RESTRICTION}
 
@@ -339,29 +347,23 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
-    // explicitly disabled for consistency with every other Edge Function here (Sonnet 5 runs
-    // ADAPTIVE (on) thinking by default when the param is omitted, unlike Haiku 4.5 where omitting
-    // it meant off, and leaving it unset would silently add latency/cost on top of the higher
-    // per-token price already accepted). Of all seven AI-calling functions in this app, this is
-    // the one most likely to actually benefit from thinking being turned back on -- generating a
-    // coherent multi-process recipe (ingredients that need to add up sensibly, method steps that
-    // need to match them) is a meaningfully harder task than the single-field
-    // classification/extraction the other six do, so it's worth trying `{type:"adaptive"}` here
-    // first if recipe quality ever needs a boost. max_tokens stays well above
-    // suggest-dish-ingredients' 8192 -- a full recipe (ingredients + method steps) per item is
-    // much larger than one short ingredient string, and this batch is already sized down (15
-    // ceiling, ~8 intended) specifically to fit within a single response reliably.
-    const response = await client.messages.create({
-      model: "claude-sonnet-5",
-      max_tokens: 16000,
-      thinking: { type: "disabled" },
+    // Claude Opus 5.5 with thinking (2026-10-01, the chef's choice: best results, cost no concern). Trialled against
+    // Sonnet 5 (thinking off) on September week_04 with the same prompt and payload: more complete and more specific
+    // answers (regional dishes, ambiguous names read right) and, for recipes, no false seafood skips (Sonnet skipped a
+    // Staff "Fish Fillet" as a student dish). About 3x the cost and 2-3x slower per batch (ingredients: 36 s average,
+    // 47 s slowest per 20; recipes: 50 s / 69 s per 8) -- the app's timeouts were raised to match. Opus 5.5 can't turn
+    // thinking off, so `thinking` is omitted (adaptive); effort is the control, set to "high" as trialled (its default is
+    // "medium"). Streamed, because a 64000-token ceiling (thinking counts toward it) is above what the SDK allows without
+    // streaming; finalMessage() gives the same Message a create() call would.
+    const response = await client.messages.stream({
+      model: "claude-opus-5-5",
+      max_tokens: 64000,
       system: NUT_RESTRICTION,
       messages: [
         { role: "user", content: buildPrompt(items, existingWasteTypeNames) },
       ],
-      output_config: { format: { type: "json_schema", schema: RECIPE_SCHEMA } },
-    });
+      output_config: { format: { type: "json_schema", schema: RECIPE_SCHEMA }, effort: "high" },
+    }).finalMessage();
 
     if (response.stop_reason === "refusal") {
       return ok({ success: false, error: "Generation was declined" });

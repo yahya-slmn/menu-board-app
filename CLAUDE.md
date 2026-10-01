@@ -259,7 +259,9 @@ items sent with `askRole` (ROLE_RULE; deployed 2026-09-30, other items get null)
 starch / vegetable name (`isPlainSideName`) -> Starch / Side, anything else -> Main Hot Dish. Eggplant Parmigiana or a
 lentil curry is a main; White Rice or Steamed Vegetables a side.
 Fruit Bar / Fruit Basket / Salad Bar / Beverages rows never get a recipe, whatever each row's name (they used to: "Melon
-Cubes" under Fruit Bar), nor Staff's "Water/soft drink" row.
+Cubes" under Fruit Bar), nor Staff's "Water/soft drink" row. Fruit Bar / Fruit Basket / Salad Bar (`SERVED_AS_IS_CATEGORY_PATTERNS`,
+ONE list) also get no AI ingredients in the Menu Ingredients Generator (2026-10-01), in every section: by category, so "Fruit (a
+Selection of Seasonal Fruits)" under Fruit Basket is caught; blank cells, no "Same as", "Served as is" note on screen.
 Recipes from before groups were saved are grouped by a guess from their category text (Staff "Main Dish" -> Other). The
 Drafts folder's "Re-group from the original menu..." (`preview-` / `apply-regroup-generated-recipes`, `lib/recipeRegroup.js`)
 re-reads the file they came from with the same rules (a Staff lunch main from its SAVED ingredients, no AI), previews, and
@@ -289,6 +291,19 @@ the live prompt with a TEMPORARY `suggest-dish-ingredients-trial` function and w
 were deleted after the 2026-10-01 release: to trial a future prompt change, deploy a `-trial` copy of the function (never
 committed), run the script, and delete it again. On September week_04: cooked dishes 7.4 -> 9.8 ingredients, school mains
 9.2 -> 12.8, 45 of 265 dishes regional.
+
+**Model: Claude Opus 5.5** (2026-10-01, the chef's choice: best results, cost no concern; ships with 1.0.49, both functions
+deployed the SAME day as the release). `suggest-dish-ingredients` and `generate-dish-recipes` run `claude-opus-5-5`, effort
+"high", thinking on (Opus 5.5 can't turn it off; `thinking` is omitted), streamed with `max_tokens` 64000, no automatic fallback.
+Trial against Sonnet 5 on September week_04 (same prompt and payload): more complete and specific lists (8.4 -> 10.5 per dish,
+"Kunafa Shrimp" read as the savoury kataifi appetiser, not a dessert), recipes keeping 1891/1892 reviewed ingredients, and no
+false seafood skips (Sonnet skipped "Pasta Primavera with beef" and a STAFF "Fish Fillet"). About 3x the cost (a week's menu,
+both steps: ~$2 -> ~$5.70) and 2-3x slower: 36 s average / 47 s worst per 20 dishes, 50 s / 69 s per 8 recipes, so the app's
+timeouts are 140 s (`SUGGEST_TIMEOUT_MS`, `GENERATE_TIMEOUT_MS`; under Supabase's 150 s request limit). The recipe prompt's
+WATER_RULE (same day): water is a row only when it stays in the dish (absorbed by rice / grains / pulses, a soup, sauce,
+dough, syrup), never drained boiling / blanching water -- every row is scaled to 150 g Net Weight, and drained water (up to 8
+kg on pasta, 36 of 196 recipes) shrank the real ingredients; on 65 trial dishes it went to 0, with absorbed water and soups
+unchanged and all 659 reviewed ingredients kept.
 
 **Menu Ingredients cross-section sharing** (2026-10-01, pipeline Phase D). An upload is read in three steps (main.js
 `parse-and-suggest-menu-ingredients`): read + parse every file; ONE suggestion pass for the whole upload -- one AI call

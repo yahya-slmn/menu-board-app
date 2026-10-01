@@ -314,18 +314,17 @@ Deno.serve(async (req) => {
 
   try {
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-    // Sonnet 5 (upgraded from Haiku 4.5, chef-approved for the higher per-token cost) -- thinking
-    // explicitly disabled: this is still a single-shot structured suggestion with no need for
-    // extended reasoning, and Sonnet 5 runs ADAPTIVE (on) thinking by default when the param is
-    // omitted, unlike Haiku 4.5 where omitting it meant off -- leaving it unset here would
-    // silently add latency/cost on top of the higher per-token price already accepted for this
-    // upgrade. {type:"disabled"} is fully supported on Sonnet 5 (unlike Opus 5, which has its own
-    // tool-call-leaks-into-text-instead-of-tool_use pitfall when thinking is off).
-    const response = await client.messages.create({
-      model: "claude-sonnet-5",
-      // Complete lists run longer than the old concise ones (batches are 20 now, not 50).
-      max_tokens: 16000,
-      thinking: { type: "disabled" },
+    // Claude Opus 5.5 with thinking (2026-10-01, the chef's choice: best results, cost no concern). Trialled against
+    // Sonnet 5 (thinking off) on September week_04 with the same prompt and payload: more complete and more specific
+    // answers (regional dishes, ambiguous names read right) and, for recipes, no false seafood skips (Sonnet skipped a
+    // Staff "Fish Fillet" as a student dish). About 3x the cost and 2-3x slower per batch (ingredients: 36 s average,
+    // 47 s slowest per 20; recipes: 50 s / 69 s per 8) -- the app's timeouts were raised to match. Opus 5.5 can't turn
+    // thinking off, so `thinking` is omitted (adaptive); effort is the control, set to "high" as trialled (its default is
+    // "medium"). Streamed, because a 64000-token ceiling (thinking counts toward it) is above what the SDK allows without
+    // streaming; finalMessage() gives the same Message a create() call would.
+    const response = await client.messages.stream({
+      model: "claude-opus-5-5",
+      max_tokens: 64000,
       // A system prompt (unique to this function -- no other Edge Function here uses one) is
       // weighted more heavily by the model than the same instruction inline in the user message,
       // which is exactly what a hard safety constraint like this needs. Repeated inline in
@@ -335,8 +334,8 @@ Deno.serve(async (req) => {
       messages: [
         { role: "user", content: buildPrompt(items) },
       ],
-      output_config: { format: { type: "json_schema", schema: SUGGEST_SCHEMA } },
-    });
+      output_config: { format: { type: "json_schema", schema: SUGGEST_SCHEMA }, effort: "high" },
+    }).finalMessage();
 
     if (response.stop_reason === "refusal") {
       return ok({ success: false, error: "Suggestion was declined" });
