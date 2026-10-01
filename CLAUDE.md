@@ -265,12 +265,13 @@ Drafts folder's "Re-group from the original menu..." (`preview-` / `apply-regrou
 re-reads the file they came from with the same rules (a Staff lunch main from its SAVED ingredients, no AI), previews, and
 writes only on confirm, only where the group is still empty; drafts and that menu's confirmed recipes. `npm test` = the round trip + `scripts/recipe-groups-check.js`
 (the rules, incl. the chef's real dish names); `scripts/recipe-groups-scan.js <menus.xlsx...> [--out f]`
-(read-only) lists where every dish and every Staff main of real menus lands. Pipeline plan (phases A-F): A and B done; C Menu
-Ingredients prompt v2.2 built (live with the next release), D cross-section sharing done, E Recipe Generator reads the reviewed list (prompt live with the release), F keeps it (done), E / F Recipe Generator keeps the chef-reviewed ingredient list.
+(read-only) lists where every dish and every Staff main of real menus lands. Pipeline (phases A-F): all done and RELEASED in
+1.0.48 (2026-10-01) -- A groundwork, B these groups, C Menu Ingredients prompt v2.2, D cross-section sharing, E the Recipe
+Generator reads the reviewed list, F it keeps the list. Both prompts went live the same day (v12).
 
-**Menu Ingredients Generator prompt v2.2** (2026-10-01, pipeline Phase C; **built, NOT deployed live**: the live
-`suggest-dish-ingredients` stays on the old prompt (v11) until the app release from this branch, and both go out the SAME
-day -- decided so older app builds never get the new prompt without its code filters and context). Each dish is sent once
+**Menu Ingredients Generator prompt v2.2** (2026-10-01, pipeline Phase C; **live since 2026-10-01**: `suggest-dish-ingredients`
+v12, deployed the same day as the 1.0.48 release -- decided so older app builds wouldn't get the new prompt long without
+its code filters and context; 1.0.47 sends no context, so it gets a general answer and no seafood rule until it updates). Each dish is sent once
 per name with its first row's context (`lib/menuIngredientsRequest.js` `dishesForSuggestion` / `toPayloadItem`: category,
 section, meal period, `seafoodAllowed` = no row of it on a student sheet, unknown sheet = student), 20 per call (was 50).
 The prompt (`PROMPT_VERSION` mi-v2.2) asks for the COMPLETE list (every fat, liquid, aromatic, seasoning, garnish; each
@@ -284,10 +285,10 @@ word named only as absent ("sesame-free seed garnish", "pine-free ...") loses ju
 sesame, spicy (the shared `lib/spicyFilter.js`, which since 2026-10-01 also has Aleppo pepper, pul biber, urfa biber /
 isot and hot pepper paste -- the AI Menu Generator uses the same list), halal and student seafood removed, each removal a
 red note per policy on the review screen. `scripts/mi-prompt-trial.js <menu.xlsx>` (read-only; costs two AI runs) compares
-the live prompt with the one deployed as the TEMPORARY `suggest-dish-ingredients-trial` function (never committed; delete
-it at the live deploy) and writes an Excel report. On September week_04: cooked dishes 7.4 -> 9.8 ingredients, school
-mains 9.2 -> 12.8, 45 of 265 dishes regional. Release-day steps: deploy `suggest-dish-ingredients` (`--use-api`), delete
-the trial function, release the app.
+the live prompt with a TEMPORARY `suggest-dish-ingredients-trial` function and writes an Excel report. The trial functions
+were deleted after the 2026-10-01 release: to trial a future prompt change, deploy a `-trial` copy of the function (never
+committed), run the script, and delete it again. On September week_04: cooked dishes 7.4 -> 9.8 ingredients, school mains
+9.2 -> 12.8, 45 of 265 dishes regional.
 
 **Menu Ingredients cross-section sharing** (2026-10-01, pipeline Phase D). An upload is read in three steps (main.js
 `parse-and-suggest-menu-ingredients`): read + parse every file; ONE suggestion pass for the whole upload -- one AI call
@@ -303,9 +304,13 @@ the same section on another day (confirmed with the chef). Two safety conditions
 CEO row (edits only flow to rows as strict or less strict), and a row follows only when its own filtered result equals
 the source's, so "Same as" is always true. Red removal notes and the basis show only on rows holding their own result.
 September x4: 318 of 1,545 rows follow (KG-LP -> MS-UP 144, Daycare -> KG-LP 59, -> MS-UP 56, school -> Staff 59).
+The export adds a "Same as" column after Allergens (for 1.0.49): a row still following at export time names its source
+("Daycare's Cheese Croissant", grey italics; `sameAsLabels`), while its Ingredients cell keeps the FULL text -- the
+Recipe Generator matches dishes by name AND list, so a reference instead of the list would break it (the chef's literal
+ask, declined for that reason). The parser treats "Same as" as a marker, never the dish column.
 
-**Recipe Generator reads the reviewed list** (2026-10-01, pipeline Phase E; the prompt rule is **built, NOT deployed
-live** -- it goes out with the release, like Phase C). Uploading a Menu Ingredients export: each row's Ingredients cell
+**Recipe Generator reads the reviewed list** (2026-10-01, pipeline Phase E; the prompt rule is **live since 2026-10-01**:
+`generate-dish-recipes` v12, deployed with the 1.0.48 release like Phase C; a request with no reviewed list is unchanged). Uploading a Menu Ingredients export: each row's Ingredients cell
 becomes `reviewedIngredients` (`reviewedIngredientsOf`; a day whose header lost its "Ingredients" label -- older exports
 -- takes the sheet's own column, `parseWorkbookDishes`). `dedupeWithinUpload` merges rows only when the name matches AND
 the reviewed lists match (case / spacing / order ignored), so a copy edited for one section gets its own recipe, named
@@ -316,9 +321,10 @@ what the method needs may be added. A seafood skip is accepted only if the revie
 retried: a batch of 8 once skipped "Pasta Primavera with beef"). An upload with dishes that had no list shows an alert
 and a banner ("12 of 40 dishes had no reviewed ingredient list ... the AI chose their ingredients"); nothing is refused.
 Trial (`scripts/mi-trial-export.js` -> a v2.2 Menu Ingredients export of a real menu with chef-style edits;
-`scripts/rg-prompt-trial.js`, the live prompt vs the temporary `generate-dish-recipes-trial`): 272/273 reviewed
+`scripts/rg-prompt-trial.js`, the live prompt vs a temporary `generate-dish-recipes-trial` copy): 272/273 reviewed
 ingredients kept verbatim on the v2.2 file (today's prompt: 70%), 117/118 on an older real export (today: 65%); the
-additions are method basics. Phase F (below) keeps the list. Release day also deletes `generate-dish-recipes-trial`.
+additions are method basics; composite dishes keep their separate processes (dough / filling / sauce ...). Phase F
+(below) keeps the list.
 
 **Recipe Generator keeps the reviewed list** (2026-10-01, pipeline Phase F; needs migration 20261001100000, applied BY
 HAND -- until then drafts save without the markers). `lib/reviewedRecipe.js` (pure): each recipe ingredient's `origin`
