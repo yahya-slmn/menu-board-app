@@ -28,7 +28,7 @@ const { estimateDensity, toDensityItem } = require('./lib/estimateDensity');
 const { estimateDensityCached } = require('./lib/densityCache');
 const { suggestDishIngredients } = require('./lib/suggestDishIngredients');
 const { matchNutTerms, stripNutTermsFromText } = require('./lib/nutFilter');
-const { dishesForSuggestion, toPayloadItem, cleanSuggestion, rowSeafoodAllowed, isServedAsIsRow } = require('./lib/menuIngredientsRequest');
+const { dishesForSuggestion, toPayloadItem } = require('./lib/menuIngredientsRequest');
 const { planShares, shareName, rowKey: shareRowKey, sameAsLabels } = require('./lib/menuIngredientsShare');
 const { matchSeafoodTerms } = require('./lib/seafoodFilter');
 const {
@@ -48,6 +48,7 @@ const { snackLunchOnlyHit } = require('./lib/categoryRules');
 const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWorkbook, planCalorieImport, loadImportTargets, applyCalorieImport } = require('./lib/calorieReview');
 const { planCatalogImport } = require('./lib/catalogImport');
 const { planIngredientsSave, applyIngredientSaves } = require('./lib/catalogIngredientsSave');
+const { splitRowsByCatalog, annotateRow } = require('./lib/menuIngredientsCatalog');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -1647,18 +1648,39 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
   const ok = read.filter((f) => f.success);
   const sendAll = (payload) => ok.forEach((f) => e.sender.send('menu-ingredients-progress', { fileIndex: f.fileIndex, fileName: f.fileName, ...payload }));
 
-  // ---- 2. one suggestion per dish across the upload
-  const uniqueDishes = dishesForSuggestion(ok.flatMap((f) => f.rows));
-  const answers = new Map(); // dish key -> raw answer
   const failures = [];
+
+  // ---- 1b. the Dish Catalog first (M3): a row whose catalog dish has a saved, approved list uses it -- no AI call.
+  // Everything else goes to the AI as before. A catalog that can't be read never blocks an upload: every dish then goes
+  // to the AI, exactly as before the feature existed.
+  let fromCatalog = new Map();
+  let aiRows = ok.flatMap((f) => f.rows);
+  try {
+    if (await catalogIngredientsAvailable()) {
+      const split = splitRowsByCatalog({ files: ok.map((f) => ({ fileIndex: f.fileIndex, rows: f.rows })), catalog: await loadCatalogForIngredients(),
+        categories: getCategories().map((c) => ({ code: c.code, name: c.name })) });
+      fromCatalog = split.fromCatalog;
+      aiRows = split.aiRows;
+    }
+  } catch (err) {
+    log.warn(`[menu-ingredients] couldn't read the Dish Catalog's saved lists -- every dish goes to the AI: ${err.message}`);
+    failures.push(`The Dish Catalog's saved lists couldn't be read (${err.message}) -- every dish was sent to the AI.`);
+  }
+  if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
+
+  // ---- 2. one suggestion per dish across the upload (only the rows the catalog didn't serve)
+  const uniqueDishes = dishesForSuggestion(aiRows);
+  const catalogNote = fromCatalog.size ? `${fromCatalog.size} row(s) from the Dish Catalog` : '';
+  if (fromCatalog.size) sendAll({ message: `${catalogNote} · ${uniqueDishes.length} new dish(es) for the AI` });
+  const answers = new Map(); // dish key -> raw answer
   const batches = chunk(uniqueDishes, MENU_INGREDIENTS_BATCH_SIZE);
-  miLog(`${uniqueDishes.length} unique dish(es) across ${ok.length} file(s), ${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE}`);
+  miLog(`${uniqueDishes.length} unique dish(es) for the AI across ${ok.length} file(s), ${fromCatalog.size} row(s) from the Dish Catalog, ${batches.length} batch(es) of up to ${MENU_INGREDIENTS_BATCH_SIZE}`);
   for (let b = 0; b < batches.length; b++) {
     // Bails out the moment a newer upload has superseded this one, rather than burning further
     // AI batches (and further wall-clock time) on results nobody will ever see.
     if (uploadToken !== menuIngredientsToken) return { success: false, cancelled: true };
     const batch = batches[b];
-    sendAll({ message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${uniqueDishes.length} dishes in this upload)…`, current: b + 1, total: batches.length });
+    sendAll({ message: `Suggesting ingredients: batch ${b + 1} of ${batches.length} (${uniqueDishes.length} ${fromCatalog.size ? `new dishes; ${catalogNote}` : 'dishes in this upload'})…`, current: b + 1, total: batches.length });
     const result = await suggestBatch(batch);
     miLog(`batch ${b + 1}/${batches.length} FINISHED -- written=${result.written.size}, missing=${result.missing.length}, error=${result.error || 'none'}`);
     for (const [key, est] of result.written) answers.set(key, est);
@@ -1680,23 +1702,7 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
   const allRows = [];
   for (const f of ok) {
     f.annotated = f.rows.map((r) => {
-      // Fruit Bar / Fruit Basket / Salad Bar: served as is -- never sent, blank, even when another row shares its name.
-      const servedAsIs = isServedAsIsRow(r);
-      const est = servedAsIs ? null : answers.get(shareName(r.dishName));
-      const res = est ? cleanSuggestion(est, { seafoodAllowed: rowSeafoodAllowed(r) }) : null;
-      const row = {
-        ...r,
-        fileIndex: f.fileIndex,
-        servedAsIs,
-        ingredients: res ? res.ingredients : '',
-        allergens: res ? res.allergens : '',
-        // On screen only: basis ("Regional: Kabsa (Saudi)" / "General") and every segment the school's rules took
-        // out of this row's suggestion, with its policy -- never silent, so she can type one back.
-        basis: res ? res.basis : '',
-        removedTerms: res ? res.removed.map(({ segment, policy }) => ({ segment, policy })) : [],
-        removedAllergenTerms: res ? res.removedAllergens.map(({ segment, policy }) => ({ segment, policy })) : [],
-        policyLog: res ? [...res.removed, ...res.removedAllergens] : [],
-      };
+      const row = annotateRow(r, f.fileIndex, { answers, catalogItem: fromCatalog.get(shareRowKey({ ...r, fileIndex: f.fileIndex })) || null });
       allRows.push(row);
       return row;
     });
@@ -1719,10 +1725,10 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
     const policyDetail = f.annotated.filter((r) => r.policyLog.length)
       .map((r) => ({ dish: r.dishName, sheet: r.sheetName, removed: r.policyLog.map((x) => `${x.segment} (${x.policy}: ${x.terms.join(', ')})`) }));
     if (policyDetail.length) log.warn(`[menu-ingredients] [file ${f.fileIndex} "${f.fileName}"] policy filters removed term(s) on ${policyDetail.length} row(s):`, policyDetail);
-    e.sender.send('menu-ingredients-progress', { fileIndex: f.fileIndex, fileName: f.fileName, stage: 'done', message: `Done -- ${f.annotated.length} row(s).` });
+    e.sender.send('menu-ingredients-progress', { fileIndex: f.fileIndex, fileName: f.fileName, stage: 'done', message: `Done -- ${f.annotated.length} row(s)${f.annotated.some((r) => r.catalog) ? `, ${f.annotated.filter((r) => r.catalog).length} from the Dish Catalog` : ''}.` });
     return { fileIndex: f.fileIndex, fileName: f.fileName, success: true, rows: f.annotated.map(({ policyLog, ...r }) => r), failures: fileFailures };
   });
-  miLog(`handler RETURNING success=true -- ${ok.length}/${files.length} file(s) succeeded, ${uniqueDishes.length} dish(es), ${follows.size} following row(s)`);
+  miLog(`handler RETURNING success=true -- ${ok.length}/${files.length} file(s) succeeded, ${uniqueDishes.length} dish(es) to the AI, ${fromCatalog.size} row(s) from the Dish Catalog, ${follows.size} following row(s)`);
   return { success: true, files: results, uploadToken };
 });
 

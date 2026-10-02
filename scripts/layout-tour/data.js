@@ -94,6 +94,19 @@ const CS_PLAN = { token: 'cs1', warnings: [], hasLists: true, rowsRead: 385, unc
     duplicates: [{ name: 'Pumpkin Soup', candidates: [{ id: 695, name: 'Pumpkin Soup' }, { id: 1552, name: 'Pumpkin Soup' }] }], blankDishes: ['Steamed Rice'], blankRows: 3, unclear: 10, servedAsIs: 40 },
 };
 
+// Menu Ingredients review after an upload (M3): rows from the Dish Catalog (with a red removal note on a student row),
+// AI rows with their regional basis, a "Same as" follower and a served-as-is row -- set straight into the renderer's state.
+const miRow = (sheetName, n, category, dishName, ingredients, extra = {}) => ({ fileIndex: 0, sheetName, rowNumber: n, date: '13-09-2026', weekday: 'Sunday', category, dishName,
+  ingredients, allergens: 'gluten - dairy', basis: '', removedTerms: [], removedAllergenTerms: [], catalog: null, followsRef: null, servedAsIs: false, ...extra });
+const CAT = { itemId: 1, name: 'x', updatedAt: '2026-10-02T08:00:00.000+00:00', updatedBy: 'tetiana' };
+const MI_FILES = [{ fileIndex: 0, fileName: 'September week_04.xlsx', success: true, failures: [], rows: [
+  miRow('Daycare', 5, 'AM Snack', LONG[7], 'flour - butter - turkey ham - cheese - milk - eggs - sugar - yeast - salt', { catalog: CAT }),
+  miRow('Daycare', 6, 'Lunch Main Course', LONG[0], LIST, { basis: 'Regional: Kabsa (Saudi)' }),
+  miRow('Daycare', 7, 'Lunch Main Course', 'Tuna Sandwich', 'brown bread - mayonnaise - lettuce', { catalog: CAT, removedTerms: [{ segment: 'tuna', policy: 'seafood' }] }),
+  miRow('Daycare', 8, 'Fruit Bar', 'Melon Cubes', '', { allergens: '', servedAsIs: true }),
+  miRow('KG - LP', 5, 'AM Snack', LONG[7], 'flour - butter - turkey ham - cheese - milk - eggs - sugar - yeast - salt', { followsRef: { fileIndex: 0, sheetName: 'Daycare', rowNumber: 5 } }),
+] }];
+
 const handlers = {
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   // "Re-group from the original menu...": a canned preview (main.js builds it from the picked file) and its apply.
@@ -118,4 +131,4 @@ const handlers = {
   applyCatalogIngredientsSave: () => ({ saved: Array.from({ length: 41 }, (_, i) => ({ itemId: i, name: 'x' })), failed: [{ itemId: 9, name: 'Lentil Soup', error: 'network error' }],
     conflicts: [{ itemId: 7, name: 'Slow-roasted herb chicken with saffron rice and toasted vermicelli', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], historyError: null }),
 };
-module.exports = { handlers };
+module.exports = { handlers, MI_FILES };

@@ -3864,6 +3864,7 @@ function renderMenuIngredientsView(main) {
   const hasUpload = mi.files.length > 0;
   const exportableFiles = mi.files.filter(f => f.rows && f.rows.length);
   const totalRows = exportableFiles.reduce((sum, f) => sum + f.rows.length, 0);
+  const catalogRows = exportableFiles.reduce((sum, f) => sum + f.rows.filter(r => r.catalog).length, 0);
 
   main.innerHTML = `
     <div class="topbar">
@@ -3877,7 +3878,7 @@ function renderMenuIngredientsView(main) {
       <span id="mi-export-status" style="color:var(--neutral); font-size:12.5px;"></span>
     </div>
     <div id="mi-progress-wrap"></div>
-    ${hasUpload ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${totalRows} dish row(s) parsed across ${exportableFiles.length} of ${mi.files.length} file(s)</div>` : ''}
+    ${hasUpload ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${totalRows} dish row(s) parsed across ${exportableFiles.length} of ${mi.files.length} file(s)${catalogRows ? ` · ${catalogRows} from the Dish Catalog (saved, approved lists -- no AI)` : ''}</div>` : ''}
     <div id="mi-review"></div>
   `;
   // Per-file `failures` (layout-inference notes, and any dish the AI genuinely couldn't suggest
@@ -4099,6 +4100,13 @@ function renderMenuIngredientsFiles(container, files) {
 // structure"). Each ingredients/allergens <input> mutates its own row object's `ingredients`/
 // `allergens` field in place on input (see the delegated listener below) -- since
 // exportMenuIngredients is later called with this exact same rows array/objects.
+// A row whose list is the Dish Catalog's saved, approved one (M3, lib/menuIngredientsCatalog.js) instead of an AI
+// suggestion -- shown in place of the AI's basis line; the school's rules were still applied to it for this row.
+function miCatalogNote(c) {
+  const when = c.updatedAt ? new Date(c.updatedAt).toLocaleDateString([], { day: 'numeric', month: 'short' }) : '';
+  return `<div class="mi-basis mi-from-catalog">From the Dish Catalog${when ? ` · saved ${miEsc(when)}` : ''}${c.updatedBy ? ` by ${miEsc(c.updatedBy)}` : ''}</div>`;
+}
+
 // What the school's rules took out of a suggestion (main.js removedTerms / removedAllergenTerms, lib/menuIngredientFilters.js),
 // one red note per policy, never silent: she can type a term back when she knows this dish is fine.
 const MI_POLICY_NOTES = {
@@ -4168,7 +4176,7 @@ function renderMenuIngredientsReview(container, rows, ctx) {
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-ingredients-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
                         ${miShareNote(row, ctx)}
-                        ${row.servedAsIs ? '<div class="mi-basis">Served as is: no ingredients generated</div>' : ''}${row.followsRef ? '' : `${row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}`}
+                        ${row.servedAsIs ? '<div class="mi-basis">Served as is: no ingredients generated</div>' : ''}${row.followsRef ? '' : `${row.catalog ? miCatalogNote(row.catalog) : row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}`}
                       </td>
                       <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
                         <input class="mi-allergens-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />

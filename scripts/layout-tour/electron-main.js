@@ -8,7 +8,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { handlers } = require('./data.js');
+const { handlers, MI_FILES } = require('./data.js');
 
 // Content sizes (useContentSize): mac = the default 1280 x 820 window minus the 28px title bar; win = that window's
 // likely content on Windows 10/11 at 100% (about 8px of frame each side; title bar + menu bar + bottom frame about
@@ -55,8 +55,11 @@ const STEPS = [
   ['Dish Catalog (search -> 2 rows)', 'app', `const s = document.getElementById('item-search'); s.value = 'Lentil'; s.dispatchEvent(new Event('input')); await t.sleep(500);`],
   ['Edit Item (with ingredients)', 'app', `document.getElementById('item-search').value = ''; document.getElementById('item-search').dispatchEvent(new Event('input')); await t.sleep(300);
     document.querySelector('[data-edit]').click(); await t.until(() => document.getElementById('m-ingredients'));`],
-  ['Menu Ingredients: save lists (preview)', 'app', `document.getElementById('m-cancel').click(); await t.sleep(300);
-    document.querySelector('[data-view=menuIngredients]').click(); await t.sleep(600); await t.click('Save approved lists');
+  ['Menu Ingredients: review (catalog rows)', 'app', `document.getElementById('m-cancel').click(); await t.sleep(300);
+    document.querySelector('[data-view=menuIngredients]').click(); await t.sleep(600);
+    state.menuIngredients.files = ${JSON.stringify(MI_FILES)}; state.menuIngredients.uploadToken = 'tour';
+    renderMenuIngredientsView(document.getElementById('main')); await t.until(() => document.querySelector('.mi-from-catalog'));`],
+  ['Menu Ingredients: save lists (preview)', 'app', `await t.click('Save approved lists');
     state.catalogIngredientsSave.files = [{ name: 'September week_04_Ingredients.xlsx', base64: '' }]; renderCatalogIngredientsSaveView(document.getElementById('main'));
     await t.click('Read files'); await t.until(() => document.getElementById('cs-apply'));`],
   ['Menu Ingredients: save lists (result)', 'app', `document.getElementById('cs-apply').click(); await t.until(() => document.getElementById('cs-done'));`],
