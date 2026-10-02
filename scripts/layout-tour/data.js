@@ -127,6 +127,11 @@ const handlers = {
   listWasteTypes: () => WASTES, listDoughShapePresets: () => ({ available: false }),
   // Menu Ingredients -> Save approved lists to the Dish Catalog: a canned preview with every group, long lists included.
   catalogIngredientsAvailable: () => true,
+  // Dish Catalog -> Remove old codes (U1): the real proportions from the U0 measurement.
+  previewCodeRemoval: () => ({ token: 'cr1', total: 2107, historyReady: true,
+    codes: { count: 493, examples: [{ name: LONG[0], code: 'RC-00237' }, { name: LONG[1], code: 'RC01-02288' }, { name: LONG[2], code: 'RC02-02771' }] },
+    placeholder: { count: 1614, examples: [{ name: LONG[3], code: 'NEW' }, { name: LONG[4], code: 'NEW' }, { name: LONG[5], code: 'NEW' }] },
+    other: { count: 0, examples: [] } }),
   previewCatalogIngredientsSave: () => CS_PLAN,
   applyCatalogIngredientsSave: () => ({ saved: Array.from({ length: 41 }, (_, i) => ({ itemId: i, name: 'x' })), failed: [{ itemId: 9, name: 'Lentil Soup', error: 'network error' }],
     conflicts: [{ itemId: 7, name: 'Slow-roasted herb chicken with saffron rice and toasted vermicelli', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], historyError: null }),

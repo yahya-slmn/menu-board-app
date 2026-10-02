@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('api', {
   previewCatalogImport: (payload) => ipcRenderer.invoke('preview-catalog-import', payload),
   applyCatalogImport: (payload) => ipcRenderer.invoke('apply-catalog-import', payload),
   catalogIngredientsAvailable: () => ipcRenderer.invoke('catalog-ingredients-available'),
+  previewCodeRemoval: () => ipcRenderer.invoke('preview-code-removal'),
+  exportCodeRemovalList: (payload) => ipcRenderer.invoke('export-code-removal-list', payload),
+  applyCodeRemoval: (payload) => ipcRenderer.invoke('apply-code-removal', payload),
   previewCatalogIngredientsSave: (payload) => ipcRenderer.invoke('preview-catalog-ingredients-save', payload),
   applyCatalogIngredientsSave: (payload) => ipcRenderer.invoke('apply-catalog-ingredients-save', payload),
   // Same one-way-progress-events pattern as onExportProgress above (main.js sends

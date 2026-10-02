@@ -53,7 +53,9 @@ const SECTION_TABS = [['Daycare', 'DAYCARE'], ['KG-LP', 'KG_LP'], ['MS-UP', 'MS_
 const STEPS = [
   ['Dish Catalog (60 rows)', 'app', `await t.until(() => document.querySelector('.dish-catalog-table'));`],
   ['Dish Catalog (search -> 2 rows)', 'app', `const s = document.getElementById('item-search'); s.value = 'Lentil'; s.dispatchEvent(new Event('input')); await t.sleep(500);`],
-  ['Edit Item (with ingredients)', 'app', `document.getElementById('item-search').value = ''; document.getElementById('item-search').dispatchEvent(new Event('input')); await t.sleep(300);
+  ['Dish Catalog: remove old codes (preview)', 'app', `document.getElementById('item-search').value = ''; document.getElementById('item-search').dispatchEvent(new Event('input')); await t.sleep(300);
+    document.getElementById('code-removal-btn').click(); await t.until(() => document.getElementById('crm-apply'));`],
+  ['Edit Item (with ingredients)', 'app', `document.getElementById('crm-cancel').click(); await t.sleep(300); document.getElementById('item-search').value = ''; document.getElementById('item-search').dispatchEvent(new Event('input')); await t.sleep(300);
     document.querySelector('[data-edit]').click(); await t.until(() => document.getElementById('m-ingredients'));`],
   ['Menu Ingredients: review (catalog rows)', 'app', `document.getElementById('m-cancel').click(); await t.sleep(300);
     document.querySelector('[data-view=menuIngredients]').click(); await t.sleep(600);

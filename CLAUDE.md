@@ -205,9 +205,13 @@ drive the calorie scope (the Dish Catalog no longer shows them: no AI chip, no f
 editing the label never changes them. New manual items
 start blank; Approve writes "AI". `lib/catalogCreatedBy.js` tidies the value and snaps a case-only variant to the spelling
 already in use; suggestions are every label in use plus the recipe people. The Dish Catalog's source filter is one "Created
-By" dropdown (All / each stored label / Not set). The "Code" column (`menu_items.rc_code`: RC for older dishes, RG for
-program-made ones) is likewise read-only in the list and typed in Add / Edit Item -- never generated; a missing one shows a red
-"NEW". `update-item` only writes the label / code when they are sent. The old Tags column is three
+By" dropdown (All / each stored label / Not set). The "Code" column (`menu_items.rc_code`) is EMPTY on every
+dish since 2026-10-03 (unification U1): the 493 old RC codes and 1,614 placeholder "NEW" texts were removed through Dish Catalog
+-> "Remove old codes…" (`lib/codeRemoval.js`: preview, downloadable list, each dish cleared only if its code was still the
+previewed one), every one recorded in `menu_item_code_history` (migration 20261003100000; batch id, old code, who / when;
+verified: 0 coded dishes, 2,107 rows, one batch). A dish gets a code again only from its linked Recipe Book recipe (TTY-, U3);
+the Code field in Add / Edit Item is read-only, `add-item` / `update-item` never write it, an empty one shows a grey "—". The
+column itself is dropped by hand later (U8). `update-item` only writes the label when it is sent. The old Tags column is three
 (2026-09-25): Style (Pastry / Cold Kitchen), Protein, and Menu use (Daily, "Not served" -- how the engine treats the dish).
 Protein chips come from `proteinChip` / `PROTEIN_COLOR` in renderer.js (also the AI review screen's `aiAttrChips`); a code with
 no color gets the outlined `.protein-other` chip, since a bare `.chip` is white text on nothing. A new protein type needs a
@@ -741,6 +745,21 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
   `dough-shape-photos` bucket, undeploy `generate-dough-shape-image`) -- the app-side removal (old Dough
   Shapes screen, `lib/doughShapes.js`, `lib/generateDoughShapeImage.js`, the nav entry) is done; `dough_shapes`
   and its Shapes modal are the live, in-use feature and were untouched by that removal.
+
+## Dish Catalog / Recipe Book unification (in progress on `feature/dish-catalog-ingredients`)
+
+Dish Catalog ingredients M1-M3 (saved, approved Menu Ingredients lists on `menu_items`, reused before the AI) are built on
+this branch; M3's real-data check (`scripts/catalog-ingredients-reuse-check.js`) waits for a real M2 save. Then the
+unification, decided with the chef 2026-10-02: Dish Catalog is every dish's identity; ONE Recipe Book code (TTY-) for every
+recipe there (typed, generated-and-confirmed, extracted), which is also its linked dishes' code; one recipe may be linked from
+several catalog entries (D3 = option b: `menu_items.recipe_id`); ONE ingredients master list (`ingredients`) -- generated and
+extracted ingredients are matched by exact name, and unmatched names go to a review (never created silently: the master is a
+purchasing list, "Oil Olive" / "Spice Cumin Seed" / "Flour Wheat White", so exact matching finds only ~3% of the AI's culinary
+names; ~170 names cover 90% of usage). The Recipe Extractor becomes an upload into Recipe Book. Phases: U0 measure (done,
+`scripts/unification-measure.js`), U1 remove the old codes (done), U2 ingredient aliases + review + duplicate clean-up, U3
+recipe links + TTY counter, U4 confirmed drafts -> Recipe Book, U5 Extractor into Recipe Book, U6 one-pass upload, U7 a
+dish's Ingredients button, U8 drop old columns / tables by hand. Note: `extracted_recipe_ingredients` links by
+`extracted_ingredient_id` / `extracted_recipe_process_id` (Recipe Book: `ingredient_id` / `process_id`).
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 

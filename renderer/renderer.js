@@ -912,6 +912,7 @@ async function renderItemsView(main) {
       <button class="secondary small" id="calorie-review-export-btn" title="An Excel file of every active Daycare, KG-LP and MS-UP dish with its current calories, for a researcher to fill in real values.">Export calories for review</button>
       <button class="secondary small" id="calorie-review-import-btn" title="Upload the reviewed file: shows what will change first, then writes only the filled-in Reviewed values.">Import reviewed calories</button>
       <input type="file" id="calorie-review-file" accept=".xlsx" hidden />
+      <span class="bar-group"><span class="bar-group-label">Old dish codes:</span> <button class="secondary small" id="code-removal-btn" title="Removes the old RC codes (and the placeholder text &quot;NEW&quot;) from every dish, after a preview. A dish gets a code again from its Recipe Book recipe.">Remove old codes…</button></span>
     </div>
     <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
@@ -930,6 +931,7 @@ async function renderItemsView(main) {
     <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
+  document.getElementById('code-removal-btn').addEventListener('click', () => openCodeRemovalModal(() => renderItemsView(main)));
   document.getElementById('catalog-import-btn').addEventListener('click', () => {
     Object.assign(state.catalogImport, { open: true, plan: null, result: null, sel: {}, overrides: {} });
     renderItemsView(main);
@@ -1073,7 +1075,7 @@ async function renderItemsView(main) {
               ${it.snack_rule_blocked ? `<span class="chip unverified" title="Chicken and beef are served at lunch only, so this snack is never put on a new menu. Rename it (e.g. a turkey version), move it to another category, or deactivate it. Menus already in History are unchanged.">Not served: chicken/<wbr>beef in a snack</span>` : ''}
             </td>
             <td class="created-by-cell" data-created-by="${it.id}">${it.created_by_label ? aiEsc(it.created_by_label) : '<span class="list-empty">—</span>'}</td>
-            <td class="code-cell" data-code="${it.id}"${it.rc_code ? ` title="${aiEsc(it.rc_code)}"` : ''}>${it.rc_code ? aiEsc(it.rc_code) : '<span class="code-missing">NEW</span>'}</td>
+            <td class="code-cell" data-code="${it.id}"${it.rc_code ? ` title="${aiEsc(it.rc_code)}"` : ' title="No code: a dish gets one from its Recipe Book recipe."'}>${it.rc_code ? aiEsc(it.rc_code) : '<span class="list-empty">—</span>'}</td>
             <td style="text-align:right">
               <button class="icon-btn" data-edit="${it.id}">Edit</button>
               <button class="icon-btn danger" data-delete="${it.id}">Delete</button>
@@ -1704,6 +1706,70 @@ function csRenderResult() {
   document.getElementById('cs-done').addEventListener('click', () => document.getElementById('cs-back').click());
 }
 
+// Dish Catalog -> "Remove old codes…" (unification U1, lib/codeRemoval.js): preview what is in the Code field (RC codes,
+// the placeholder text "NEW"), let her save the full list, then remove them all. A dish gets a code again only from its
+// linked Recipe Book recipe. Every dish cleared is written to menu_item_code_history.
+async function openCodeRemovalModal(onDone) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal crm-modal" role="dialog" aria-modal="true" aria-labelledby="crm-title">
+    <h2 id="crm-title">Remove old dish codes</h2><div id="crm-body" role="status">Reading the Dish Catalog…</div></div>`;
+  document.body.appendChild(overlay);
+  const body = overlay.querySelector('#crm-body');
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  let p;
+  try { p = await window.api.previewCodeRemoval(); } catch (err) { body.textContent = `Couldn't read the Dish Catalog: ${err.message}`; return; }
+  const group = (label, g) => (g.count ? `<li><strong>${g.count}</strong> ${label}<span class="crm-examples">e.g. ${g.examples.map(x => `${aiEsc(x.name)} (${aiEsc(x.code)})`).join(' · ')}</span></li>` : '');
+  if (!p.total) {
+    body.innerHTML = `<p>No dish has an old code any more.</p><div class="actions"><button class="primary" id="crm-close">Close</button></div>`;
+    body.querySelector('#crm-close').addEventListener('click', close);
+    return;
+  }
+  body.innerHTML = `
+    <p><strong>${p.total}</strong> dish(es) have something in Code:</p>
+    <ul class="crm-groups">
+      ${group('with an RC code', p.codes)}
+      ${group('with the placeholder text “NEW” (not a code)', p.placeholder)}
+      ${group('with something else', p.other)}
+    </ul>
+    <p class="ci-hint">All of them are removed. A dish gets a code again only from its Recipe Book recipe (TTY-). Each dish and the code it had are kept in the code history.</p>
+    ${p.historyReady ? '' : '<p class="field-warning">The code history table (migration 20261003100000) isn\'t applied yet, so nothing can be removed. Apply it, then open this again.</p>'}
+    <div class="actions">
+      <button class="secondary" id="crm-download">Download the list…</button>
+      <span id="crm-download-status" class="ci-hint"></span>
+      <button class="secondary" id="crm-cancel">Cancel</button>
+      <button class="primary" id="crm-apply" ${p.historyReady ? '' : 'disabled'}>Remove ${p.total} code(s)</button>
+    </div>`;
+  body.querySelector('#crm-cancel').addEventListener('click', close);
+  body.querySelector('#crm-download').addEventListener('click', async () => {
+    const st = body.querySelector('#crm-download-status');
+    try {
+      const r = await window.api.exportCodeRemovalList({ token: p.token });
+      st.textContent = r.success ? `Saved (${r.count} dishes).` : '';
+    } catch (err) { st.textContent = `Couldn't save: ${err.message}`; }
+  });
+  body.querySelector('#crm-apply').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    body.querySelector('#crm-cancel').disabled = true;
+    try {
+      const r = await window.api.applyCodeRemoval({ token: p.token });
+      body.innerHTML = `
+        <ul class="crm-groups">
+          <li><strong>${r.removed}</strong> code(s) removed.</li>
+          ${r.changed.length ? `<li class="ci-failed">${r.changed.length} not removed because the code changed after this preview: ${r.changed.slice(0, 8).map(c => aiEsc(c.name)).join(', ')}${r.changed.length > 8 ? '…' : ''}. Open this again to remove them.</li>` : ''}
+          ${r.failed ? `<li class="ci-failed">${r.failed} not removed (a connection error). Open this again to retry.</li>` : ''}
+          ${r.historyError ? `<li class="ci-failed">The code history couldn't be saved to the database (${aiEsc(r.historyError)}). It was saved on this computer instead: ${aiEsc(r.historyFile || '')}</li>` : ''}
+        </ul>
+        <div class="actions"><button class="primary" id="crm-close">Done</button></div>`;
+      body.querySelector('#crm-close').addEventListener('click', () => { close(); onDone(); });
+    } catch (err) {
+      body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was removed: ${aiEsc(err.message)}</p>`);
+    }
+  });
+}
+
 // Dish Catalog "Created By" (menu_items.created_by_label): free text with suggestions -- every label already
 // used plus the recipe people (list-created-by-labels in main.js). One <datalist> in <body>, refreshed when
 // the catalog or the item form opens and after an inline edit. A failed lookup just leaves no suggestions.
@@ -1767,7 +1833,7 @@ async function openItemModal(existingItem) {
         </div>
         <div class="field" style="max-width:200px; flex:1;">
           <label for="m-code">Code</label>
-          <input id="m-code" value="${isEdit ? aiEsc(existingItem.rc_code || '') : ''}" placeholder="e.g. RC or RG code" />
+          <input id="m-code" value="${isEdit ? aiEsc(existingItem.rc_code || '') : ''}" placeholder="from its Recipe Book recipe" readonly title="A dish's code comes from its Recipe Book recipe (TTY-); it can't be typed." />
         </div>
       </div>
       ${ingredientsOn ? `
@@ -2013,7 +2079,6 @@ async function openItemModal(existingItem) {
           amSnackStyle,
           removeInvalidSectionPortions,
           createdByLabel: overlay.querySelector('#m-created-by').value,
-          rcCode: overlay.querySelector('#m-code').value,
         })
       : await window.api.addItem({
           ...ingredientsPatch,
@@ -2025,7 +2090,6 @@ async function openItemModal(existingItem) {
           portions: checkedAgeGroupCodes,
           sectionCode: state.currentSection,
           createdByLabel: overlay.querySelector('#m-created-by').value,
-          rcCode: overlay.querySelector('#m-code').value,
         });
 
     // menu_items has UNIQUE(name, category_id) -- the same dish name legitimately recurs across

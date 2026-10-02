@@ -49,6 +49,7 @@ const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWor
 const { planCatalogImport } = require('./lib/catalogImport');
 const { planIngredientsSave, applyIngredientSaves } = require('./lib/catalogIngredientsSave');
 const { splitRowsByCatalog, annotateRow } = require('./lib/menuIngredientsCatalog');
+const { planCodeRemoval, applyCodeRemoval, writeCodeRemovalWorkbook } = require('./lib/codeRemoval');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -638,8 +639,8 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       am_snack_style: resolvedAmSnackStyle,
       // Blank unless she typed one: "OLD" means "existed before Created By was added".
       created_by_label: createdBy,
-      // The dish's Code (RC for older dishes, RG for program-made ones): typed in Add / Edit Item, never generated.
-      rc_code: String(rcCode ?? '').trim() || null,
+      // No code: since U1 (2026-10-03) a dish's code comes only from its linked Recipe Book recipe (TTY-), never typed.
+      rc_code: null,
       // Both pre-existing bugs, unrelated to item_portions.quantity retirement -- found while
       // smoke-testing Add Item afterward, neither previously set here:
       // - is_active: violates NOT NULL in Postgres (update-item always sets it; add-item never
@@ -772,8 +773,8 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
   // Only written when the caller sends it (the Edit Item form always does); a caller that doesn't
   // know about Created By leaves it as it is. Never touches is_ai_generated.
   const createdByPatch = createdByLabel === undefined ? {} : { created_by_label: await normalizeCreatedByLabel(createdByLabel, id) };
-  // Code (menu_items.rc_code): likewise only when sent; blank clears it.
-  if (rcCode !== undefined) createdByPatch.rc_code = String(rcCode ?? '').trim() || null;
+  // Code (menu_items.rc_code): no longer written here (U1, 2026-10-03) -- a dish's code comes only from its linked Recipe
+  // Book recipe. An older form that still sends rcCode is ignored.
 
   const { error } = await supabase
     .from('menu_items')
@@ -1169,6 +1170,68 @@ async function runCalorieBackfill({ send = () => {}, onlyItemIds = null } = {}) 
   send({ message: `Done -- ${estimated} of ${items.length} items updated (${flagged} flagged unverified).`, current: batches.length, total: batches.length });
   return { success: true, estimated, flagged, totalMissing: items.length, failures };
 }
+
+// Remove the old dish codes (unification U1, lib/codeRemoval.js; migration 20261003100000). Preview -> optional
+// download of the list -> confirm. Apply clears only what the preview showed, each dish only if its code is still the
+// previewed one, and writes one menu_item_code_history row per dish cleared. It refuses to start if that history table
+// can't be reached; history rows that fail to save are written to a local file instead, so no old code is ever lost.
+let codeRemovalPlan = null; // { token, entries }
+
+async function loadCodeRemovalPlan() {
+  const coded = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('menu_items').select('id, name, category_id, rc_code').not('rc_code', 'is', null).order('id').range(from, from + 999);
+    if (error) throw supaFail('code removal: load menu_items', error);
+    coded.push(...data);
+    if (data.length < 1000) break;
+  }
+  const sectionsById = new Map((await loadCatalogForImport()).map((it) => [it.id, it.sections]));
+  const sectionName = (code) => getSectionByCode(code)?.name || code;
+  return planCodeRemoval(coded.map((it) => ({ id: it.id, name: it.name, rc_code: it.rc_code, category_name: getCategoryById(it.category_id)?.name || '',
+    sections: (sectionsById.get(it.id) || []).map(sectionName) })));
+}
+
+async function codeHistoryReady() {
+  const { error } = await supabase.from('menu_item_code_history').select('id').limit(1);
+  return !error;
+}
+
+ipcMain.handle('preview-code-removal', async () => {
+  const plan = await loadCodeRemovalPlan();
+  codeRemovalPlan = { token: crypto.randomUUID(), entries: plan.entries };
+  const brief = (list) => ({ count: list.length, examples: list.slice(0, 6).map((e) => ({ name: e.name, code: e.oldCode })) });
+  return { token: codeRemovalPlan.token, total: plan.entries.length, historyReady: await codeHistoryReady(),
+    codes: brief(plan.groups.codes), placeholder: brief(plan.groups.placeholder), other: brief(plan.groups.other) };
+});
+
+ipcMain.handle('export-code-removal-list', async (e, { token }) => {
+  if (!codeRemovalPlan || codeRemovalPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save the list of old codes',
+    defaultPath: `dish-old-codes-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+  await writeCodeRemovalWorkbook(codeRemovalPlan.entries, result.filePath);
+  return { success: true, path: result.filePath, count: codeRemovalPlan.entries.length };
+});
+
+ipcMain.handle('apply-code-removal', async (e, { token }) => {
+  if (!codeRemovalPlan || codeRemovalPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
+  if (!(await codeHistoryReady())) throw new Error('The code history table (migration 20261003100000) is not applied yet -- nothing was removed.');
+  const { entries } = codeRemovalPlan;
+  codeRemovalPlan = null;
+  const batchId = crypto.randomUUID();
+  const r = await applyCodeRemoval({ db: supabase, entries, who: await signedInLogin(), batchId });
+  let historyFile = null;
+  if (r.history.length) {
+    historyFile = path.join(app.getPath('userData'), `code-removal-history-${batchId}.json`);
+    await fs.writeFile(historyFile, JSON.stringify(r.history, null, 1));
+    log.warn(`[code removal] ${r.history.length} history row(s) could not be saved (${r.historyError}); kept in ${historyFile}`);
+  }
+  if (r.changed.length || r.failed.length) log.warn('[code removal] not removed:', { changed: r.changed, failed: r.failed });
+  return { removed: r.removed.length, changed: r.changed, failed: r.failed.reduce((n, f) => n + f.ids.length, 0), historyError: r.historyError, historyFile, batchId };
+});
 
 // One-time calorie review (lib/calorieReview.js): export every active Daycare / KG-LP / MS-UP dish for a
 // researcher, then import the reviewed values. Preview first: the plan is kept here and only the plan
