@@ -406,6 +406,11 @@ function proteinChip(code, label) {
 // for protein codes. Pastry gets a warm rose (bakery), Cold Kitchen a cool teal ("cold") --
 // distinct from every existing chip color (chicken/beef/lamb/daily).
 const AM_SNACK_STYLE_COLOR = { PASTRY: 'pastry', COLD_KITCHEN: 'cold-kitchen' };
+// MV5a (lib/calorieMerge.js CALORIE_WRITES_PAUSED, mirrored here): calories are read from the dish version; until MV5b
+// nothing writes them -- Edit Item's field is read-only, Add Item takes none, and the backfill, the review import and the
+// calorie step after AI Approve are off.
+const CALORIE_WRITES_PAUSED = true;
+const CALORIES_PAUSED_NOTE = 'Paused while calories move onto dish versions (Master Items, MV5). Back in the next step.';
 
 // Categories where Protein Type is meaningful, confirmed against real item_portions/
 // protein_type_id usage (not just categories literally named "Main") -- LUNCH_MAIN and
@@ -903,7 +908,7 @@ async function renderItemsView(main) {
       <div><h1>Dish Catalog</h1><span class="section-pill">${currentSectionName()}</span></div>
       <div class="action-toolbar">
         <button class="secondary" id="estimate-styles-btn" title="Tags every AM Snack / PM Snack (Daycare, KG-LP, MS-UP) and Staff Breakfast dish without a style as Pastry or Cold Kitchen. Only fills empty values; correct any of them in Edit Item.">Estimate missing styles</button>
-        <button class="secondary" id="estimate-calories-btn" title="Estimates calories for every Daycare / KG-LP / MS-UP dish without a value, and every AI-generated dish in any section. Only fills empty values.">Estimate missing calories</button>
+        <button class="secondary" id="estimate-calories-btn" ${CALORIE_WRITES_PAUSED ? `disabled title="${CALORIES_PAUSED_NOTE}"` : 'title="Estimates calories for every Daycare / KG-LP / MS-UP dish without a value, and every AI-generated dish in any section. Only fills empty values."'}>Estimate missing calories</button>
         <button class="secondary" id="catalog-import-btn" title="Reads menu Excel files exported from this app and edited by hand, and lists every dish the catalog doesn't have yet. Nothing is added until you tick and confirm.">Import dishes from menus…</button>
         <button class="primary" id="add-item-btn">+ Add Item</button>
       </div>
@@ -911,10 +916,11 @@ async function renderItemsView(main) {
     <div class="calorie-review-bar">
       <span>One-time calorie review (Daycare, KG-LP and MS-UP, whichever tab is open):</span>
       <button class="secondary small" id="calorie-review-export-btn" title="An Excel file of every active Daycare, KG-LP and MS-UP dish with its current calories, for a researcher to fill in real values.">Export calories for review</button>
-      <button class="secondary small" id="calorie-review-import-btn" title="Upload the reviewed file: shows what will change first, then writes only the filled-in Reviewed values.">Import reviewed calories</button>
+      <button class="secondary small" id="calorie-review-import-btn" ${CALORIE_WRITES_PAUSED ? `disabled title="${CALORIES_PAUSED_NOTE}"` : 'title="Upload the reviewed file: shows what will change first, then writes only the filled-in Reviewed values."'}>Import reviewed calories</button>
       <input type="file" id="calorie-review-file" accept=".xlsx" hidden />
       <span class="bar-group"><span class="bar-group-label">Old dish codes:</span> <button class="secondary small" id="code-removal-btn" title="Removes the old RC codes (and the placeholder text &quot;NEW&quot;) from every dish, after a preview. A dish gets a code again from its Recipe Book recipe.">Remove old codes…</button></span>
-      <span class="bar-group"><span class="bar-group-label">Master items:</span> <button class="secondary small" id="master-build-btn" title="One master item per dish and its versions, from the Dish Catalog -- the saved ingredient lists move onto the versions. Preview first.">Build master items…</button></span>
+      <span class="bar-group"><span class="bar-group-label">Master items:</span> <button class="secondary small" id="master-build-btn" title="One master item per dish and its versions, from the Dish Catalog -- the saved ingredient lists move onto the versions. Preview first.">Build master items…</button>
+        <button class="secondary small" id="calorie-merge-btn" title="Each dish version gets its calories from the catalog rows using it: an unflagged value beats a flagged one, and you pick where rows really disagree. Writes only the versions. Preview first.">Carry calories to versions…</button></span>
     </div>
     <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
@@ -935,6 +941,7 @@ async function renderItemsView(main) {
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
   document.getElementById('code-removal-btn').addEventListener('click', () => openCodeRemovalModal(() => renderItemsView(main)));
   document.getElementById('master-build-btn').addEventListener('click', () => openMasterItemsBuildModal(() => renderItemsView(main)));
+  document.getElementById('calorie-merge-btn').addEventListener('click', () => openCalorieMergeModal(() => renderItemsView(main)));
   document.getElementById('catalog-import-btn').addEventListener('click', () => {
     Object.assign(state.catalogImport, { open: true, plan: null, result: null, sel: {}, overrides: {} });
     renderItemsView(main);
@@ -1068,7 +1075,7 @@ async function renderItemsView(main) {
             ${idx === 0 ? `<td class="cat-cell" rowspan="${list.length}">${catName}</td>` : ''}
             <td>${it.name}${it.ingredients_text ? ` <span class="ing-mark" title="${aiEsc(`Approved ingredients: ${it.ingredients_text}`)}" aria-label="Has an approved ingredient list">ING</span>` : ''}</td>
             <td>
-              ${it.calories_per_100g != null ? it.calories_per_100g : '—'}
+              ${it.calories_per_100g == null ? '—' : it.calories_source === 'row' ? `<span class="cal-old" title="Not on this dish's version yet: the old value from this row (Dish Catalog -> Carry calories to versions…).">${it.calories_per_100g}</span>` : it.calories_per_100g}
               ${it.calories_unverified ? `<span class="chip unverified" title="AI estimate -- flagged as implausible for this item's category/protein, no real recipe was available to ground it. Worth a manual check, or add a real recipe so re-estimating can use its actual ingredients.">unverified</span>` : ''}
             </td>
             <td>${it.am_snack_style ? `<span class="chip ${AM_SNACK_STYLE_COLOR[it.am_snack_style] || ''}">${AM_SNACK_STYLE_OPTIONS.find(s => s.code === it.am_snack_style)?.name || it.am_snack_style}</span>` : ''}</td>
@@ -1834,6 +1841,71 @@ async function openMasterItemsBuildModal(onDone) {
   });
 }
 
+// Dish Catalog -> "Carry calories to versions…" (MV5a, lib/calorieMerge.js): each dish version gets its calories from the
+// catalog rows using it. An unflagged value beats a flagged one; where rows really disagree she picks (none preselected,
+// left empty if she doesn't). Writes only versions that are still empty. Preview -> confirm.
+async function openCalorieMergeModal(onDone) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal crm-modal mib-modal cm-modal" role="dialog" aria-modal="true" aria-labelledby="cm-title">
+    <h2 id="cm-title">Carry calories to versions</h2><div id="cm-body" role="status">Reading the Dish Catalog…</div></div>`;
+  document.body.appendChild(overlay);
+  const body = overlay.querySelector('#cm-body');
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  let p;
+  try { p = await window.api.previewCalorieMerge(); } catch (err) { body.textContent = `Couldn't read the Dish Catalog: ${err.message}`; return; }
+  if (p.unavailable) { body.innerHTML = '<p>The master items tables (migration 20261003120000) aren\'t applied yet.</p><div class="actions"><button class="primary" id="cm-x">Close</button></div>'; body.querySelector('#cm-x').addEventListener('click', close); return; }
+  const s = p.summary;
+  const kcal = (v, flagged) => `${v} kcal${flagged ? ' <span class="chip unverified">unverified</span>' : ''}`;
+  const rowsHtml = (v) => v.rows.map(r => `${aiEsc(r.where)}: ${r.value == null ? '—' : kcal(r.value, r.unverified)}`).join('<br>');
+  const toWrite = s.agree + s.trusted;
+  body.innerHTML = `
+    <ul class="crm-groups">
+      <li><strong>${s.agree}</strong> version(s): their rows agree -- carried as they are</li>
+      <li><strong>${s.trusted}</strong> version(s): the rows differ, but only one value is unflagged -- that one is carried
+        <span class="crm-examples">An unflagged value beats an AI estimate flagged "unverified", whichever is newer.</span></li>
+      <li><strong>${s.pick}</strong> version(s): the rows disagree -- pick one below, or leave it empty</li>
+      <li>${s.none} version(s) have no calories on any row and stay empty${s.already ? `; ${s.already} already have a value and are left alone` : ''}</li>
+      ${s.unlinkedWithValue ? `<li>${s.unlinkedWithValue} row(s) with calories have no version yet: they keep showing their old value (greyed) until MV6 links them</li>` : ''}
+    </ul>
+    <p class="ci-hint">Writes only the versions' calories. The Dish Catalog rows are not changed: their old values stay as a copy, shown greyed wherever a version has none.</p>
+    ${p.pick.length ? `<h3 class="cm-h">Rows that disagree (${p.pick.length})</h3><div class="cm-picks">
+      ${p.pick.map(v => `<fieldset class="cm-pick"><legend><strong>${aiEsc(v.dish)}</strong></legend>
+        ${v.candidates.map(c => `<label class="nm-option"><input type="radio" name="cm-${v.variantId}" value="${c.value}"> ${kcal(c.value, c.unverified)}<span class="nm-meta">${c.rows.map(aiEsc).join(', ')}</span></label>`).join('')}
+        <label class="nm-option"><input type="radio" name="cm-${v.variantId}" value=""> Leave empty</label></fieldset>`).join('')}</div>` : ''}
+    ${p.trusted.length ? `<details class="ci-details"><summary>Unflagged value wins (${p.trusted.length})</summary><ul>
+      ${p.trusted.map(v => `<li><strong>${aiEsc(v.dish)}</strong> → ${kcal(v.value, v.unverified)}<br><span class="crm-examples">${rowsHtml(v)}</span></li>`).join('')}</ul></details>` : ''}
+    ${p.agreeSample.length ? `<details class="ci-details"><summary>Shared by several rows that agree (first ${p.agreeSample.length})</summary><ul>
+      ${p.agreeSample.map(v => `<li><strong>${aiEsc(v.dish)}</strong> → ${kcal(v.value, v.unverified)}<br><span class="crm-examples">${rowsHtml(v)}</span></li>`).join('')}</ul></details>` : ''}
+    <div class="actions"><button class="secondary" id="cm-cancel">Cancel</button>
+      <button class="primary" id="cm-apply" ${toWrite || p.pick.length ? '' : 'disabled'}>Carry calories</button></div>`;
+  body.querySelector('#cm-cancel').addEventListener('click', close);
+  body.querySelector('#cm-apply').addEventListener('click', async (e) => {
+    const picks = {};
+    for (const v of p.pick) {
+      const chosen = body.querySelector(`input[name="cm-${v.variantId}"]:checked`);
+      if (chosen && chosen.value !== '') picks[v.variantId] = Number(chosen.value);
+    }
+    e.currentTarget.disabled = true;
+    body.querySelector('#cm-cancel').disabled = true;
+    try {
+      const r = await window.api.applyCalorieMerge({ token: p.token, picks });
+      body.innerHTML = `<ul class="crm-groups">
+          <li><strong>${r.written}</strong> version(s) got their calories (of ${r.planned} planned)</li>
+          ${r.unpicked ? `<li>${r.unpicked} version(s) left empty (no pick)</li>` : ''}
+          ${r.alreadySet.length ? `<li>${r.alreadySet.length} version(s) got a value from somewhere else meanwhile and kept it</li>` : ''}
+          ${r.refused ? `<li class="ci-failed">${r.refused} pick(s) were not one of the listed values and were skipped</li>` : ''}
+          ${r.failed.length ? `<li class="ci-failed">Not everything was written: ${r.failed.slice(0, 5).map(f => aiEsc(`version ${f.variantId}: ${f.error}`)).join('; ')}. Open this again: it continues where it stopped.</li>` : ''}
+        </ul><div class="actions"><button class="primary" id="cm-done">Done</button></div>`;
+      body.querySelector('#cm-done').addEventListener('click', () => { close(); onDone(); });
+    } catch (err) {
+      body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was carried: ${aiEsc(err.message)}</p>`);
+    }
+  });
+}
+
 // ============================================================
 // MASTER ITEMS (MV3, lib/masterItems.js): one master item per distinct dish, its VERSIONS (the versions that really differ,
 // e.g. MS-UP's and Staff's Macaroni & Cheese), and the Dish Catalog rows using each version. One ingredient list per
@@ -2097,7 +2169,8 @@ async function openItemModal(existingItem) {
       </div>
       <div class="field" style="max-width:220px;">
         <label>Calories per 100g</label>
-        <input id="m-calories" type="number" min="0" step="1" value="${isEdit && existingItem.calories_per_100g != null ? existingItem.calories_per_100g : ''}" />
+        <input id="m-calories" type="number" min="0" step="1" value="${isEdit && existingItem.calories_per_100g != null ? existingItem.calories_per_100g : ''}" ${CALORIE_WRITES_PAUSED ? `readonly aria-readonly="true" title="${CALORIES_PAUSED_NOTE}"` : ''} />
+        ${CALORIE_WRITES_PAUSED ? `<span class="crm-examples">${CALORIES_PAUSED_NOTE}</span>` : ''}
       </div>
       <div class="field" style="max-width:320px;">
         <label>Style (AM Snack, PM Snack, Staff Breakfast)</label>
@@ -3844,7 +3917,7 @@ function openAiDishModal(dish) {
 
 // The post-Approve calorie step's status (approve_progress.calories), written by main.js.
 function aiCalorieStatusHtml(c) {
-  const btn = (label) => `<button class="link-btn" id="ai-calories-btn">${label}</button>`;
+  const btn = (label) => (CALORIE_WRITES_PAUSED ? `<span class="list-empty">${CALORIES_PAUSED_NOTE}</span>` : `<button class="link-btn" id="ai-calories-btn">${label}</button>`);
   if (!c) return `Calories: not estimated yet for this run's new dishes. ${btn('Estimate calories')}`;
   if (c.status === 'running') return 'Estimating calories for this run\u2019s new dishes in the background…';
   if (c.status === 'failed') return `Calorie estimate failed: ${aiEsc(c.error || 'unknown error')}. The approval is unaffected. ${btn('Try again')}`;

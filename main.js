@@ -56,6 +56,7 @@ const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMer
 const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
 const { variantDisplayName } = require('./lib/masterItemsPlan');
 const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
+const { CALORIE_WRITES_PAUSED, PAUSED_MESSAGE: CALORIES_PAUSED_MESSAGE, effectiveCalories, planCalorieMerge, mergeWrites, applyCalorieMerge } = require('./lib/calorieMerge');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -545,7 +546,7 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
   const sharedBy = new Map();
   for (let i = 0; i < variantIds.length; i += 300) {
     const part = variantIds.slice(i, i + 300);
-    const { data: vs, error: vErr } = await supabase.from('dish_variants').select(`id, ${INGREDIENT_COLUMNS}`).in('id', part);
+    const { data: vs, error: vErr } = await supabase.from('dish_variants').select(`id, ${INGREDIENT_COLUMNS}, calories_per_100g, calories_unverified`).in('id', part);
     if (vErr) throw supaFail('get-items: load dish_variants', vErr);
     for (const v of vs) variantById.set(v.id, v);
     const { data: users, error: uErr } = await supabase.from('menu_items').select('dish_variant_id').in('dish_variant_id', part);
@@ -557,6 +558,8 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
     .map(mi => {
       const cat = getCategoryById(mi.category_id);
       const pt = mi.protein_type_id ? getProteinById(mi.protein_type_id) : null;
+      // Calories are the dish VERSION's (MV5a); a row whose version has none yet shows its own frozen value, marked 'row'.
+      const cal = effectiveCalories(mi, variantById.get(mi.dish_variant_id) || null);
       return {
         id: mi.id,
         name: mi.name,
@@ -567,8 +570,9 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         category_name: cat?.name,
         protein_code: pt?.code ?? null,
         protein_name: pt?.name ?? null,
-        calories_per_100g: mi.calories_per_100g,
-        calories_unverified: mi.calories_unverified,
+        calories_per_100g: cal.value,
+        calories_unverified: cal.unverified,
+        calories_source: cal.source,
         am_snack_style: mi.am_snack_style,
         // Set by the AI Menu Generator's Approve on the dishes it created (never on linked ones).
         is_ai_generated: !!mi.is_ai_generated,
@@ -656,7 +660,8 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       category_id: category.id,
       protein_type_id: protein ? protein.id : null,
       is_daily_repeating: isDailyRepeating ? 1 : 0,
-      calories_per_100g: caloriesPer100g ?? null,
+      // Paused during MV5a (lib/calorieMerge.js): a new dish starts without calories; MV5b writes them to its version.
+      calories_per_100g: CALORIE_WRITES_PAUSED ? null : (caloriesPer100g ?? null),
       am_snack_style: resolvedAmSnackStyle,
       // Blank unless she typed one: "OLD" means "existed before Created By was added".
       created_by_label: createdBy,
@@ -800,15 +805,10 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
       protein_type_id: protein ? protein.id : null,
       is_daily_repeating: isDailyRepeating ? 1 : 0,
       is_active: isActive ? 1 : 0,
-      calories_per_100g: caloriesPer100g ?? null,
-      // A manual save through this modal always overwrites every field with its current form
-      // value regardless of whether she actually touched it (same as name/category/protein
-      // always have) -- so a save here always clears calories_unverified too, on the same
-      // "this is the state she's now confirming" logic. If she re-saves without noticing an
-      // unverified AI estimate, that's a real limitation (the flag currently only shows in the
-      // Dish Catalog list, not inside this modal) -- flagged as a judgment call, not silently
-      // decided.
-      calories_unverified: false,
+      // Calories: not written while paused (MV5a, lib/calorieMerge.js) -- the old columns are a frozen copy and the value
+      // now belongs to the dish version (MV5b writes it there). Before MV5a every save rewrote them and cleared
+      // calories_unverified, whether or not she touched the field.
+      ...(CALORIE_WRITES_PAUSED ? {} : { calories_per_100g: caloriesPer100g ?? null, calories_unverified: false }),
       am_snack_style: resolvedAmSnackStyle,
     })
     .eq('id', id);
@@ -1295,6 +1295,49 @@ ipcMain.handle('apply-master-items-build', async (e, { token, includeJoining }) 
   return { ...r, conflicts: r.conflicts.length };
 });
 
+// Calories onto versions, MV5a (lib/calorieMerge.js): each version's value from the catalog rows using it, preview ->
+// confirm. Writes ONLY dish_variants.calories_per_100g / calories_unverified, and only on versions still empty; menu_items
+// is read, never written (its calorie columns stay as the frozen copy the screens fall back to).
+let calorieMergePlan = null; // { token, plan }
+
+ipcMain.handle('preview-calorie-merge', async () => {
+  if (!(await masterItemsReady())) return { unavailable: true };
+  const [rows, variants, catalog] = await Promise.all([
+    fetchAllParallel('menu_items', 'id, name, category_id, dish_variant_id, calories_per_100g, calories_unverified', (q) => q.order('id'), 'calorie merge: load menu_items'),
+    fetchAllParallel('dish_variants', 'id, master_item_id, calories_per_100g, calories_unverified', (q) => q.order('id'), 'calorie merge: load dish_variants'),
+    loadCatalogForImport(),
+  ]);
+  const plan = planCalorieMerge({ rows, variants });
+  calorieMergePlan = { token: crypto.randomUUID(), plan };
+  const rowById = new Map(rows.map((r) => [r.id, r]));
+  const sectionsById = new Map(catalog.map((it) => [it.id, it.sections]));
+  const where = (id) => {
+    const r = rowById.get(id);
+    return `#${id} ${getCategoryById(r?.category_id)?.name || ''} [${(sectionsById.get(id) || []).map((c) => getSectionByCode(c)?.name || c).join(', ')}]`;
+  };
+  const show = (v) => ({
+    variantId: v.variantId, dish: v.rows[0]?.name || '', value: v.value, unverified: v.unverified,
+    rows: v.rows.map((r) => ({ where: where(r.id), value: r.value, unverified: r.unverified })),
+    candidates: v.candidates.map((c) => ({ value: c.value, unverified: c.unverified, rows: c.rowIds.map(where) })),
+  });
+  return {
+    token: calorieMergePlan.token, summary: plan.summary,
+    trusted: plan.versions.filter((v) => v.outcome === 'trusted').map(show),
+    pick: plan.versions.filter((v) => v.outcome === 'pick').map(show),
+    agreeSample: plan.versions.filter((v) => v.outcome === 'agree' && v.rows.length > 1).slice(0, 40).map(show),
+  };
+});
+
+ipcMain.handle('apply-calorie-merge', async (e, { token, picks }) => {
+  if (!calorieMergePlan || calorieMergePlan.token !== token) throw new Error('That preview is out of date -- open it again.');
+  const { plan } = calorieMergePlan;
+  calorieMergePlan = null;
+  const { writes, refused, unpicked } = mergeWrites(plan, picks || {});
+  const r = await applyCalorieMerge({ db: supabase, writes });
+  if (r.failed.length || r.alreadySet.length || refused.length) log.warn('[calorie merge]', { failed: r.failed, alreadySet: r.alreadySet, refused });
+  return { ...r, planned: writes.length, refused: refused.length, unpicked: unpicked.length };
+});
+
 // Master Items screen (MV3, lib/masterItems.js): master items with their versions, the catalog rows using each, and the
 // version-level writes (list, move a row to another version of the same dish, delete / unlink-and-delete).
 async function loadAllVariants() {
@@ -1394,12 +1437,14 @@ ipcMain.handle('export-calorie-review', async () => {
   return { success: true, path: result.filePath, count: rows.length };
 });
 ipcMain.handle('preview-calorie-import', async (e, { base64 }) => {
+  if (CALORIE_WRITES_PAUSED) throw new Error(CALORIES_PAUSED_MESSAGE);
   const parsed = await parseCalorieReviewWorkbook(Buffer.from(base64, 'base64'));
   const plan = planCalorieImport(parsed, await loadImportTargets());
   calorieImportPlan = { token: crypto.randomUUID(), updates: plan.updates };
   return { token: calorieImportPlan.token, rows: parsed.length, ...plan };
 });
 ipcMain.handle('apply-calorie-import', async (e, { token }) => {
+  if (CALORIE_WRITES_PAUSED) throw new Error(CALORIES_PAUSED_MESSAGE);
   if (!calorieImportPlan || calorieImportPlan.token !== token) throw new Error('That preview is out of date -- choose the file again.');
   const { updates } = calorieImportPlan;
   calorieImportPlan = null;
@@ -1576,7 +1621,7 @@ ipcMain.handle('apply-catalog-ingredients-save', async (e, { token, picks }) => 
   return result;
 });
 
-ipcMain.handle('estimate-missing-calories', async (e) => runCalorieBackfill({
+ipcMain.handle('estimate-missing-calories', async (e) => CALORIE_WRITES_PAUSED ? { paused: true, message: CALORIES_PAUSED_MESSAGE } : runCalorieBackfill({
   send: (payload) => { if (!e.sender.isDestroyed()) e.sender.send('calorie-estimate-progress', payload); },
 }));
 
@@ -5288,7 +5333,7 @@ ipcMain.handle('ai-menu-approve', async (e, { runId }) => {
   // Calories are a separate step, deliberately NOT part of Approve (an AI outage must never hold up
   // or undo an approval): started in the background once the approval has fully succeeded, outside
   // the approval claim. Its progress / result is stored on the run (approve_progress.calories).
-  if (result.ok && !result.alreadyApproved) estimateApprovedRunCalories(runId).catch(err => log.warn(`[ai-menu calories] run ${runId}: ${err.message}`));
+  if (result.ok && !result.alreadyApproved && !CALORIE_WRITES_PAUSED) estimateApprovedRunCalories(runId).catch(err => log.warn(`[ai-menu calories] run ${runId}: ${err.message}`));
   return result;
 });
 
@@ -5329,7 +5374,10 @@ async function estimateApprovedRunCalories(runId) {
   }
 }
 // The approved run's "Estimate calories" button (and a re-run after a failure). Waits for the result.
-ipcMain.handle('ai-menu-estimate-calories', (e, { runId }) => estimateApprovedRunCalories(runId));
+ipcMain.handle('ai-menu-estimate-calories', (e, { runId }) => {
+  if (CALORIE_WRITES_PAUSED) throw new Error(CALORIES_PAUSED_MESSAGE);
+  return estimateApprovedRunCalories(runId);
+});
 
 ipcMain.handle('get-section-slots', (e, sectionCode) => {
   return (SECTION_SLOTS[sectionCode] || []).map(([categoryCode, count, options]) => ({ categoryCode, count, fixedDaily: !!options.fixedDaily }));

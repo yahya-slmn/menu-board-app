@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld('api', {
   masterItemsMoveRow: (payload) => ipcRenderer.invoke('master-items-move-row', payload),
   masterItemsDelete: (payload) => ipcRenderer.invoke('master-items-delete', payload),
   applyMasterItemsBuild: (payload) => ipcRenderer.invoke('apply-master-items-build', payload),
+  previewCalorieMerge: () => ipcRenderer.invoke('preview-calorie-merge'),
+  applyCalorieMerge: (payload) => ipcRenderer.invoke('apply-calorie-merge', payload),
   nameMapDecide: (payload) => ipcRenderer.invoke('name-map-decide', payload),
   nameMapAddIngredient: (payload) => ipcRenderer.invoke('name-map-add-ingredient', payload),
   nameMapUndo: (payload) => ipcRenderer.invoke('name-map-undo', payload),

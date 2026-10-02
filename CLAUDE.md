@@ -244,6 +244,13 @@ category). `apply-catalog-import` writes only ticked keys of the stored plan: Cr
 for each section's age groups like Add Item, no code / calories / style. A header date may carry a note ("29-09-2026 Arminian
 Day"); the parser reads the first 10 characters.
 
+**Recipe Generator bulk delete** (2026-10-04): ticks / "Select all" on the Drafts folder list, inside a draft folder and on Recipe
+Generated, then "Delete selected"; one confirmation (`openRgDeleteModal`) lists each recipe per folder, the menu dish it was made
+for and the Master Item sharing its exact name (shown, not affected). Each goes through the existing single-recipe delete; only the
+Recipe Generator's own recipes are touched. RG codes are never reused (`deleted_generated_recipe_codes`, migration 20261004110000,
+applied by hand; `nextRgCode` counts past them). `lib/generatedRecipeDelete.js` (pure) plans it; `scripts/rg-delete-check.js` in
+npm test; `scripts/rg-delete-verify.js` (read-only, login) PASS; first real delete 2026-10-02.
+
 **Recipe Generator category groups** (2026-09-30, Menu Ingredients -> Recipe Generator pipeline, Phase B): drafts and
 confirmed recipes are listed day (ascending) -> menu category group -> recipe (`recipeDayCategoryRowsHtml` in renderer.js,
 one function for both lists; confirmed recipes stay under their source menu first). `lib/recipeCategoryGroups.js` (pure):
@@ -800,7 +807,23 @@ list since MV4: M3 reuse, the M2 approved-file save (one entry per version) and 
 `scripts/master-items-switch-check.js` -- every row with its own list served byte-identically before / after (the assumption-B
 rows now get their version's list); real data: `master-items-verify.js --compare <snapshot>` showed 0 changed menu_items
 rows. Test generators must use the HIGH bits of the LCG (the low bits repeat; it once made the MV1 random test weaker than it
-looked). Next: MV5 calories on versions, MV6 new catalog rows linked, then U3+ on versions.
+looked).
+Master Items screen made fast (2026-10-04): `list-master-items` returns a light summary per dish (`buildMasterSummaries`),
+fetched in parallel pages (`fetchAllParallel`); a dish's versions / rows / sections load only when it is opened
+(`master-item-detail`). Columns: Code | Item name | Created By (the linked rows' labels, most common first) | Ingredients |
+Edit / Delete; search matches name or code.
+MV5a (2026-10-04): calories are READ from the version. `lib/calorieMerge.js` (pure): `effectiveCalories` = the version's value,
+else the row's own frozen value (`calories_source: 'row'`, shown grey italic in the Dish Catalog), used by `get-items` and the
+calorie review export. Dish Catalog -> "Carry calories to versions…" (`preview-` / `apply-calorie-merge`): trust order, decided
+with the chef -- an UNFLAGGED value beats one flagged `calories_unverified` whichever is newer (the database records no other
+provenance: typed, reviewed-import and plausible AI values look the same); different values of the same trust = she picks (none
+preselected; unpicked stays empty); writes only versions still empty, never menu_items. Run on live data 2026-10-04 and verified
+(`scripts/calorie-merge-verify.js`, read-only, login; `--compare <snapshot>`): 3,292 versions, 1,973 rows-agree + 21 picks
+carried = 1,994 with calories, 1,298 empty (no row had one); 3,315 rows unchanged, 163 blank rows now show their version's value,
+21 show her pick, 0 failures, 0 menu_items rows changed. `CALORIE_WRITES_PAUSED` (lib/calorieMerge.js, mirrored in renderer.js)
+until MV5b: Edit Item's calories field is read-only, Add Item / update-item write none, and the backfill, the review import and
+the calorie step after AI Approve are off (buttons greyed, IPC refuses). Order decided with the chef: MV5a -> MV6 (new rows get
+a version) -> MV5b (every calorie write goes to the version). Then U3+ on versions.
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 

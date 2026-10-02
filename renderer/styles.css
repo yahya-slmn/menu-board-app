@@ -1583,6 +1583,16 @@ table.items-table.master-items-table th:nth-child(5), table.items-table.master-i
 .nm-option:has(input:checked) { border-color: var(--sage); background: var(--sage-fill); }
 .nm-option input { margin-top: 3px; }
 .nm-meta { display: block; font-size: 11.5px; color: var(--neutral); }
+/* Calories onto versions (MV5a): the merge's picks, and a Dish Catalog value still shown from the row's old column. */
+.cm-h { font-size: 14px; margin: 4px 0 6px; }
+.cm-picks { max-height: 170px; overflow: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.cm-pick { border: 1px solid var(--line); border-radius: 8px; padding: 2px 8px 6px; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.cm-pick legend { font-size: 13px; }
+.cm-pick .nm-option { padding: 3px 8px; align-items: baseline; }
+.cm-pick .nm-option input { margin-top: 0; }
+.cm-pick .nm-meta { display: inline; margin-left: 4px; }
+.cm-modal .crm-groups li { margin-bottom: 2px; }
+.cal-old { color: var(--neutral); font-style: italic; }
 .nm-link { background: none; border: 0; padding: 4px 0; color: var(--sage-dark); text-decoration: underline; cursor: pointer; font: inherit; font-size: 12.5px; }
 .nm-search-row { margin-top: 8px; }
 .nm-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
