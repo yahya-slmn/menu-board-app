@@ -824,6 +824,18 @@ carried = 1,994 with calories, 1,298 empty (no row had one); 3,315 rows unchange
 until MV5b: Edit Item's calories field is read-only, Add Item / update-item write none, and the backfill, the review import and
 the calorie step after AI Approve are off (buttons greyed, IPC refuses). Order decided with the chef: MV5a -> MV6 (new rows get
 a version) -> MV5b (every calorie write goes to the version). Then U3+ on versions.
+MV6 (2026-10-04): every NEW catalog row gets a version when it is created -- Add Item, AI Approve (every row the run uses; a
+linked one is left alone) and Import dishes from menus -- through `lib/variantLink.js` `linkNewRow`. Rule (chef's choice, MV2's
+rule for a row with no list): no dish of that name (name_key) -> new master item + empty version; exactly ONE version -> join it
+(the row shows its ingredients and calories); 2+ -> a new empty version (move it in Master Items). Never blocks the save: a failure
+is a warning and the row stays unlinked; an abandoned link removes the version AND a master item it created (else the dish's next
+row would see an empty dish). Add Item's typed list goes on the version only if it has none (an existing shared list is never
+overwritten). A rename in Edit Item moves the row to the new name's dish by the same rule (`relinkRenamedRow`, compare-and-swap on
+the old version; the old version keeps its list and calories; the form says which way it went). Catch-up: Dish Catalog -> "Link
+rows without a version…" (`preview-` / `apply-link-unlinked-rows`, `planLinks` predicts each row). `scripts/variant-link-check.js`
+in npm test; `scripts/variant-link-verify.js` (read-only, login) on live data 2026-10-04: 3,499 rows, 3,289 master items, 3,292
+versions, 0 rows without a version, 0 under another name's dish, 0 empty masters, 0 unused versions -- PASS. Known limit: two
+rows of the same NEW dish added at the same moment can each get a version (merge in Master Items). Next: MV5b.
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 

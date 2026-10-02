@@ -186,6 +186,11 @@ const handlers = {
       trusted: Array.from({ length: 37 }, (_, i) => v(i, 200 + i, [{ where: where(i, 'Daycare'), value: 200 + i, unverified: false }, { where: where(i + 1, 'KG-LP'), value: 35, unverified: true }])),
       agreeSample: Array.from({ length: 40 }, (_, i) => v(i, 150 + i, [{ where: where(i, 'KG-LP'), value: 150 + i, unverified: false }, { where: where(i + 1, 'MS-UP'), value: 150 + i, unverified: false }])) };
   },
+  // Dish Catalog -> Link rows without a version (MV6): one row of each kind, plus a long list to scroll.
+  previewLinkUnlinkedRows: () => ({ token: 'lr1', rows: [
+    ...Array.from({ length: 14 }, (_, i) => ({ id: 3500 + i, name: LONG[i % LONG.length], outcome: 'joined', where: 'Main Dish [Staff]' })),
+    { id: 3520, name: 'Macaroni & Cheese', outcome: 'new-version', where: 'Main Dish [CEO]' },
+    { id: 3521, name: 'Shakshuka with za\'atar', outcome: 'new-dish', where: 'AM Snack [Daycare, KG-LP]' }] }),
   ingredientMergeSuggestions: () => ({ suggestions: [{ why: 'spelling', items: [ING[20], ING[21]] }, { why: 'word order', items: [ING[22], ING[23]] }] }),
   previewIngredientMerge: ({ survivorId, mergedId }) => ({ survivor: ING.find((m) => m.id === survivorId), merged: ING.find((m) => m.id === mergedId), recipeRows: 2, aliases: 1, codeChoice: true }),
   // Dish Catalog -> Remove old codes (U1): the real proportions from the U0 measurement.

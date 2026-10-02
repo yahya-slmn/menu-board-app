@@ -56,6 +56,7 @@ const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMer
 const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
 const { variantDisplayName } = require('./lib/masterItemsPlan');
 const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
+const { linkNewRow, relinkRenamedRow, planLinks } = require('./lib/variantLink');
 const { CALORIE_WRITES_PAUSED, PAUSED_MESSAGE: CALORIES_PAUSED_MESSAGE, effectiveCalories, planCalorieMerge, mergeWrites, applyCalorieMerge } = require('./lib/calorieMerge');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
@@ -722,8 +723,24 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       throw supaFail('add-item: insert item_portions', portErr);
     }
   }
-  // A new dish has no version yet (Master Items links it), so a list typed in Add Item can't be saved here.
-  const ingredientsWarning = (ingredientsText !== undefined && String(ingredientsText ?? '').trim()) ? 'The dish was added. Its ingredient list was not saved: a new dish gets its version in Master Items first.' : null;
+  // MV6: the new row gets its version now (lib/variantLink.js: its dish's only version, else a new empty one). Never
+  // blocks the add: a failure is a warning and the row stays unlinked (Dish Catalog -> "Link rows without a version…").
+  const warnings = [];
+  let variantId = null;
+  if (await masterItemsReady()) {
+    try { variantId = (await linkNewRow({ db: supabase, rowId: itemId, name, who: await signedInLogin() })).variantId; }
+    catch (err) { log.warn(`[variant link] add-item #${itemId}: ${err.message}`); warnings.push(`The dish was added, but it could not be linked to a version (${err.message}). Dish Catalog -> "Link rows without a version…" links it.`); }
+  }
+  // A list typed in Add Item goes on that version only if the version has none yet (an existing list is never overwritten).
+  if (ingredientsText !== undefined && String(ingredientsText ?? '').trim()) {
+    if (variantId == null) warnings.push('Its ingredient list was not saved: the dish has no version yet.');
+    else {
+      const r = await saveVariantList({ db: supabase, variantId, ingredients: ingredientsText, allergens: allergensText, expectedUpdatedAt: null, who: await signedInLogin(), source: 'manual' });
+      if (r.conflict) warnings.push(`Its ingredient list was not saved: the dish uses the existing version of "${name}", which already has a list. Open Edit Item to change that list (it is shared).`);
+      else if (r.historyError) log.warn(`[master items] version ${variantId}: list saved, history row failed: ${r.historyError}`);
+    }
+  }
+  const ingredientsWarning = warnings.length ? warnings.join('\n\n') : null;
   return { success: true, itemId, ...(ingredientsWarning ? { ingredientsWarning } : {}) };
 });
 
@@ -795,6 +812,10 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
   const createdByPatch = createdByLabel === undefined ? {} : { created_by_label: await normalizeCreatedByLabel(createdByLabel, id) };
   // Code (menu_items.rc_code): no longer written here (U1, 2026-10-03) -- a dish's code comes only from its linked Recipe
   // Book recipe. An older form that still sends rcCode is ignored.
+  // MV6: the name and version BEFORE the save, so a rename can move the row to its new name's dish afterwards.
+  const linkReady = await masterItemsReady();
+  const { data: before, error: bErr } = linkReady ? await supabase.from('menu_items').select('name, dish_variant_id').eq('id', id).maybeSingle() : { data: null, error: null };
+  if (bErr) throw supaFail('update-item: read the row before saving', bErr);
 
   const { error } = await supabase
     .from('menu_items')
@@ -838,14 +859,39 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
     }
   }
 
+  // MV6: renamed -> the row moves to its NEW name's dish (lib/variantLink.js: its only version, else a new empty one); the
+  // old version keeps its list and calories. Never blocks the save: a failure is a warning.
+  const warnings = [];
+  let moved = null;
+  if (linkReady && before) {
+    try {
+      const r = await relinkRenamedRow({ db: supabase, rowId: id, oldName: before.name, newName: name, fromVariantId: before.dish_variant_id, who: await signedInLogin() });
+      if (r.moved) moved = r;
+      else if (r.stale) warnings.push('The dish was renamed, but its version was changed by someone else meanwhile, so it was not moved to the new name\'s dish. Check it in Master Items.');
+    } catch (err) {
+      log.warn(`[variant link] update-item #${id}: ${err.message}`);
+      warnings.push(`The dish was renamed, but it could not be moved to the new name's dish (${err.message}). Move it in Master Items.`);
+    }
+  }
+
   // Only when the form sends them (the Edit Item form does once the migration is applied); compared with what is saved
   // NOW, and written only if nobody saved a list since the form opened (ingredientsExpectedUpdatedAt).
-  let ingredientsWarning = null;
-  if ((ingredientsText !== undefined || allergensText !== undefined) && await masterItemsReady()) {
+  if ((ingredientsText !== undefined || allergensText !== undefined) && linkReady) {
     const { data: cur, error: curErr } = await supabase.from('menu_items').select('dish_variant_id').eq('id', id).maybeSingle();
     if (curErr) throw supaFail('update-item: read the dish version', curErr);
-    ingredientsWarning = await saveManualIngredients({ variantId: cur ? cur.dish_variant_id : null, ingredientsText, allergensText, expectedUpdatedAt: ingredientsExpectedUpdatedAt });
+    if (moved) {
+      // The form showed the OLD version's list: it goes on the new one only if that has no list yet.
+      const r = await saveVariantList({ db: supabase, variantId: moved.variantId, ingredients: ingredientsText, allergens: allergensText, expectedUpdatedAt: null, who: await signedInLogin(), source: 'manual' });
+      if (r.conflict) warnings.push(`The ingredient list was not saved: renamed, the dish now uses the existing version of "${name}", which already has a list. Reopen the dish to see it.`);
+    } else {
+      const w = await saveManualIngredients({ variantId: cur ? cur.dish_variant_id : null, ingredientsText, allergensText, expectedUpdatedAt: ingredientsExpectedUpdatedAt });
+      if (w) warnings.push(w);
+    }
   }
+  if (moved) warnings.unshift(moved.outcome === 'joined'
+    ? `Renamed: the dish now uses the version of "${name}" that was already in Master Items (its ingredients and calories). The old version is unchanged.`
+    : `Renamed: the dish now has its own new version under "${name}" (no ingredients or calories yet). The old version is unchanged -- move the row back in Master Items if that was wrong.`);
+  const ingredientsWarning = warnings.length ? warnings.join('\n\n') : null;
   return { success: true, ...(ingredientsWarning ? { ingredientsWarning } : {}) };
 });
 
@@ -1338,6 +1384,46 @@ ipcMain.handle('apply-calorie-merge', async (e, { token, picks }) => {
   return { ...r, planned: writes.length, refused: refused.length, unpicked: unpicked.length };
 });
 
+// Rows without a version (MV6, lib/variantLink.js): every new row is linked when it is created; this catches up any that a
+// failed link left behind. Preview (each row with what it will get) -> confirm; each row goes through linkNewRow, which
+// leaves a row linked meanwhile as it is.
+let linkRowsPlan = null; // { token, rows }
+
+ipcMain.handle('preview-link-unlinked-rows', async () => {
+  if (!(await masterItemsReady())) return { unavailable: true };
+  const [rows, masters, variants, catalog] = await Promise.all([
+    fetchAllParallel('menu_items', 'id, name, category_id', (q) => q.is('dish_variant_id', null).order('id'), 'link rows: load unlinked rows'),
+    fetchAllParallel('master_items', 'id, name_key', (q) => q.order('id'), 'link rows: load master_items'),
+    fetchAllParallel('dish_variants', 'id, master_item_id', (q) => q.order('id'), 'link rows: load dish_variants'),
+    loadCatalogForImport(),
+  ]);
+  const perMaster = new Map();
+  for (const v of variants) perMaster.set(v.master_item_id, (perMaster.get(v.master_item_id) || 0) + 1);
+  const versionsByKey = new Map(masters.map((m) => [m.name_key, perMaster.get(m.id) || 0]));
+  const sectionsById = new Map(catalog.map((it) => [it.id, it.sections]));
+  const catOf = new Map(rows.map((r) => [r.id, getCategoryById(r.category_id)?.name || '']));
+  const plan = planLinks(rows, versionsByKey).map((p) => ({ ...p,
+    where: `${catOf.get(p.id)} [${(sectionsById.get(p.id) || []).map((c) => getSectionByCode(c)?.name || c).join(', ')}]` }));
+  linkRowsPlan = { token: crypto.randomUUID(), rows: plan };
+  return { token: linkRowsPlan.token, rows: plan };
+});
+
+ipcMain.handle('apply-link-unlinked-rows', async (e, { token }) => {
+  if (!linkRowsPlan || linkRowsPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
+  const { rows } = linkRowsPlan;
+  linkRowsPlan = null;
+  const who = await signedInLogin();
+  const out = { linked: 0, already: 0, failed: [] };
+  for (const r of rows) {
+    try {
+      const res = await linkNewRow({ db: supabase, rowId: r.id, name: r.name, who });
+      if (res.outcome === 'already') out.already++; else out.linked++;
+    } catch (err) { out.failed.push({ id: r.id, name: r.name, error: err.message }); }
+  }
+  if (out.failed.length) log.warn('[variant link] catch-up:', out.failed);
+  return out;
+});
+
 // Master Items screen (MV3, lib/masterItems.js): master items with their versions, the catalog rows using each, and the
 // version-level writes (list, move a row to another version of the same dish, delete / unlink-and-delete).
 async function loadAllVariants() {
@@ -1505,7 +1591,9 @@ ipcMain.handle('apply-catalog-import', async (e, { token, createdBy, picks }) =>
   catalogImportPlan = null;
   const byKey = new Map([...plan.newDishes, ...plan.similar, ...plan.notInSection].map(entry => [entry.key, entry]));
   const createdByLabel = await normalizeCreatedByLabel(createdBy);
-  const created = [], sectionsAdded = [], failed = [];
+  const created = [], sectionsAdded = [], failed = [], unlinked = [];
+  const linkReady = await masterItemsReady();
+  const who = linkReady ? await signedInLogin() : null;
 
   const portionRows = (itemId, category, sectionCodes) => sectionCodes.flatMap(code => {
     const section = getSectionByCode(code);
@@ -1556,11 +1644,16 @@ ipcMain.handle('apply-catalog-import', async (e, { token, createdBy, picks }) =>
         throw supaFail('apply-catalog-import: insert item_portions', portErr);
       }
       created.push({ id: inserted.id, name, categoryCode, sections });
+      // MV6: its version now (never blocks the import; a failure is listed and the row stays unlinked).
+      if (linkReady) {
+        try { await linkNewRow({ db: supabase, rowId: inserted.id, name, who }); }
+        catch (err) { log.warn(`[variant link] catalog import #${inserted.id}: ${err.message}`); unlinked.push({ name, reason: err.message }); }
+      }
     } catch (err) {
       failed.push({ name: pick.name || entry.name, reason: err.message });
     }
   }
-  return { created, sectionsAdded, failed, createdByLabel };
+  return { created, sectionsAdded, failed, createdByLabel, unlinked };
 });
 
 // Dish Catalog ingredients, M2: "Save approved lists to the Dish Catalog" (Menu Ingredients screen). The preview reads
