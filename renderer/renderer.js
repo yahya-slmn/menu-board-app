@@ -913,6 +913,7 @@ async function renderItemsView(main) {
       <button class="secondary small" id="calorie-review-import-btn" title="Upload the reviewed file: shows what will change first, then writes only the filled-in Reviewed values.">Import reviewed calories</button>
       <input type="file" id="calorie-review-file" accept=".xlsx" hidden />
       <span class="bar-group"><span class="bar-group-label">Old dish codes:</span> <button class="secondary small" id="code-removal-btn" title="Removes the old RC codes (and the placeholder text &quot;NEW&quot;) from every dish, after a preview. A dish gets a code again from its Recipe Book recipe.">Remove old codes…</button></span>
+      <span class="bar-group"><span class="bar-group-label">Master items:</span> <button class="secondary small" id="master-build-btn" title="One master item per dish and its versions, from the Dish Catalog -- the saved ingredient lists move onto the versions. Preview first.">Build master items…</button></span>
     </div>
     <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
@@ -932,6 +933,7 @@ async function renderItemsView(main) {
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
   document.getElementById('code-removal-btn').addEventListener('click', () => openCodeRemovalModal(() => renderItemsView(main)));
+  document.getElementById('master-build-btn').addEventListener('click', () => openMasterItemsBuildModal(() => renderItemsView(main)));
   document.getElementById('catalog-import-btn').addEventListener('click', () => {
     Object.assign(state.catalogImport, { open: true, plan: null, result: null, sel: {}, overrides: {} });
     renderItemsView(main);
@@ -1766,6 +1768,66 @@ async function openCodeRemovalModal(onDone) {
       body.querySelector('#crm-close').addEventListener('click', () => { close(); onDone(); });
     } catch (err) {
       body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was removed: ${aiEsc(err.message)}</p>`);
+    }
+  });
+}
+
+// Dish Catalog -> "Master items: Build master items…" (MV2, lib/masterItemsBuild.js): one master item per dish, its
+// versions (dish variants), each catalog row linked to the version it uses, and the saved ingredient lists carried onto the
+// versions. Nothing about where a dish is served changes. Preview -> confirm.
+async function openMasterItemsBuildModal(onDone) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal crm-modal mib-modal" role="dialog" aria-modal="true" aria-labelledby="mib-title">
+    <h2 id="mib-title">Build master items</h2><div id="mib-body" role="status">Reading the Dish Catalog…</div></div>`;
+  document.body.appendChild(overlay);
+  const body = overlay.querySelector('#mib-body');
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  let p;
+  try { p = await window.api.previewMasterItemsBuild(); } catch (err) { body.textContent = `Couldn't read the Dish Catalog: ${err.message}`; return; }
+  if (p.unavailable) { body.innerHTML = '<p>The master items tables (migration 20261003120000) aren\'t applied yet.</p><div class="actions"><button class="primary" id="mib-x">Close</button></div>'; body.querySelector('#mib-x').addEventListener('click', close); return; }
+  const s = p.summary;
+  const carriedAll = s.listsToCarry === p.lists.length;
+  body.innerHTML = `
+    <ul class="crm-groups">
+      <li><strong>${s.mastersToCreate}</strong> master item(s) -- one per dish -- and <strong>${s.variantsToCreate}</strong> version(s) of them</li>
+      <li><strong>${s.listsToCarry}</strong> saved ingredient list(s) move onto their versions (rows with an identical list share one version)
+        <span class="crm-examples">${s.savedListsInCatalog} rows of the Dish Catalog have a saved list; each list lands on exactly one version, with who saved it and when</span></li>
+      <li><strong>${s.listRowsToLink + s.plainRowsToLink}</strong> catalog row(s) linked to the version they use</li>
+      ${s.rowsToPick ? `<li><strong>${s.rowsToPick}</strong> row(s) left for you to pick a version: their dish has 2+ versions and the row has no list of its own (Master Items screen, next step)</li>` : ''}
+      ${p.conflicts ? `<li class="ci-failed">${p.conflicts} group(s) skipped: their rows are already linked to different versions</li>` : ''}
+    </ul>
+    ${s.joiningRows ? `<label class="mib-join"><input type="checkbox" id="mib-joining" checked>
+      Also link <strong>${s.joiningRows}</strong> row(s) with no list of their own to their dish's <em>only</em> version
+      <span class="crm-examples">e.g. Staff's copy of a school dish. Once the ingredient features use versions, Menu Ingredients will serve these rows that version's saved list instead of asking the AI. Untick to leave them unlinked for now.</span></label>` : ''}
+    <p class="ci-hint">This only links rows to versions. Which sections and categories a dish is served in, its calories and the menus are unchanged.</p>
+    <details class="ci-details"><summary>Where each saved list goes (${p.lists.length})</summary><ul>
+      ${p.lists.map(l => `<li><strong>${aiEsc(l.dish)}</strong> → “${aiEsc(l.variant)}” from ${l.from.map(aiEsc).join(', ')}${l.joining.length ? `; joining: ${l.joining.map(aiEsc).join(', ')}` : ''}</li>`).join('')}</ul></details>
+    ${p.toPick.length ? `<details class="ci-details"><summary>Rows left for you to pick (${s.rowsToPick})</summary><ul>
+      ${p.toPick.map(t => `<li><strong>${aiEsc(t.dish)}</strong> (${t.variants} versions): ${t.rows.map(aiEsc).join(', ')}</li>`).join('')}</ul></details>` : ''}
+    ${carriedAll ? '' : '<p class="field-warning">The list count does not add up -- nothing should be built. Please report this.</p>'}
+    <div class="actions"><button class="secondary" id="mib-cancel">Cancel</button>
+      <button class="primary" id="mib-apply" ${carriedAll && (s.mastersToCreate || s.variantsToCreate || s.listRowsToLink || s.plainRowsToLink || s.joiningRows) ? '' : 'disabled'}>Build</button></div>`;
+  body.querySelector('#mib-cancel').addEventListener('click', close);
+  body.querySelector('#mib-apply').addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    body.querySelector('#mib-cancel').disabled = true;
+    const includeJoining = !!body.querySelector('#mib-joining')?.checked;
+    try {
+      const r = await window.api.applyMasterItemsBuild({ token: p.token, includeJoining });
+      body.innerHTML = `<ul class="crm-groups">
+          <li><strong>${r.mastersCreated}</strong> master item(s) and <strong>${r.variantsCreated}</strong> version(s) created</li>
+          <li><strong>${r.listsCarried}</strong> saved list(s) carried · <strong>${r.rowsLinked}</strong> row(s) linked</li>
+          ${r.alreadyLinked ? `<li>${r.alreadyLinked} row(s) were linked by someone else meanwhile and kept their link</li>` : ''}
+          ${r.changedSincePreview.length ? `<li class="ci-failed">${r.changedSincePreview.length} list(s) were saved again after this preview: their version holds the earlier list (rows ${r.changedSincePreview.map(c => '#' + c.id).join(', ')}).</li>` : ''}
+          ${r.failed.length ? `<li class="ci-failed">Not everything was written: ${r.failed.map(f => aiEsc(`${f.step}: ${f.error}`)).join('; ')}. Open this again: it continues where it stopped.</li>` : ''}
+          ${r.historyError ? `<li class="ci-failed">The history rows could not be saved (${aiEsc(r.historyError)}).</li>` : ''}
+        </ul><div class="actions"><button class="primary" id="mib-done">Done</button></div>`;
+      body.querySelector('#mib-done').addEventListener('click', () => { close(); onDone(); });
+    } catch (err) {
+      body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was built: ${aiEsc(err.message)}</p>`);
     }
   });
 }

@@ -1528,6 +1528,9 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .cs-names { display: block; font-size: 12px; color: var(--neutral); }
 /* Dish Catalog -> Remove old codes (openCodeRemovalModal) */
 .modal.crm-modal { width: 560px; }
+.modal.mib-modal { width: 620px; }
+.mib-join { display: block; font-size: 13px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+.mib-modal .ci-details ul { max-height: 220px; overflow: auto; }
 .calorie-review-bar .bar-group { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
 .calorie-review-bar .bar-group-label { padding-left: 12px; border-left: 1px solid var(--line); }
 .crm-groups { margin: 0 0 12px; padding-left: 18px; line-height: 1.7; font-size: 13.5px; }

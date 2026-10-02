@@ -774,6 +774,23 @@ Same as / Add as new / Decide per recipe / Skip, a Decided list with Undo); "Mer
 merges panel. `scripts/name-map-measure.js` (read-only, login) shows the real queue. U4 / U5 use `buildResolver` to link. Note: `extracted_recipe_ingredients` links by
 `extracted_ingredient_id` / `extracted_recipe_process_id` (Recipe Book: `ingredient_id` / `process_id`).
 
+## Master Items + Dish Variants (2026-10-03, same branch)
+
+Redirection decided with the chef: a separate, ADDITIVE layer beside the Dish Catalog, which stays untouched in structure
+and behaviour (engine, composition rules, Build Menu, exports never read any of it -- nothing reads `menu_items` with
+select('*')). `master_items` = one row per truly distinct dish (one per exact name, case / spacing aside, `name_key`);
+`dish_variants` = the versions of it that really differ (MS-UP's Macaroni & Cheese vs Staff's): each carries the
+chef-approved ingredient list (moved off `menu_items`), and its calories and recipe link (assumption A, accepted when the
+migration was applied). `menu_items.dish_variant_id` = which version a catalog row USES -- the only new catalog column; the
+linking UI is about versions, never sections. Variant display name: "<section names> — <date>" until a recipe is linked,
+then the recipe's name (`variantDisplayName`). Migration 20261003120000 (applied 2026-10-03). MV1 `lib/masterItemsPlan.js`
+(pure planner: identical lists share a version, different lists get their own, list-less rows join a dish's only version
+(assumption B, a tickbox) or are left to pick; checked on 2,000 random catalogs). MV2 `lib/masterItemsBuild.js` + Dish
+Catalog -> "Master items: Build master items…" (preview -> confirm; writes only master_items, dish_variants and the link;
+re-runnable; one `menu_item_ingredient_history` row per list carried, source 'variant_migration'). The old list / calorie
+columns on menu_items stay as a frozen copy until the features move (MV4 ingredients, MV5 calories). Next: MV3 Master Items
+screen (versions, Ingredients popup, edit, delete, the version picker), then MV4-MV6, then U3+ on versions.
+
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 
 The AI invents dishes for a date range (Daycare / KG-LP / MS-UP / Staff; CEO never), the unchanged engine schedules them, and

@@ -147,6 +147,10 @@ const handlers = {
   catalogIngredientsAvailable: () => true,
   listIngredients: () => ING, searchIngredients: (q) => ING.filter((m) => m.name.toLowerCase().includes(String(q).toLowerCase())).slice(0, 25),
   nameMapLoad: () => NAME_MAP,
+  previewMasterItemsBuild: () => ({ token: 'mb1', conflicts: 0,
+    summary: { mastersToCreate: 2987, variantsToCreate: 3011, listsToCarry: 198, listRowsToLink: 202, joiningRows: 141, plainRowsToLink: 3105, rowsToPick: 9, savedListsInCatalog: 202 },
+    lists: Array.from({ length: 198 }, (_, i) => ({ dish: LONG[i % LONG.length], variant: 'KG-LP, MS-UP — 2 Oct 2026', from: [`#${100 + i} Lunch Main Course [KG-LP, MS-UP]`], joining: i % 3 ? [] : [`#${900 + i} Main Dish [Staff]`], ingredients: LIST })),
+    toPick: [{ dish: 'Macaroni & Cheese', variants: 2, rows: ['#4717 Main Dish [CEO]'] }] }),
   ingredientMergeSuggestions: () => ({ suggestions: [{ why: 'spelling', items: [ING[20], ING[21]] }, { why: 'word order', items: [ING[22], ING[23]] }] }),
   previewIngredientMerge: ({ survivorId, mergedId }) => ({ survivor: ING.find((m) => m.id === survivorId), merged: ING.find((m) => m.id === mergedId), recipeRows: 2, aliases: 1, codeChoice: true }),
   // Dish Catalog -> Remove old codes (U1): the real proportions from the U0 measurement.

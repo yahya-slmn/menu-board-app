@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('api', {
   catalogIngredientsAvailable: () => ipcRenderer.invoke('catalog-ingredients-available'),
   previewCodeRemoval: () => ipcRenderer.invoke('preview-code-removal'),
   nameMapLoad: () => ipcRenderer.invoke('name-map-load'),
+  previewMasterItemsBuild: () => ipcRenderer.invoke('preview-master-items-build'),
+  applyMasterItemsBuild: (payload) => ipcRenderer.invoke('apply-master-items-build', payload),
   nameMapDecide: (payload) => ipcRenderer.invoke('name-map-decide', payload),
   nameMapAddIngredient: (payload) => ipcRenderer.invoke('name-map-add-ingredient', payload),
   nameMapUndo: (payload) => ipcRenderer.invoke('name-map-undo', payload),

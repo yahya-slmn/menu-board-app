@@ -52,6 +52,8 @@ const { splitRowsByCatalog, annotateRow } = require('./lib/menuIngredientsCatalo
 const { planCodeRemoval, applyCodeRemoval, writeCodeRemovalWorkbook } = require('./lib/codeRemoval');
 const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMatch');
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
+const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
+const { variantDisplayName } = require('./lib/masterItemsPlan');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -1233,6 +1235,53 @@ ipcMain.handle('apply-code-removal', async (e, { token }) => {
   }
   if (r.changed.length || r.failed.length) log.warn('[code removal] not removed:', { changed: r.changed, failed: r.failed });
   return { removed: r.removed.length, changed: r.changed, failed: r.failed.reduce((n, f) => n + f.ids.length, 0), historyError: r.historyError, historyFile, batchId };
+});
+
+// Master Items + Dish Variants, MV2 (lib/masterItemsBuild.js; migration 20261003120000): build master items and variants
+// from the live Dish Catalog and link each row to the variant it uses, carrying the saved lists. Preview -> confirm; the
+// apply writes only master_items, dish_variants and menu_items.dish_variant_id (never the engine's data).
+let masterItemsBuildPlan = null; // { token, plan }
+
+async function masterItemsReady() {
+  const { error } = await supabase.from('dish_variants').select('id').limit(1);
+  return !error;
+}
+
+ipcMain.handle('preview-master-items-build', async () => {
+  if (!(await masterItemsReady())) return { unavailable: true };
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('menu_items')
+      .select(`id, name, category_id, is_active, dish_variant_id, ${INGREDIENT_COLUMNS}`).order('id').range(from, from + 999);
+    if (error) throw supaFail('master items: load menu_items', error);
+    all.push(...data);
+    if (data.length < 1000) break;
+  }
+  const sectionsById = new Map((await loadCatalogForImport()).map((it) => [it.id, it.sections]));
+  const rows = all.map((it) => ({ ...it, category_name: getCategoryById(it.category_id)?.name || '', sections: sectionsById.get(it.id) || [] }));
+  const { data: masters, error: mErr } = await supabase.from('master_items').select('id, name_key');
+  if (mErr) throw supaFail('master items: load master_items', mErr);
+  const plan = planBuild({ rows, existingMasters: masters || [] });
+  masterItemsBuildPlan = { token: crypto.randomUUID(), plan };
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const where = (id) => `${byId.get(id)?.category_name || ''} [${(byId.get(id)?.sections || []).map((c) => getSectionByCode(c)?.name || c).join(', ')}]`;
+  return {
+    token: masterItemsBuildPlan.token, summary: plan.summary, conflicts: plan.conflicts.length,
+    // Every list to carry, for the preview's details: dish, the variant's display name, the rows it comes from.
+    lists: plan.masters.flatMap((m) => m.variants.filter((v) => v.list && !v.reuseVariantId).map((v) => ({
+      dish: m.name, variant: variantDisplayName({ sections: v.sections, date: v.date }), from: v.list.fromRowIds.map((id) => `#${id} ${where(id)}`),
+      joining: v.joiningRowIds.map((id) => `#${id} ${where(id)}`), ingredients: v.list.ingredients }))),
+    toPick: plan.masters.filter((m) => m.unassigned.length).map((m) => ({ dish: m.name, rows: m.unassigned.map((id) => `#${id} ${where(id)}`), variants: m.variants.length })),
+  };
+});
+
+ipcMain.handle('apply-master-items-build', async (e, { token, includeJoining }) => {
+  if (!masterItemsBuildPlan || masterItemsBuildPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
+  const { plan } = masterItemsBuildPlan;
+  masterItemsBuildPlan = null;
+  const r = await applyBuild({ db: supabase, plan, includeJoining: !!includeJoining, who: await signedInLogin() });
+  if (r.failed.length || r.historyError || r.changedSincePreview.length || r.conflicts.length) log.warn('[master items build]', { failed: r.failed, historyError: r.historyError, changed: r.changedSincePreview, conflicts: r.conflicts });
+  return { ...r, conflicts: r.conflicts.length };
 });
 
 // One-time calorie review (lib/calorieReview.js): export every active Daycare / KG-LP / MS-UP dish for a
