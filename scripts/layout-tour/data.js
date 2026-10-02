@@ -107,6 +107,24 @@ const MI_FILES = [{ fileIndex: 0, fileName: 'September week_04.xlsx', success: t
   miRow('KG - LP', 5, 'AM Snack', LONG[7], 'flour - butter - turkey ham - cheese - milk - eggs - sugar - yeast - salt', { followsRef: { fileIndex: 0, sheetName: 'Daycare', rowNumber: 5 } }),
 ] }];
 
+// Ingredients master + Name map (U2): real-style purchasing names, and kitchen names with many candidates ("butter", "milk").
+const ING_NAMES = ['Salt Fine Grain', 'Salt Rock', 'Salt Citric (Lemon Salt)', 'Spice Pepper Whole Black', 'Oil Olive', 'Olive Oil Mini Jar', 'Butter Kitchen', 'Butter Pastry',
+  'Butter Portion', 'Flat Butter Sheet', 'Ghee Butter Base', 'Butter Spray', 'Butter Unsalted Block 10 Kg', 'Butter Garlic Herb Portion', 'Peanut-free Butter Spread',
+  'Milk Liquid Full Fat', 'Milk Liquid  Low Fat', 'Milk Liquid Almond', 'Milk Powder', 'Strawberry Milk 180 Ml', 'Beef Short Rib', 'Beef Short-Rib', 'Frozen Corn Sweet', 'Frozen Sweet Corn',
+  'Veg Carrot Baby', 'Veg Carrot Big', 'Egg Whole', 'Egg Powder', 'Sugar', 'Water'];
+const ING = ING_NAMES.map((name, i) => ({ id: i + 1, name, product_code: i === 4 ? null : `FB-${10234 + i}`, category: ['Dry Store', 'Dairy', 'Veg', 'Meat'][i % 4], default_unit: 'G' }));
+const cand = (re) => ING.filter((m) => re.test(m.name)).map((m) => ({ ...m, tier: 1 }));
+const NAME_MAP = { totalRows: 9313, resolvedRows: 848, masterCount: 1693, categories: ['Dairy', 'Dry Store', 'Meat', 'Veg'],
+  queue: [
+    { key: 'salt', rows: 936, examples: ['Chicken Kabsa', 'Lentil Soup with Crispy Bread Croutons', 'Vermicelli Rice'], spellings: [{ name: 'salt', rows: 936 }], candidates: cand(/\bsalt\b/i) },
+    { key: 'butter', rows: 367, examples: ['Cheese Croissant', 'Basbousa', 'Date Muffins'], spellings: [{ name: 'butter', rows: 367 }], candidates: cand(/butter/i) },
+    { key: 'milk', rows: 164, examples: ['Semolina Pudding with Fresh Pomegranate'], spellings: [{ name: 'milk', rows: 164 }], candidates: cand(/milk/i) },
+    { key: 'egg', rows: 232, examples: ['Omelette', 'Cake'], spellings: [{ name: 'eggs', rows: 154 }, { name: 'egg', rows: 78 }], candidates: cand(/egg/i) },
+    { key: 'cornstarch', rows: 54, examples: ['Custard'], spellings: [{ name: 'cornstarch', rows: 54 }], candidates: [] },
+  ],
+  decided: [{ id: 1, name_key: 'olive oil', display_name: 'olive oil', ingredient_id: 5, decision: 'alias', decided_by: 'tetiana', decided_at: '2026-10-03T09:00:00Z', product: ING[4] },
+    { id: 2, name_key: 'butter cream', display_name: 'butter cream', ingredient_id: null, decision: 'per_recipe', decided_by: 'tetiana', decided_at: '2026-10-03T09:05:00Z', product: null }] };
+
 const handlers = {
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   // "Re-group from the original menu...": a canned preview (main.js builds it from the picked file) and its apply.
@@ -127,6 +145,10 @@ const handlers = {
   listWasteTypes: () => WASTES, listDoughShapePresets: () => ({ available: false }),
   // Menu Ingredients -> Save approved lists to the Dish Catalog: a canned preview with every group, long lists included.
   catalogIngredientsAvailable: () => true,
+  listIngredients: () => ING, searchIngredients: (q) => ING.filter((m) => m.name.toLowerCase().includes(String(q).toLowerCase())).slice(0, 25),
+  nameMapLoad: () => NAME_MAP,
+  ingredientMergeSuggestions: () => ({ suggestions: [{ why: 'spelling', items: [ING[20], ING[21]] }, { why: 'word order', items: [ING[22], ING[23]] }] }),
+  previewIngredientMerge: ({ survivorId, mergedId }) => ({ survivor: ING.find((m) => m.id === survivorId), merged: ING.find((m) => m.id === mergedId), recipeRows: 2, aliases: 1, codeChoice: true }),
   // Dish Catalog -> Remove old codes (U1): the real proportions from the U0 measurement.
   previewCodeRemoval: () => ({ token: 'cr1', total: 2107, historyReady: true,
     codes: { count: 493, examples: [{ name: LONG[0], code: 'RC-00237' }, { name: LONG[1], code: 'RC01-02288' }, { name: LONG[2], code: 'RC02-02771' }] },

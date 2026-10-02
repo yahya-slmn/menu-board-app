@@ -50,6 +50,8 @@ const { planCatalogImport } = require('./lib/catalogImport');
 const { planIngredientsSave, applyIngredientSaves } = require('./lib/catalogIngredientsSave');
 const { splitRowsByCatalog, annotateRow } = require('./lib/menuIngredientsCatalog');
 const { planCodeRemoval, applyCodeRemoval, writeCodeRemovalWorkbook } = require('./lib/codeRemoval');
+const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMatch');
+const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -3143,6 +3145,70 @@ ipcMain.handle('delete-ingredient', async (e, id) => {
     throw supaFail('delete-ingredient', error);
   }
   return { success: true };
+});
+
+// Ingredient name map (unification U2; lib/ingredientMatch.js + lib/ingredientNames.js; migration 20261003110000). The
+// Ingredients screen's "Name map" tab: every kitchen ingredient name used by generated and extracted recipes that doesn't
+// match the master list exactly (nor a spelling she already mapped), most-used first, with EVERY candidate product -- she
+// decides each name once ("same as", "add as new", "decide per recipe"). Plus merging duplicate master rows. Nothing is
+// linked or created without her choice.
+async function fetchAllRows(table, cols, order = 'id') {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from(table).select(cols).order(order).range(from, from + 999);
+    if (error) throw supaFail(`name map: load ${table}`, error);
+    all.push(...data);
+    if (data.length < 1000) return all;
+  }
+}
+async function nameMapAvailable() {
+  const { error } = await supabase.from('ingredient_aliases').select('id').limit(1);
+  return !error;
+}
+// Every ingredient ROW of a generated or extracted recipe, with its recipe's name: { name, recipe }.
+async function recipeIngredientUsages() {
+  const genRecipes = new Map((await fetchAllRows('generated_recipes', 'id, name')).map((r) => [r.id, r.name]));
+  const genProcs = new Map((await fetchAllRows('generated_recipe_processes', 'id, generated_recipe_id')).map((p) => [p.id, p.generated_recipe_id]));
+  const usages = (await fetchAllRows('generated_recipe_ingredients', 'id, name, process_id'))
+    .map((i) => ({ name: i.name, recipe: genRecipes.get(genProcs.get(i.process_id)) || null }));
+  // The Extractor's tables name their links differently (extracted_ingredient_id / extracted_recipe_process_id).
+  const exRecipes = new Map((await fetchAllRows('extracted_recipes', 'id, name')).map((r) => [r.id, r.name]));
+  const exProcs = new Map((await fetchAllRows('extracted_recipe_processes', 'id, extracted_recipe_id')).map((p) => [p.id, p.extracted_recipe_id]));
+  const exNames = new Map((await fetchAllRows('extracted_ingredients', 'id, name')).map((i) => [i.id, i.name]));
+  for (const i of await fetchAllRows('extracted_recipe_ingredients', 'id, extracted_ingredient_id, extracted_recipe_process_id')) {
+    usages.push({ name: exNames.get(i.extracted_ingredient_id) || '', recipe: exRecipes.get(exProcs.get(i.extracted_recipe_process_id)) || null });
+  }
+  return usages;
+}
+
+ipcMain.handle('name-map-load', async () => {
+  if (!(await nameMapAvailable())) return { unavailable: true };
+  const master = await fetchAllRows('ingredients', 'id, name, product_code, category, default_unit, added_from');
+  const aliases = await fetchAllRows('ingredient_aliases', 'id, name_key, display_name, ingredient_id, decision, decided_by, decided_at');
+  const q = buildQueue({ usages: await recipeIngredientUsages(), master, aliases });
+  const byId = new Map(master.map((m) => [m.id, m]));
+  const brief = (m) => ({ id: m.id, name: m.name, product_code: m.product_code, category: m.category, default_unit: m.default_unit });
+  return {
+    totalRows: q.totalRows, resolvedRows: q.resolvedRows, masterCount: master.length,
+    queue: q.queue.map((g) => ({ ...g, candidates: candidatesFor(g.spellings[0].name, master).slice(0, 60).map((c) => ({ ...brief(c), tier: c.tier })) })),
+    decided: aliases.map((a) => ({ ...a, product: a.ingredient_id && byId.get(a.ingredient_id) ? brief(byId.get(a.ingredient_id)) : null }))
+      .sort((a, b) => String(b.decided_at).localeCompare(String(a.decided_at))),
+    categories: [...new Set(master.map((m) => m.category).filter(Boolean))].sort(),
+  };
+});
+ipcMain.handle('name-map-decide', async (e, { spellings, ingredientId, decision }) => saveDecision({ db: supabase, spellings, ingredientId, decision, who: await signedInLogin() }));
+ipcMain.handle('name-map-add-ingredient', async (e, { name, category, defaultUnit, spellings }) => addIngredientFromReview({ db: supabase, name, category, defaultUnit, spellings, who: await signedInLogin() }));
+ipcMain.handle('name-map-undo', async (e, { aliasIds }) => undoDecision({ db: supabase, aliasIds }));
+ipcMain.handle('ingredient-merge-suggestions', async () => {
+  if (!(await nameMapAvailable())) return { unavailable: true, suggestions: [] };
+  return { suggestions: suggestMerges(await fetchAllRows('ingredients', 'id, name, product_code, category, default_unit')) };
+});
+ipcMain.handle('preview-ingredient-merge', async (e, { survivorId, mergedId }) => planMerge({ db: supabase, survivorId, mergedId }));
+ipcMain.handle('apply-ingredient-merge', async (e, { survivorId, mergedId, keepCode }) => {
+  if (!(await nameMapAvailable())) throw new Error('The name map tables (migration 20261003110000) are not applied yet -- nothing was merged.');
+  const r = await applyMerge({ db: supabase, survivorId, mergedId, keepCode, who: await signedInLogin() });
+  if (r.historyError) log.warn(`[ingredient merge] ${mergedId} -> ${survivorId}: merged, history row failed: ${r.historyError}`);
+  return r;
 });
 
 // Waste Types: a small, chef-managed global catalog (name + default %) shared by Recipe Book

@@ -1282,7 +1282,7 @@ table.items-table.ingredients-table th:nth-child(1), table.items-table.ingredien
 table.items-table.ingredients-table th:nth-child(2), table.items-table.ingredients-table td:nth-child(2) { width: 130px; white-space: nowrap; }
 table.items-table.ingredients-table th:nth-child(3), table.items-table.ingredients-table td:nth-child(3) { width: auto; }
 table.items-table.ingredients-table th:nth-child(4), table.items-table.ingredients-table td:nth-child(4) { width: 110px; }
-table.items-table.ingredients-table th:nth-child(5), table.items-table.ingredients-table td:nth-child(5) { width: 150px; }
+table.items-table.ingredients-table th:nth-child(5), table.items-table.ingredients-table td:nth-child(5) { width: 240px; } /* Edit · Merge into… · Delete (U2) */
 table.items-table.extracted-ingredients-table { min-width: 620px; }
 table.items-table.extracted-ingredients-table th:nth-child(1), table.items-table.extracted-ingredients-table td:nth-child(1) { width: 140px; white-space: nowrap; }
 table.items-table.extracted-ingredients-table th:nth-child(2), table.items-table.extracted-ingredients-table td:nth-child(2) { width: auto; }
@@ -1533,6 +1533,36 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .crm-groups { margin: 0 0 12px; padding-left: 18px; line-height: 1.7; font-size: 13.5px; }
 .crm-examples { display: block; font-size: 12px; color: var(--neutral); line-height: 1.5; }
 .crm-modal .actions { flex-wrap: wrap; align-items: center; }
+/* Ingredients -> Name map (renderNameMapTab) and merges (unification U2) */
+.nm-tabs { max-width: 320px; margin-bottom: 16px; }
+.nm-progress { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--neutral); margin-bottom: 14px; }
+.nm-bar { height: 8px; border-radius: 4px; background: var(--paper-dim); overflow: hidden; max-width: 520px; }
+.nm-bar span { display: block; height: 100%; background: var(--sage); }
+.nm-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px; margin-bottom: 12px; }
+.nm-card.nm-skipped { opacity: .65; }
+.nm-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
+.nm-name { font-size: 16px; }
+.nm-also, .nm-uses { font-size: 12.5px; color: var(--neutral); }
+.nm-cands { border: 0; padding: 0; margin: 0; }
+.nm-cands legend { font-size: 12.5px; color: var(--neutral); margin-bottom: 6px; padding: 0; }
+.nm-filter, .nm-search { width: 100%; max-width: 420px; margin-bottom: 6px; }
+.nm-options, .nm-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; }
+.nm-results { margin-top: 6px; }
+.nm-option { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; cursor: pointer; background: var(--paper); }
+.nm-option:has(input:checked) { border-color: var(--sage); background: var(--sage-fill); }
+.nm-option input { margin-top: 3px; }
+.nm-meta { display: block; font-size: 11.5px; color: var(--neutral); }
+.nm-link { background: none; border: 0; padding: 4px 0; color: var(--sage-dark); text-decoration: underline; cursor: pointer; font: inherit; font-size: 12.5px; }
+.nm-search-row { margin-top: 8px; }
+.nm-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.nm-newform { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 10px; font-size: 12.5px; color: var(--neutral); }
+.nm-newform label { display: flex; flex-direction: column; gap: 4px; }
+.nm-msg { font-size: 12.5px; color: var(--danger); margin-top: 6px; }
+.nm-merges ul { margin: 8px 0 0; padding-left: 18px; line-height: 2; font-size: 13px; }
+.nm-merges .nm-meta { display: inline; margin-left: 4px; }
+.modal.nm-merge-modal { width: 560px; }
+.nmm-codes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+.nmm-codes p { grid-column: 1 / -1; margin: 0; }
 
 /* ---------------- Menu Planner: Created By mix (renderMixPanel / mixReportHtml) ---------------- */
 .mix-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; }

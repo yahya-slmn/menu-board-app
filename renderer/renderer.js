@@ -9295,6 +9295,9 @@ function renderScaledRecipeResult(container, ns, recipeId, recipe, workingProces
 const UNCATEGORIZED_FILTER_VALUE = '__uncategorized__';
 
 async function renderIngredientsView(main) {
+  // Two tabs (unification U2): the master list itself, and the Name map -- kitchen names used by recipes, each mapped
+  // once by the chef to a master product (renderNameMapTab).
+  if (state.ingredientsTab === 'names') return renderNameMapTab(main);
   const ingredients = await window.api.listIngredients();
 
   // Every write path (add/update-ingredient handlers, the modal's own .trim() || null, and
@@ -9309,6 +9312,8 @@ async function renderIngredientsView(main) {
       <div><h1>Ingredients</h1><span class="page-description">Canonical ingredient master</span></div>
       <button class="primary" id="add-ingredient-btn">+ Add Ingredient</button>
     </div>
+    ${ingredientTabsHtml('master')}
+    <div id="merge-suggestions"></div>
     <div class="search-bar">
       <label for="ingredient-search">Search by name</label>
       <input id="ingredient-search" type="search" />
@@ -9321,6 +9326,8 @@ async function renderIngredientsView(main) {
     <div id="ingredients-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-ingredient-btn').addEventListener('click', () => openIngredientModal());
+  wireIngredientTabs(main);
+  renderMergeSuggestions(main);
 
   const searchInput = document.getElementById('ingredient-search');
   const categoryFilter = document.getElementById('ingredient-category-filter');
@@ -9366,6 +9373,7 @@ async function renderIngredientsView(main) {
             <td>${ing.default_unit || ''}</td>
             <td style="text-align:right">
               <button class="icon-btn" data-edit="${ing.id}">Edit</button>
+              <button class="icon-btn" data-merge="${ing.id}" title="This is the same product as another row: move its recipes there and remove it.">Merge into…</button>
               <button class="icon-btn danger" data-delete="${ing.id}">Delete</button>
             </td>
           </tr>
@@ -9382,6 +9390,9 @@ async function renderIngredientsView(main) {
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
       btn.addEventListener('click', () => openIngredientModal(ingredients.find(i => i.id === parseInt(btn.dataset.edit, 10))));
+    });
+    content.querySelectorAll('[data-merge]').forEach(btn => {
+      btn.addEventListener('click', () => openIngredientMergeModal({ merged: ingredients.find(i => i.id === parseInt(btn.dataset.merge, 10)), onDone: () => renderIngredientsView(main) }));
     });
     content.querySelectorAll('[data-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -9401,6 +9412,288 @@ async function renderIngredientsView(main) {
 
   searchInput.addEventListener('input', renderFiltered);
   renderFiltered();
+}
+
+// ============================================================
+// Ingredients -> "Name map" (unification U2; lib/ingredientMatch.js, lib/ingredientNames.js). Recipes use kitchen names
+// ("olive oil"); the master list uses purchasing names ("Oil Olive"). Each kitchen name not matching the master exactly is
+// a card, most-used first, with EVERY candidate product -- nothing preselected, even with one candidate -- a filter for
+// long lists and a search over the whole master list. Her choice is saved once per spelling and links that name from
+// then on: "Same as <product>", "Add as new ingredient", "Decide per recipe", or "Skip for now".
+// ============================================================
+const NM_PAGE = 20;
+const NM_SHOWN = 8;
+
+function ingredientTabsHtml(active) {
+  return `<div class="mode-toggle nm-tabs" role="tablist" aria-label="Ingredients">
+    <button type="button" class="mode-toggle-btn ${active === 'master' ? 'active' : ''}" role="tab" aria-selected="${active === 'master'}" data-ing-tab="master">Master list</button>
+    <button type="button" class="mode-toggle-btn ${active === 'names' ? 'active' : ''}" role="tab" aria-selected="${active === 'names'}" data-ing-tab="names">Name map</button>
+  </div>`;
+}
+function wireIngredientTabs(main) {
+  main.querySelectorAll('[data-ing-tab]').forEach(b => b.addEventListener('click', () => {
+    if (state.ingredientsTab === b.dataset.ingTab) return;
+    state.ingredientsTab = b.dataset.ingTab;
+    renderIngredientsView(main);
+  }));
+}
+
+const nmTitle = (s) => String(s || '').trim().replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+const nmProduct = (c) => `${aiEsc(c.name)}<span class="nm-meta">${[c.product_code, c.category, c.default_unit].filter(Boolean).map(aiEsc).join(' · ') || 'no product code'}</span>`;
+
+async function renderNameMapTab(main) {
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Ingredients</h1><span class="page-description">Kitchen names used by recipes, each mapped once to a product of the master list</span></div>
+    </div>
+    ${ingredientTabsHtml('names')}
+    <div id="nm-body"><div class="loading-state" role="status">Reading the recipes and the master list…</div></div>`;
+  wireIngredientTabs(main);
+  const body = document.getElementById('nm-body');
+  let data;
+  try { data = await window.api.nameMapLoad(); } catch (err) { body.innerHTML = `<div class="empty-state">Couldn't load the name map: ${aiEsc(err.message)}</div>`; return; }
+  if (data.unavailable) { body.innerHTML = `<div class="empty-state">The name map needs its database update (migration 20261003110000). Apply it, then open this again.</div>`; return; }
+  const nm = { data, shown: NM_PAGE, skipped: new Set(), view: state.nameMapView || 'todo' };
+  state.nameMap = nm;
+  nmRender(body, nm);
+}
+
+function nmRender(body, nm) {
+  const d = nm.data;
+  const todo = d.queue.filter(g => !nm.skipped.has(g.key)).concat(d.queue.filter(g => nm.skipped.has(g.key)));
+  const pct = d.totalRows ? Math.round((100 * d.resolvedRows) / d.totalRows) : 100;
+  body.innerHTML = `
+    <div class="nm-progress" role="status">
+      <div class="nm-bar" aria-hidden="true"><span style="width:${pct}%"></span></div>
+      <span><strong>${pct}%</strong> of recipe ingredient rows link to the master list (${d.resolvedRows} of ${d.totalRows}) · <strong>${d.queue.length}</strong> name(s) to decide · ${d.decided.length} spelling(s) decided</span>
+    </div>
+    <div class="mode-toggle nm-view" style="margin-bottom:14px; max-width:320px;">
+      <button type="button" class="mode-toggle-btn ${nm.view === 'todo' ? 'active' : ''}" data-nm-view="todo">To decide (${d.queue.length})</button>
+      <button type="button" class="mode-toggle-btn ${nm.view === 'done' ? 'active' : ''}" data-nm-view="done">Decided (${d.decided.length})</button>
+    </div>
+    <div id="nm-list"></div>
+    <datalist id="nm-categories">${d.categories.map(c => `<option value="${aiEsc(c)}"></option>`).join('')}</datalist>`;
+  body.querySelectorAll('[data-nm-view]').forEach(b => b.addEventListener('click', () => { nm.view = state.nameMapView = b.dataset.nmView; nmRender(body, nm); }));
+  const list = body.querySelector('#nm-list');
+  if (nm.view === 'done') return nmRenderDecided(list, body, nm);
+  if (!todo.length) { list.innerHTML = '<div class="empty-state">Every name used by the recipes links to the master list.</div>'; return; }
+  list.innerHTML = todo.slice(0, nm.shown).map(g => nmCardHtml(g, nm)).join('')
+    + (todo.length > nm.shown ? `<button class="secondary" id="nm-more">Show ${Math.min(NM_PAGE, todo.length - nm.shown)} more (${todo.length - nm.shown} left)</button>` : '');
+  list.querySelector('#nm-more')?.addEventListener('click', () => { nm.shown += NM_PAGE; nmRender(body, nm); });
+  list.querySelectorAll('.nm-card').forEach(card => nmWireCard(card, body, nm));
+}
+
+function nmCardHtml(g, nm) {
+  const main = g.spellings[0].name;
+  const others = g.spellings.slice(1);
+  const many = g.candidates.length > NM_SHOWN;
+  return `
+    <section class="nm-card ${nm.skipped.has(g.key) ? 'nm-skipped' : ''}" data-key="${aiEsc(g.key)}" aria-label="${aiEsc(main)}">
+      <div class="nm-head">
+        <strong class="nm-name">${aiEsc(main)}</strong>
+        ${others.length ? `<span class="nm-also">also written ${others.map(o => `“${aiEsc(o.name)}”`).join(', ')}</span>` : ''}
+        <span class="nm-uses">${g.rows} recipe row(s)${g.examples.length ? ` · e.g. ${g.examples.map(aiEsc).join(', ')}` : ''}</span>
+      </div>
+      <fieldset class="nm-cands">
+        <legend>${g.candidates.length ? `${g.candidates.length} product(s) in the master list could be this -- pick the right one:` : 'No product in the master list shares a word with this name -- search, or add it as new:'}</legend>
+        ${many ? `<input type="search" class="nm-filter" placeholder="Filter these ${g.candidates.length} products" aria-label="Filter the products for ${aiEsc(main)}" />` : ''}
+        <div class="nm-options">
+          ${g.candidates.map((c, i) => `<label class="nm-option" data-name="${aiEsc(c.name)}" ${i >= NM_SHOWN ? 'hidden data-extra' : ''}><input type="radio" name="nm-${aiEsc(g.key)}" value="${c.id}" /> ${nmProduct(c)}</label>`).join('')}
+        </div>
+        ${many ? `<button type="button" class="nm-link nm-showall">Show all ${g.candidates.length}</button>` : ''}
+        <div class="nm-search-row"><input type="search" class="nm-search" placeholder="Search the whole master list…" aria-label="Search the master list for ${aiEsc(main)}" /></div>
+        <div class="nm-results"></div>
+      </fieldset>
+      <div class="nm-actions">
+        <button class="primary nm-same" disabled>Same as the picked product</button>
+        <button class="secondary nm-new">Add as new ingredient…</button>
+        <button class="secondary nm-per" title="The word means different products in different dishes (e.g. pastry butter vs cooking butter): each recipe will ask.">Decide per recipe</button>
+        <button class="nm-link nm-skip">Skip for now</button>
+      </div>
+      <div class="nm-newform" hidden>
+        <label>Name in the master list <input class="nm-new-name" value="${aiEsc(nmTitle(main))}" /></label>
+        <label>Category <input class="nm-new-cat" list="nm-categories" /></label>
+        <label>Unit <input class="nm-new-unit" value="G" size="4" /></label>
+        <button class="primary nm-new-save">Add to the master list</button>
+        <span class="ci-hint">Marked as added from the name review (no product code yet).</span>
+      </div>
+      <div class="nm-msg" role="status"></div>
+    </section>`;
+}
+
+function nmWireCard(card, body, nm) {
+  const g = nm.data.queue.find(x => x.key === card.dataset.key);
+  const msg = card.querySelector('.nm-msg');
+  const same = card.querySelector('.nm-same');
+  const picked = () => card.querySelector('input[type=radio]:checked');
+  card.addEventListener('change', (e) => {
+    if (e.target.type !== 'radio') return;
+    const label = e.target.closest('.nm-option');
+    same.disabled = false;
+    same.textContent = `Same as “${label.dataset.name || 'the picked product'}”`;
+  });
+  card.querySelector('.nm-filter')?.addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    card.querySelectorAll('.nm-option').forEach((l, i) => {
+      l.hidden = q ? !l.textContent.toLowerCase().includes(q) : (i >= NM_SHOWN && !card.dataset.all);
+    });
+  });
+  card.querySelector('.nm-showall')?.addEventListener('click', (e) => {
+    card.dataset.all = '1';
+    card.querySelectorAll('.nm-option[data-extra]').forEach(l => { l.hidden = false; });
+    e.currentTarget.remove();
+  });
+  let searchTimer = null;
+  card.querySelector('.nm-search').addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    const q = e.target.value.trim();
+    const out = card.querySelector('.nm-results');
+    if (q.length < 2) { out.innerHTML = ''; return; }
+    searchTimer = setTimeout(async () => {
+      const found = await window.api.searchIngredients(q).catch(() => []);
+      const shown = new Set([...card.querySelectorAll('.nm-options input')].map(i => i.value));
+      out.innerHTML = found.length
+        ? found.filter(f => !shown.has(String(f.id))).map(f => `<label class="nm-option" data-name="${aiEsc(f.name)}"><input type="radio" name="nm-${aiEsc(g.key)}" value="${f.id}" /> ${nmProduct(f)}</label>`).join('') || '<span class="ci-hint">Already listed above.</span>'
+        : `<span class="ci-hint">Nothing in the master list contains “${aiEsc(q)}”.</span>`;
+    }, 250);
+  });
+  const done = (text) => {
+    // This name now links: its rows count as linked, the card leaves the queue.
+    nm.data.resolvedRows += g.rows;
+    nm.data.queue = nm.data.queue.filter(x => x.key !== g.key);
+    showToast(text);
+    window.api.nameMapLoad().then(fresh => { if (!fresh.unavailable) nm.data.decided = fresh.decided; }).catch(() => {});
+    nmRender(body, nm);
+  };
+  const spellings = g.spellings.map(sp => sp.name);
+  const handle = async (fn, okText) => {
+    msg.textContent = 'Saving…';
+    try {
+      const r = await fn();
+      if (r && r.taken) {
+        const by = [...new Set(r.taken.map(t => t.decided_by).filter(Boolean))].join(', ') || 'someone';
+        msg.textContent = `Already decided by ${by} a moment ago -- their choice is kept. Reloading…`;
+        setTimeout(() => renderNameMapTab(document.getElementById('main')), 1200);
+        return;
+      }
+      if (r && r.duplicate) { msg.textContent = `“${r.duplicate.name}” is already in the master list: pick it above instead.`; return; }
+      done(okText);
+    } catch (err) { msg.textContent = `Not saved: ${err.message}`; }
+  };
+  same.addEventListener('click', () => {
+    const p = picked();
+    if (!p) return;
+    const name = p.closest('.nm-option').dataset.name || '';
+    handle(() => window.api.nameMapDecide({ spellings, ingredientId: Number(p.value), decision: 'alias' }), `“${spellings[0]}” = ${name}`);
+  });
+  card.querySelector('.nm-per').addEventListener('click', () => handle(() => window.api.nameMapDecide({ spellings, decision: 'per_recipe' }), `“${spellings[0]}”: decided per recipe`));
+  card.querySelector('.nm-skip').addEventListener('click', () => { nm.skipped.add(g.key); nmRender(body, nm); });
+  card.querySelector('.nm-new').addEventListener('click', () => { const f = card.querySelector('.nm-newform'); f.hidden = !f.hidden; if (!f.hidden) f.querySelector('.nm-new-name').focus(); });
+  card.querySelector('.nm-new-save').addEventListener('click', () => {
+    const f = card.querySelector('.nm-newform');
+    handle(() => window.api.nameMapAddIngredient({ name: f.querySelector('.nm-new-name').value, category: f.querySelector('.nm-new-cat').value, defaultUnit: f.querySelector('.nm-new-unit').value, spellings }),
+      `Added “${f.querySelector('.nm-new-name').value.trim()}” to the master list`);
+  });
+}
+
+function nmRenderDecided(list, body, nm) {
+  const rows = nm.data.decided;
+  if (!rows.length) { list.innerHTML = '<div class="empty-state">No names decided yet.</div>'; return; }
+  list.innerHTML = `<div class="table-scroll"><table class="items-table nm-decided-table">
+    <thead><tr><th>Kitchen name</th><th>Means</th><th>Decided</th><th></th></tr></thead>
+    <tbody>${rows.map(a => `<tr>
+      <td>${aiEsc(a.display_name)}</td>
+      <td>${a.decision === 'per_recipe' ? '<em>decided per recipe</em>' : a.product ? nmProduct(a.product) : '<span class="list-empty">(product removed)</span>'}</td>
+      <td>${aiEsc(a.decided_by || '')}<span class="nm-meta">${a.decided_at ? aiEsc(new Date(a.decided_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })) : ''}</span></td>
+      <td style="text-align:right"><button class="icon-btn" data-undo="${a.id}" title="Remove this decision: the name goes back to the queue. Recipes already linked keep their link.">Undo</button></td>
+    </tr>`).join('')}</tbody></table></div>`;
+  list.querySelectorAll('[data-undo]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Undo this decision? The name goes back to "To decide". Recipes already linked keep their link.')) return;
+    await window.api.nameMapUndo({ aliasIds: [Number(b.dataset.undo)] });
+    renderNameMapTab(document.getElementById('main'));
+  }));
+}
+
+// Master list: the suggested merges (punctuation / word-order duplicates only -- never Full Fat vs Low Fat).
+async function renderMergeSuggestions(main) {
+  const box = document.getElementById('merge-suggestions');
+  if (!box) return;
+  let r;
+  try { r = await window.api.ingredientMergeSuggestions(); } catch { return; }
+  if (!r || r.unavailable || !r.suggestions.length) return;
+  box.innerHTML = `<details class="ci-panel nm-merges"><summary><strong>${r.suggestions.length}</strong> pair(s) look like the same product written twice (punctuation or word order) -- review</summary>
+    <ul>${r.suggestions.map((sg, i) => `<li>${sg.items.map(m => `“${aiEsc(m.name)}”${m.product_code ? ` <span class="nm-meta">${aiEsc(m.product_code)}</span>` : ''}`).join(' and ')}
+      <button class="icon-btn" data-sugg="${i}">Merge…</button></li>`).join('')}</ul></details>`;
+  box.querySelectorAll('[data-sugg]').forEach(b => b.addEventListener('click', () => {
+    const sg = r.suggestions[Number(b.dataset.sugg)];
+    openIngredientMergeModal({ merged: sg.items[1], survivor: sg.items[0], options: sg.items, onDone: () => renderIngredientsView(main) });
+  }));
+}
+
+// Merge one master row into another: the kept one, a preview (recipe rows, spellings, product codes), then confirm.
+async function openIngredientMergeModal({ merged, survivor = null, options = null, onDone }) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal nm-merge-modal" role="dialog" aria-modal="true" aria-labelledby="nmm-title">
+    <h2 id="nmm-title">Merge ingredients</h2>
+    <div id="nmm-pick"></div><div id="nmm-preview" role="status"></div>
+    <div class="actions"><button class="secondary" id="nmm-cancel">Cancel</button><button class="primary" id="nmm-apply" disabled>Merge</button></div></div>`;
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.querySelector('#nmm-cancel').addEventListener('click', close);
+  const pick = overlay.querySelector('#nmm-pick');
+  const preview = overlay.querySelector('#nmm-preview');
+  const apply = overlay.querySelector('#nmm-apply');
+  let pair = null;
+  const show = async (keepId, dropId) => {
+    apply.disabled = true;
+    preview.textContent = 'Checking…';
+    try {
+      const p = await window.api.previewIngredientMerge({ survivorId: keepId, mergedId: dropId });
+      pair = p;
+      preview.innerHTML = `<p>“<strong>${aiEsc(p.merged.name)}</strong>” is removed; “<strong>${aiEsc(p.survivor.name)}</strong>” is kept.</p>
+        <ul class="crm-groups"><li>${p.recipeRows} Recipe Book ingredient row(s) move to the kept one</li><li>${p.aliases} name map spelling(s) move too</li>
+        <li>“${aiEsc(p.merged.name)}” keeps working as a spelling of the kept one</li></ul>
+        ${p.codeChoice ? `<div class="nmm-codes"><p class="field-warning">The two have different product codes -- they may be two real purchasing items. Merge only if they are the same product. The kept one keeps:</p>
+          <label class="nm-option"><input type="radio" name="nmm-code" value="survivor" checked> ${aiEsc(p.survivor.product_code)}<span class="nm-meta">${aiEsc(p.survivor.name)}'s code</span></label>
+          <label class="nm-option"><input type="radio" name="nmm-code" value="merged"> ${aiEsc(p.merged.product_code)}<span class="nm-meta">${aiEsc(p.merged.name)}'s code</span></label></div>` : ''}`;
+      apply.disabled = false;
+    } catch (err) { preview.textContent = err.message; }
+  };
+  if (options) {
+    pick.innerHTML = `<p>Which one is kept?</p>${options.map(o => `<label class="nm-option"><input type="radio" name="nmm-keep" value="${o.id}" ${o.id === survivor.id ? 'checked' : ''}> ${nmProduct(o)}</label>`).join('')}`;
+    pick.addEventListener('change', () => {
+      const keepId = Number(pick.querySelector('input[name=nmm-keep]:checked').value);
+      show(keepId, options.find(o => o.id !== keepId).id);
+    });
+    show(survivor.id, merged.id);
+  } else {
+    pick.innerHTML = `<p>Merge “<strong>${aiEsc(merged.name)}</strong>” into:</p>
+      <input type="search" id="nmm-search" placeholder="Search the master list…" aria-label="The ingredient to keep" style="width:100%" /><div id="nmm-results" class="nm-results"></div>`;
+    let t = null;
+    pick.querySelector('#nmm-search').addEventListener('input', (e) => {
+      clearTimeout(t);
+      const q = e.target.value.trim();
+      t = setTimeout(async () => {
+        const found = q.length < 2 ? [] : (await window.api.searchIngredients(q).catch(() => [])).filter(f => f.id !== merged.id);
+        pick.querySelector('#nmm-results').innerHTML = found.map(f => `<label class="nm-option"><input type="radio" name="nmm-keep" value="${f.id}"> ${nmProduct(f)}</label>`).join('');
+      }, 250);
+    });
+    pick.addEventListener('change', (e) => { if (e.target.name === 'nmm-keep') show(Number(e.target.value), merged.id); });
+  }
+  apply.addEventListener('click', async () => {
+    if (!pair) return;
+    apply.disabled = true;
+    try {
+      const keepCode = overlay.querySelector('input[name=nmm-code]:checked')?.value || 'survivor';
+      const r = await window.api.applyIngredientMerge({ survivorId: pair.survivor.id, mergedId: pair.merged.id, keepCode });
+      showToast(`Merged: ${r.recipeRows} recipe row(s) moved${r.historyError ? ' (the merge log could not be saved)' : ''}`);
+      close();
+      onDone();
+    } catch (err) { preview.insertAdjacentHTML('beforeend', `<p class="field-warning">Not merged: ${aiEsc(err.message)}</p>`); apply.disabled = false; }
+  });
 }
 
 // Generic small "pick one of N mutually exclusive options" modal -- reuses the exact same

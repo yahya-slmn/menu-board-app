@@ -759,7 +759,19 @@ purchasing list, "Oil Olive" / "Spice Cumin Seed" / "Flour Wheat White", so exac
 names; ~170 names cover 90% of usage). The Recipe Extractor becomes an upload into Recipe Book. Phases: U0 measure (done,
 `scripts/unification-measure.js`), U1 remove the old codes (done), U2 ingredient aliases + review + duplicate clean-up, U3
 recipe links + TTY counter, U4 confirmed drafts -> Recipe Book, U5 Extractor into Recipe Book, U6 one-pass upload, U7 a
-dish's Ingredients button, U8 drop old columns / tables by hand. Note: `extracted_recipe_ingredients` links by
+dish's Ingredients button, U8 drop old columns / tables by hand.
+U2 (built 2026-10-03; migration 20261003110000, applied by hand): `ingredient_aliases` (one row per spelling, unique
+`name_key` = lowercased / single-spaced; decision 'alias' -> `ingredient_id`, or 'per_recipe'), `ingredients.added_from`
+('name_review' for rows created in the review) / `added_by`, `ingredient_merge_history`. `lib/ingredientMatch.js` (pure):
+`buildResolver` links ONLY an exact master name or a mapped spelling -- never plural / word order / similar; `candidatesFor`
+returns every fitting product best first as SUGGESTIONS (descriptor words rank, never decide); `buildQueue` groups spellings of
+one word ("egg" / "eggs") most-used first; `suggestMerges` = punctuation / word-order duplicates only (never Full Fat / Low
+Fat). `lib/ingredientNames.js`: the writes (db passed in): a decision per spelling (a spelling decided by someone else first
+is handed back, not overwritten), "add as new" (refuses a name already in the list), undo, merge (recipe rows + aliases move,
+the duplicate's name kept as an alias, duplicate deleted, logged; a product-code choice when both have one). Ingredients
+screen: Master list | Name map tabs (`renderNameMapTab`: every candidate shown, none preselected, filter + whole-list search,
+Same as / Add as new / Decide per recipe / Skip, a Decided list with Undo); "Merge into…" on each master row and a suggested
+merges panel. `scripts/name-map-measure.js` (read-only, login) shows the real queue. U4 / U5 use `buildResolver` to link. Note: `extracted_recipe_ingredients` links by
 `extracted_ingredient_id` / `extracted_recipe_process_id` (Recipe Book: `ingredient_id` / `process_id`).
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)

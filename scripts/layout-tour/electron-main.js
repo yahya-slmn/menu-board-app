@@ -65,6 +65,14 @@ const STEPS = [
     state.catalogIngredientsSave.files = [{ name: 'September week_04_Ingredients.xlsx', base64: '' }]; renderCatalogIngredientsSaveView(document.getElementById('main'));
     await t.click('Read files'); await t.until(() => document.getElementById('cs-apply'));`],
   ['Menu Ingredients: save lists (result)', 'app', `document.getElementById('cs-apply').click(); await t.until(() => document.getElementById('cs-done'));`],
+  ['Ingredients: master list (merge suggestions)', 'app', `document.querySelector('[data-view=ingredients]').click(); await t.until(() => document.querySelector('.ingredients-table'));
+    await t.until(() => document.querySelector('.nm-merges')); document.querySelector('.nm-merges').open = true; await t.sleep(300);`],
+  ['Ingredients: merge dialog', 'app', `document.querySelector('[data-sugg="0"]').click(); await t.until(() => document.querySelector('#nmm-apply:not([disabled])'));`],
+  ['Ingredients: name map', 'app', `document.getElementById('nmm-cancel').click(); await t.sleep(300); document.querySelector('[data-ing-tab=names]').click();
+    await t.until(() => document.querySelector('.nm-card')); document.querySelector('.nm-card input[type=radio]').click(); await t.sleep(200);`],
+  ['Ingredients: name map, all butter products + search', 'app', `const c = document.querySelectorAll('.nm-card')[1]; c.querySelector('.nm-showall')?.click();
+    const sInput = document.querySelectorAll('.nm-search')[4]; sInput.value = 'corn'; sInput.dispatchEvent(new Event('input')); await t.sleep(700); c.scrollIntoView();`],
+  ['Ingredients: name map, decided', 'app', `document.querySelector('[data-nm-view=done]').click(); await t.until(() => document.querySelector('.nm-decided-table'));`],
   ['Generate / One Section', 'app', `localStorage.setItem('menuPlannerMode', JSON.stringify({ mode: 'generate', scope: 'one' })); document.querySelector('[data-view=menuPlanner]').click(); await t.sleep(800);`],
   ['Generate / All Sections', 'app', `await t.click('All Sections');`],
   ['Build Menu (before grids)', 'app', `await t.click('Build');`],
