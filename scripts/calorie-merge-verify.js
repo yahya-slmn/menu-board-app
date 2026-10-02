@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Calories onto versions (MV5a) -- READ-ONLY, on the live data. Nothing is written to Supabase.
 // Run it BEFORE "Carry calories to versions…" (the measurement) and AFTER (the verification):
-//   1. the merge plan as it stands now (lib/calorieMerge.js planCalorieMerge, the same code the app runs): versions whose
+//   1. the merge plan as it stands now (lib/calorieMerge.js planCalorieMerge, the code the MV5a carry ran): versions whose
 //      rows agree / where an unflagged value wins / where rows disagree (each listed) / with none / already set;
 //   2. every Dish Catalog row's calories as the app now SHOWS them (effectiveCalories: the version's, else the row's own
 //      frozen value) against the row's own value: unchanged, a blank row now showing its version's value, changed because

@@ -835,7 +835,20 @@ the old version; the old version keeps its list and calories; the form says whic
 rows without a version…" (`preview-` / `apply-link-unlinked-rows`, `planLinks` predicts each row). `scripts/variant-link-check.js`
 in npm test; `scripts/variant-link-verify.js` (read-only, login) on live data 2026-10-04: 3,499 rows, 3,289 master items, 3,292
 versions, 0 rows without a version, 0 under another name's dish, 0 empty masters, 0 unused versions -- PASS. Known limit: two
-rows of the same NEW dish added at the same moment can each get a version (merge in Master Items). Next: MV5b.
+rows of the same NEW dish added at the same moment can each get a version (merge in Master Items).
+MV5b (2026-10-04): every calorie WRITE goes to the version (`lib/variantCalories.js`); the menu_items calorie columns are never
+written again (frozen until U8) and never shown -- a row shows its version's value or "—" (no grey fallback; chef's choice). Edit
+Item: sent only when changed, with what the form showed (`caloriesExpected`), written by compare-and-swap on the version's value
+(`saveVersionCalories`; a value changed meanwhile is refused with a warning); clearing allowed; setting clears "unverified"; the
+field says "shared by N catalog rows"; after a rename, the new version only if empty. Add Item: the version only if it has none
+(`setVersionCaloriesIfEmpty`). "Estimate missing calories" (`runCalorieBackfill` + `lib/calorieScope.js`): ONE estimate per empty
+version an in-scope row uses (`planVersionEstimates`: described by a school row first; plausibility checked against every category
+/ protein using it; input = exact-name recipe, else the version's APPROVED list (chef's choice), else AI key ingredients); writes
+only versions still empty. Review import (`lib/calorieReview.js`): same file layout; validated as before, then planned per version
+(`planVersionImport`: different values for one version skipped, the preview names the other rows each change reaches). The calorie
+step after Approve is back, counting from versions. "Carry calories to versions…" removed; `lib/calorieMerge.js` is historical
+(kept for the MV5a scripts). `scripts/variant-calories-check.js` (npm test; F scans main.js / lib for any menu_items calorie write);
+`scripts/variant-calories-verify.js --compare <MV5a snapshot>` (read-only, login) -- NOT yet run on live data at commit time.
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 

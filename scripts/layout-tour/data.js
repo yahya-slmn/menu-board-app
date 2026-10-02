@@ -15,8 +15,8 @@ function items(section) {
     const p = PROTEINS[(i + id) % PROTEINS.length];
     out.push({ id: id++, name: LONG[(i + id) % LONG.length] + (i > 5 ? ' ' + i : ''), category_name: c, category_code: c.toUpperCase().replace(/ /g,'_'),
       calories_per_100g: i % 3 ? 180 + i : null, calories_unverified: i % 4 === 1,
-      // MV5a: some rows' calories still come from the row's old column (shown greyed).
-      calories_source: i % 3 ? (i % 5 === 2 ? 'row' : 'version') : null, am_snack_style: i % 2 ? 'COLD_KITCHEN' : 'PASTRY',
+      // MV5b: calories are the version's; some versions are shared, so Edit Item says "shared by N catalog rows".
+      variant_id: 500 + i, variant_rows: i % 4 === 0 ? 3 : 1, am_snack_style: i % 2 ? 'COLD_KITCHEN' : 'PASTRY',
       protein_code: p.code, protein_name: p.name, is_daily_repeating: i === 0, snack_rule_blocked: i === 3 && c.includes('Snack'),
       created_by_label: i % 2 ? 'OLD' : 'AI', rc_code: i === 2 ? null : `RC0${i}-0${2770 + i}`, is_active: true,
       // Dish Catalog ingredients (M2): every other dish has an approved list -> the "ING" mark beside its name.
@@ -176,16 +176,6 @@ const handlers = {
     summary: { mastersToCreate: 2987, variantsToCreate: 3011, listsToCarry: 198, listRowsToLink: 202, joiningRows: 141, plainRowsToLink: 3105, rowsToPick: 9, savedListsInCatalog: 202 },
     lists: Array.from({ length: 198 }, (_, i) => ({ dish: LONG[i % LONG.length], variant: 'KG-LP, MS-UP — 2 Oct 2026', from: [`#${100 + i} Lunch Main Course [KG-LP, MS-UP]`], joining: i % 3 ? [] : [`#${900 + i} Main Dish [Staff]`], ingredients: LIST })),
     toPick: [{ dish: 'Macaroni & Cheese', variants: 2, rows: ['#4717 Main Dish [CEO]'] }] }),
-  // Dish Catalog -> Carry calories to versions (MV5a): many picks, so the list has to scroll inside the dialog.
-  previewCalorieMerge: () => {
-    const where = (i, s) => `#${300 + i} Lunch Main Course [${s}]`;
-    const v = (i, value, rows) => ({ variantId: 50 + i, dish: LONG[i % LONG.length], value, unverified: false, rows, candidates: [] });
-    return { token: 'cm1',
-      summary: { versions: 3011, agree: 1404, trusted: 37, pick: 24, none: 1528, already: 0, rowsWithValue: 2210, unlinkedWithValue: 12 },
-      pick: Array.from({ length: 24 }, (_, i) => ({ ...v(i, null, []), candidates: [{ value: 140 + i, unverified: false, rows: [where(i, 'KG-LP'), where(i + 1, 'MS-UP')] }, { value: 165 + i, unverified: false, rows: [where(i + 2, 'Staff')] }] })),
-      trusted: Array.from({ length: 37 }, (_, i) => v(i, 200 + i, [{ where: where(i, 'Daycare'), value: 200 + i, unverified: false }, { where: where(i + 1, 'KG-LP'), value: 35, unverified: true }])),
-      agreeSample: Array.from({ length: 40 }, (_, i) => v(i, 150 + i, [{ where: where(i, 'KG-LP'), value: 150 + i, unverified: false }, { where: where(i + 1, 'MS-UP'), value: 150 + i, unverified: false }])) };
-  },
   // Dish Catalog -> Link rows without a version (MV6): one row of each kind, plus a long list to scroll.
   previewLinkUnlinkedRows: () => ({ token: 'lr1', rows: [
     ...Array.from({ length: 14 }, (_, i) => ({ id: 3500 + i, name: LONG[i % LONG.length], outcome: 'joined', where: 'Main Dish [Staff]' })),

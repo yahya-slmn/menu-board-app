@@ -57,9 +57,7 @@ const STEPS = [
     document.getElementById('code-removal-btn').click(); await t.until(() => document.getElementById('crm-apply'));`],
   ['Dish Catalog: build master items (preview)', 'app', `document.getElementById('crm-cancel').click(); await t.sleep(300);
     document.getElementById('master-build-btn').click(); await t.until(() => document.getElementById('mib-apply')); document.querySelector('.mib-modal details').open = true; await t.sleep(200);`],
-  ['Dish Catalog: carry calories to versions (preview)', 'app', `document.getElementById('mib-cancel').click(); await t.sleep(300);
-    document.getElementById('calorie-merge-btn').click(); await t.until(() => document.getElementById('cm-apply'));`],
-  ['Dish Catalog: link rows without a version (preview)', 'app', `document.getElementById('cm-cancel').click(); await t.sleep(300);
+  ['Dish Catalog: link rows without a version (preview)', 'app', `document.getElementById('mib-cancel').click(); await t.sleep(300);
     document.getElementById('link-rows-btn').click(); await t.until(() => document.getElementById('lr-apply')); document.querySelector('#lr-body details').open = true; await t.sleep(200);`],
   ['Edit Item (with ingredients)', 'app', `document.getElementById('lr-cancel').click(); await t.sleep(300); document.getElementById('item-search').value = ''; document.getElementById('item-search').dispatchEvent(new Event('input')); await t.sleep(300);
     document.querySelector('[data-edit]').click(); await t.until(() => document.getElementById('m-ingredients'));`],
