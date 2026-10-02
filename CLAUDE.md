@@ -748,8 +748,9 @@ classic script; `rof/boot.js` registers `window.RofGame` (`create(container)` / 
 
 ## Dish Catalog / Recipe Book unification (in progress on `feature/dish-catalog-ingredients`)
 
-Dish Catalog ingredients M1-M3 (saved, approved Menu Ingredients lists on `menu_items`, reused before the AI) are built on
-this branch; M3's real-data check (`scripts/catalog-ingredients-reuse-check.js`) waits for a real M2 save. Then the
+Dish Catalog ingredients M1-M3 (saved, approved Menu Ingredients lists on `menu_items`, reused before the AI) are COMPLETE on
+this branch: migration 20261002100000 applied; M3's real-data check (`scripts/catalog-ingredients-reuse-check.js`, after a real
+M2 save) was clean on 2026-10-03 -- 283 rows served from the catalog, 0 problems, AI calls 236 -> 46 for the week. Then the
 unification, decided with the chef 2026-10-02: Dish Catalog is every dish's identity; ONE Recipe Book code (TTY-) for every
 recipe there (typed, generated-and-confirmed, extracted), which is also its linked dishes' code; one recipe may be linked from
 several catalog entries (D3 = option b: `menu_items.recipe_id`); ONE ingredients master list (`ingredients`) -- generated and
