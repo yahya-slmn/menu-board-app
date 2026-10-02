@@ -848,7 +848,9 @@ only versions still empty. Review import (`lib/calorieReview.js`): same file lay
 (`planVersionImport`: different values for one version skipped, the preview names the other rows each change reaches). The calorie
 step after Approve is back, counting from versions. "Carry calories to versions…" removed; `lib/calorieMerge.js` is historical
 (kept for the MV5a scripts). `scripts/variant-calories-check.js` (npm test; F scans main.js / lib for any menu_items calorie write);
-`scripts/variant-calories-verify.js --compare <MV5a snapshot>` (read-only, login) -- NOT yet run on live data at commit time.
+`scripts/variant-calories-verify.js --compare <MV5a snapshot>` (read-only, login) on live data 2026-10-04: PASS -- 0 old calorie
+values changed, 0 new rows with a value in the old column, 1,994 versions with calories (4 flagged), 1,298 empty (all outside the
+calorie scope: hand-entered Staff / CEO), 2,184 rows showing a value (as after MV5a), 0 in-scope versions left to estimate.
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 
