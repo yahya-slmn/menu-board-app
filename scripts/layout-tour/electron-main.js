@@ -76,7 +76,7 @@ const STEPS = [
     const sInput = document.querySelectorAll('.nm-search')[4]; sInput.value = 'corn'; sInput.dispatchEvent(new Event('input')); await t.sleep(700); c.scrollIntoView();`],
   ['Ingredients: name map, decided', 'app', `document.querySelector('[data-nm-view=done]').click(); await t.until(() => document.querySelector('.nm-decided-table'));`],
   ['Master Items: list', 'app', `document.querySelector('[data-view=masterItems]').click(); await t.until(() => document.querySelector('.master-items-table'));`],
-  ['Master Items: ingredients popup', 'app', `document.querySelector('[data-ing="10"]').click(); await t.until(() => document.querySelector('.mi2-modal textarea'));`],
+  ['Master Items: ingredients popup', 'app', `document.querySelector('[data-ing="100"]').click(); await t.until(() => document.querySelector('.mi2-modal textarea'));`],
   ['Master Items: edit window (2 versions)', 'app', `document.querySelector('.mi2-modal [data-x]').click(); await t.sleep(300);
     document.querySelector('[data-open="1"]').click(); await t.until(() => document.querySelector('.mi2-edit'));`],
   ['Generate / One Section', 'app', `document.querySelector('.mi2-edit [data-x]')?.click(); await t.sleep(200); localStorage.setItem('menuPlannerMode', JSON.stringify({ mode: 'generate', scope: 'one' })); document.querySelector('[data-view=menuPlanner]').click(); await t.sleep(800);`],

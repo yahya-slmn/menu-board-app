@@ -159,7 +159,10 @@ const handlers = {
   catalogIngredientsAvailable: () => true,
   listIngredients: () => ING, searchIngredients: (q) => ING.filter((m) => m.name.toLowerCase().includes(String(q).toLowerCase())).slice(0, 25),
   nameMapLoad: () => NAME_MAP,
-  listMasterItems: () => MASTER_ITEMS,
+  // The list (summaries) and, on open, the dish's detail -- as main.js returns them.
+  listMasterItems: () => ({ masters: MASTER_ITEMS.masters.map((m) => ({ id: m.id, name: m.name, codes: m.versions.filter((v) => v.recipe).map((v) => v.recipe.code),
+    createdBy: m.id === 1 ? ['AI', 'OLD'] : [['OLD'], ['AI'], ['Tetiana']][m.id % 3], versions: m.versions.map((v) => ({ id: v.id, hasList: !!v.ingredients })) })) }),
+  masterItemDetail: (id) => MASTER_ITEMS.masters.find((m) => m.id === id),
   previewMasterItemsBuild: () => ({ token: 'mb1', conflicts: 0,
     summary: { mastersToCreate: 2987, variantsToCreate: 3011, listsToCarry: 198, listRowsToLink: 202, joiningRows: 141, plainRowsToLink: 3105, rowsToPick: 9, savedListsInCatalog: 202 },
     lists: Array.from({ length: 198 }, (_, i) => ({ dish: LONG[i % LONG.length], variant: 'KG-LP, MS-UP — 2 Oct 2026', from: [`#${100 + i} Lunch Main Course [KG-LP, MS-UP]`], joining: i % 3 ? [] : [`#${900 + i} Main Dish [Staff]`], ingredients: LIST })),

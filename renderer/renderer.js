@@ -1844,40 +1844,49 @@ const MI_PAGE = 100;
 
 async function renderMasterItemsView(main) {
   main.innerHTML = `
-    <div class="topbar"><div><h1>Master Items</h1><span class="page-description">One entry per dish, its versions, and the Dish Catalog rows using each version</span></div></div>
-    <div class="search-bar"><label for="mi2-search">Search by name</label><input id="mi2-search" type="search" value="${aiEsc(state.masterItemsQuery || '')}" />
+    <div class="topbar"><div><h1>Master Items</h1><span class="page-description">One entry per dish; its versions and the Dish Catalog rows using them are in Edit</span></div></div>
+    <div class="search-bar"><label for="mi2-search">Search by name or code</label><input id="mi2-search" type="search" value="${aiEsc(state.masterItemsQuery || '')}" />
       <span id="mi2-count" class="mi2-count"></span></div>
     <div id="mi2-content"><div class="loading-state" role="status">Loading…</div></div>`;
   const content = document.getElementById('mi2-content');
   let data;
   try { data = await window.api.listMasterItems(); } catch (err) { content.innerHTML = `<div class="empty-state">Couldn't load master items: ${aiEsc(err.message)}</div>`; return; }
   if (data.unavailable) { content.innerHTML = '<div class="empty-state">Master items need their database update (migration 20261003120000).</div>'; return; }
-  state.masterItemsData = data;
-  let shown = MI_PAGE;
+  let shown = state.masterItemsShown || MI_PAGE;
   const search = document.getElementById('mi2-search');
+  const reload = () => renderMasterItemsView(main);
+  // A dish's versions, rows and sections are loaded only when it is opened.
+  const openDetail = async (id, then) => {
+    try {
+      const detail = await window.api.masterItemDetail(id);
+      if (detail.gone) { alert('This dish was deleted meanwhile.'); reload(); return; }
+      then(detail);
+    } catch (err) { alert(`Couldn't open it: ${err.message}`); }
+  };
   const draw = () => {
     const q = search.value.trim().toLowerCase();
     state.masterItemsQuery = search.value;
-    const list = q ? data.masters.filter(m => m.name.toLowerCase().includes(q)) : data.masters;
-    const versions = list.reduce((n, m) => n + m.versions.length, 0);
-    document.getElementById('mi2-count').textContent = `${list.length} dish(es) · ${versions} version(s)${data.unlinkedRows ? ` · ${data.unlinkedRows} catalog row(s) not linked` : ''}`;
+    state.masterItemsShown = shown;
+    const list = q ? data.masters.filter(m => m.name.toLowerCase().includes(q) || m.codes.some(c => c.toLowerCase().includes(q))) : data.masters;
+    document.getElementById('mi2-count').textContent = `${list.length} dish(es)`;
     if (!list.length) { content.innerHTML = '<div class="empty-state">No dish matches.</div>'; return; }
     content.innerHTML = `<div class="table-scroll"><table class="items-table master-items-table">
-      <thead><tr><th>Dish</th><th>Versions</th><th>Catalog rows</th><th>Code</th><th></th></tr></thead>
+      <thead><tr><th>Code</th><th>Item name</th><th>Created By</th><th>Ingredients</th><th></th></tr></thead>
       <tbody>${list.slice(0, shown).map(m => `<tr>
-        <td><strong>${aiEsc(m.name)}</strong></td>
-        <td>${m.versions.map(v => `<div class="mi2-version"><span>${aiEsc(v.displayName)}</span>
-          <button class="icon-btn" data-ing="${v.id}" title="${v.ingredients ? aiEsc(v.ingredients) : 'No list yet'}">Ingredients${v.ingredients ? '' : ' (none)'}</button></div>`).join('')}</td>
-        <td>${m.rows}</td>
-        <td>${m.versions.some(v => v.recipe) ? m.versions.filter(v => v.recipe).map(v => aiEsc(v.recipe.code)).join(', ') : '<span class="list-empty">—</span>'}</td>
+        <td class="code-cell">${m.codes.length ? m.codes.map(aiEsc).join(', ') : '<span class="list-empty">—</span>'}</td>
+        <td>${aiEsc(m.name)}</td>
+        <td>${m.createdBy.length ? m.createdBy.map(aiEsc).join(', ') : '<span class="list-empty">—</span>'}</td>
+        <td><button class="icon-btn" data-ing="${m.id}" title="${m.versions.length > 1 ? `${m.versions.length} versions: opens each version's list` : ''}">Ingredients${m.versions.some(v => v.hasList) ? '' : ' (none)'}${m.versions.length > 1 ? ` · ${m.versions.length} versions` : ''}</button></td>
         <td style="text-align:right"><button class="icon-btn" data-open="${m.id}">Edit</button><button class="icon-btn danger" data-del="${m.id}">Delete</button></td>
       </tr>`).join('')}</tbody></table></div>
       ${list.length > shown ? `<button class="secondary" id="mi2-more">Show ${Math.min(MI_PAGE, list.length - shown)} more (${list.length - shown} left)</button>` : ''}`;
     content.querySelector('#mi2-more')?.addEventListener('click', () => { shown += MI_PAGE; draw(); });
-    const findVersion = (id) => { for (const m of data.masters) { const v = m.versions.find(x => x.id === id); if (v) return { m, v }; } return null; };
-    content.querySelectorAll('[data-ing]').forEach(b => b.addEventListener('click', () => { const f = findVersion(Number(b.dataset.ing)); openVersionIngredientsModal(f.m, f.v, () => renderMasterItemsView(main)); }));
-    content.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => openMasterItemModal(data.masters.find(m => m.id === Number(b.dataset.open)), () => renderMasterItemsView(main))));
-    content.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => masterItemsDelete({ master: data.masters.find(m => m.id === Number(b.dataset.del)) }, () => renderMasterItemsView(main))));
+    content.querySelectorAll('[data-ing]').forEach(b => b.addEventListener('click', () => openDetail(Number(b.dataset.ing), (d) => {
+      // One version: its list directly. Several: the edit window, which shows each version's list.
+      if (d.versions.length === 1) openVersionIngredientsModal(d, d.versions[0], reload); else openMasterItemModal(d, reload);
+    })));
+    content.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => openDetail(Number(b.dataset.open), (d) => openMasterItemModal(d, reload))));
+    content.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => openDetail(Number(b.dataset.del), (d) => masterItemsDelete({ master: d }, reload))));
   };
   let t = null;
   search.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { shown = MI_PAGE; draw(); }, 150); });

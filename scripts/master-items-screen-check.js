@@ -8,7 +8,7 @@
 //      a copy of the current list; a row moved meanwhile is reported, the unneeded new version removed.
 //   E. delete: refused while used; unlink-and-delete clears only the users' links, keeps the list in history.
 // No login, no Supabase.
-const { withVariantLists, buildMasterList, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('../lib/masterItems');
+const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('../lib/masterItems');
 
 const failures = [];
 let count = 0;
@@ -70,6 +70,15 @@ const state = () => ({
   expect(list.map((m) => [m.name, m.rows, m.versions.map((v) => [v.id, v.displayName, v.rows.map((r) => r.id)])]),
     [['Kabsa Rice', 1, [[12, 'KG-LP — 3 Oct 2026', [4]]]], ['Macaroni & Cheese', 3, [[10, 'KG-LP, MS-UP — 2 Oct 2026', [1, 2]], [11, 'Staff — 2 Oct 2026', [3]]]]],
     'masters, versions (display names) and the rows using each');
+
+  // ---- B2: the list row (what the screen shows before a dish is opened)
+  const summ = buildMasterSummaries({ masters: s0.master_items, variants: [...s0.dish_variants.slice(0, 2), { ...s0.dish_variants[2], recipe_id: 7 }],
+    rows: [{ id: 1, dish_variant_id: 10, created_by_label: 'OLD' }, { id: 2, dish_variant_id: 10, created_by_label: 'AI' }, { id: 3, dish_variant_id: 11, created_by_label: ' AI ' }, { id: 4, dish_variant_id: 12, created_by_label: null }],
+    recipes: [{ id: 7, code: 'TTY-00012', name: 'Kabsa Rice' }] });
+  expect(summ.map((m) => [m.name, m.codes, m.createdBy, m.versions]), [
+    ['Kabsa Rice', ['TTY-00012'], [], [{ id: 12, hasList: false }]],
+    ['Macaroni & Cheese', [], ['AI', 'OLD'], [{ id: 10, hasList: true }, { id: 11, hasList: true }]],
+  ], 'list rows: code from a linked recipe, Created By from the catalog rows (most common first, blanks left out), version ids');
 
   // ---- C
   const db = fakeDb(state());

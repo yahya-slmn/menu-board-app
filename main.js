@@ -54,7 +54,7 @@ const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMa
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
 const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
 const { variantDisplayName } = require('./lib/masterItemsPlan');
-const { withVariantLists, buildMasterList, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
+const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -1306,27 +1306,30 @@ async function loadAllVariants() {
   }
 }
 
+// Every row of a query, its pages fetched IN PARALLEL: the first page also asks for the total count, the rest are then
+// requested together (PostgREST caps one response at 1000 rows). `refine` adds the filters / order to a select.
+async function fetchAllParallel(table, cols, refine, context) {
+  const first = await refine(supabase.from(table).select(cols, { count: 'exact' })).range(0, 999);
+  if (first.error) throw supaFail(context, first.error);
+  const total = first.count ?? first.data.length;
+  if (total <= 1000) return first.data;
+  const pages = [];
+  for (let from = 1000; from < total; from += 1000) pages.push(refine(supabase.from(table).select(cols)).range(from, from + 999));
+  const rest = await Promise.all(pages);
+  for (const r of rest) if (r.error) throw supaFail(context, r.error);
+  return first.data.concat(...rest.map((r) => r.data));
+}
+
+// The Master Items LIST (MV3, made fast 2026-10-04): only what the list shows -- master items, their versions' ids /
+// recipe / whether they hold a list, and the Created By label of each catalog row using them -- fetched in parallel.
+// Sections, categories and the rows themselves load per dish when it is opened (master-item-detail).
 ipcMain.handle('list-master-items', async () => {
   if (!(await masterItemsReady())) return { unavailable: true };
-  const masters = [];
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('master_items').select('id, name, name_key').order('id').range(from, from + 999);
-    if (error) throw supaFail('master items: load master_items', error);
-    masters.push(...data);
-    if (data.length < 1000) break;
-  }
-  const variants = await loadAllVariants();
-  const links = [];
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('menu_items').select('id, dish_variant_id').not('dish_variant_id', 'is', null).order('id').range(from, from + 999);
-    if (error) throw supaFail('master items: load links', error);
-    links.push(...data);
-    if (data.length < 1000) break;
-  }
-  const variantOf = new Map(links.map((l) => [l.id, l.dish_variant_id]));
-  const catalog = await loadCatalogForImport();
-  const rows = catalog.filter((it) => variantOf.has(it.id)).map((it) => ({ id: it.id, name: it.name, is_active: it.is_active, dish_variant_id: variantOf.get(it.id),
-    category_name: getCategoryByCode(it.category_code)?.name || it.category_code || '', sections: it.sections, sectionNames: it.sections.map((c) => getSectionByCode(c)?.name || c) }));
+  const [masters, variants, rows] = await Promise.all([
+    fetchAllParallel('master_items', 'id, name', (q) => q.order('id'), 'master items: load master_items'),
+    fetchAllParallel('dish_variants', 'id, master_item_id, recipe_id, ingredients_text', (q) => q.order('id'), 'master items: load dish_variants'),
+    fetchAllParallel('menu_items', 'id, dish_variant_id, created_by_label', (q) => q.not('dish_variant_id', 'is', null).order('id'), 'master items: load links'),
+  ]);
   const recipeIds = [...new Set(variants.map((v) => v.recipe_id).filter((x) => x != null))];
   let recipes = [];
   if (recipeIds.length) {
@@ -1334,7 +1337,36 @@ ipcMain.handle('list-master-items', async () => {
     if (error) throw supaFail('master items: load recipes', error);
     recipes = data;
   }
-  return { masters: buildMasterList({ masters, variants, rows, recipes }), unlinkedRows: catalog.length - rows.length };
+  return { masters: buildMasterSummaries({ masters, variants, rows, recipes }) };
+});
+
+// One dish, opened: its versions (with their lists) and the catalog rows using each, with section and category.
+ipcMain.handle('master-item-detail', async (e, masterId) => {
+  const { data: m, error: mErr } = await supabase.from('master_items').select('id, name').eq('id', masterId).maybeSingle();
+  if (mErr) throw supaFail('master item: load', mErr);
+  if (!m) return { gone: true };
+  const { data: variants, error: vErr } = await supabase.from('dish_variants').select('*').eq('master_item_id', masterId).order('id');
+  if (vErr) throw supaFail('master item: load versions', vErr);
+  const ids = variants.map((v) => v.id);
+  const { data: items, error: iErr } = ids.length ? await supabase.from('menu_items').select('id, name, category_id, is_active, dish_variant_id, created_by_label').in('dish_variant_id', ids) : { data: [], error: null };
+  if (iErr) throw supaFail('master item: load rows', iErr);
+  const sectionsOf = new Map();
+  if (items.length) {
+    const { data: portions, error: pErr } = await supabase.from('item_portions').select('item_id, age_group_id').in('item_id', items.map((i) => i.id));
+    if (pErr) throw supaFail('master item: load portions', pErr);
+    const sectionOfAg = new Map();
+    for (const section of getSections()) for (const ag of getAgeGroupsForSection(section.id)) sectionOfAg.set(ag.id, section.code);
+    for (const p of portions) { const c = sectionOfAg.get(p.age_group_id); if (!c) continue; if (!sectionsOf.has(p.item_id)) sectionsOf.set(p.item_id, new Set()); sectionsOf.get(p.item_id).add(c); }
+  }
+  const order = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];
+  const rows = items.map((it) => {
+    const secs = order.filter((c) => (sectionsOf.get(it.id) || new Set()).has(c));
+    return { id: it.id, name: it.name, is_active: it.is_active, dish_variant_id: it.dish_variant_id, category_name: getCategoryById(it.category_id)?.name || '', sections: secs, sectionNames: secs.map((c) => getSectionByCode(c)?.name || c) };
+  });
+  const recipeIds = [...new Set(variants.map((v) => v.recipe_id).filter((x) => x != null))];
+  let recipes = [];
+  if (recipeIds.length) { const { data } = await supabase.from('recipes').select('id, code, name').in('id', recipeIds); recipes = data || []; }
+  return buildMasterList({ masters: [m], variants, rows, recipes })[0];
 });
 ipcMain.handle('master-items-save-list', async (e, { variantId, ingredients, allergens, expectedUpdatedAt }) => {
   const r = await saveVariantList({ db: supabase, variantId, ingredients, allergens, expectedUpdatedAt, who: await signedInLogin(), source: 'manual' });

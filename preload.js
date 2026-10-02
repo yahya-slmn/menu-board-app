@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('api', {
   nameMapLoad: () => ipcRenderer.invoke('name-map-load'),
   previewMasterItemsBuild: () => ipcRenderer.invoke('preview-master-items-build'),
   listMasterItems: () => ipcRenderer.invoke('list-master-items'),
+  masterItemDetail: (masterId) => ipcRenderer.invoke('master-item-detail', masterId),
   masterItemsSaveList: (payload) => ipcRenderer.invoke('master-items-save-list', payload),
   masterItemsMoveRow: (payload) => ipcRenderer.invoke('master-items-move-row', payload),
   masterItemsDelete: (payload) => ipcRenderer.invoke('master-items-delete', payload),
