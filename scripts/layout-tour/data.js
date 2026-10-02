@@ -160,6 +160,13 @@ const handlers = {
   listIngredients: () => ING, searchIngredients: (q) => ING.filter((m) => m.name.toLowerCase().includes(String(q).toLowerCase())).slice(0, 25),
   nameMapLoad: () => NAME_MAP,
   // The list (summaries) and, on open, the dish's detail -- as main.js returns them.
+  // Recipe Generator bulk delete: the plan the confirmation shows (folders, dishes, a Master Item sharing a name).
+  planGeneratedRecipeDelete: ({ ids }) => {
+    const rs = GEN_DRAFTS.filter((d) => ids.includes(d.id));
+    return { token: 'rgd', total: rs.length, drafts: rs.length, confirmed: 0, codes: [], missing: 0, codeTableReady: true, sharingAMasterItem: 2, dependentRows: { processes: rs.length + 3, ingredients: rs.length * 9 },
+      folders: [{ folder: GEN_MENU, drafts: rs.length, confirmed: 0, recipes: rs.map((d, i) => ({ id: d.id, name: d.name, code: null, status: 'draft', dish: d.name,
+        master: i < 2 ? { name: d.name, versions: 2, versionsWithList: 1 } : null })) }] };
+  },
   listMasterItems: () => ({ masters: MASTER_ITEMS.masters.map((m) => ({ id: m.id, name: m.name, codes: m.versions.filter((v) => v.recipe).map((v) => v.recipe.code),
     createdBy: m.id === 1 ? ['AI', 'OLD'] : [['OLD'], ['AI'], ['Tetiana']][m.id % 3], versions: m.versions.map((v) => ({ id: v.id, hasList: !!v.ingredients })) })) }),
   masterItemDetail: (id) => MASTER_ITEMS.masters.find((m) => m.id === id),

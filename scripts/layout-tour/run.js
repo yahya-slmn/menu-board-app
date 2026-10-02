@@ -26,6 +26,13 @@ const electron = require('electron'); // the binary's path when required from No
 const args = process.argv.slice(2);
 const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
 const configs = opt('--config') ? [opt('--config')] : ['mac', 'win'];
+// Earlier runs' screenshot folders are removed first (each run is ~200 MB of full-resolution PNGs; dozens of runs once
+// filled the disk). Only the newest run's folder is kept.
+if (!opt('--shots')) {
+  for (const d of fs.readdirSync(os.tmpdir())) {
+    if (d.startsWith('menu-board-layout-tour-')) fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
+  }
+}
 const shots = opt('--shots') || fs.mkdtempSync(path.join(os.tmpdir(), 'menu-board-layout-tour-'));
 fs.mkdirSync(shots, { recursive: true });
 

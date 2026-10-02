@@ -87,7 +87,12 @@ const STEPS = [
     document.getElementById('bm-start').value = '2026-10-04'; document.getElementById('bm-end').value = '2026-10-08';
     await t.click('Build Grids'); await t.until(() => document.querySelector('[data-builder-section]')); await t.sleep(600);`
     : `document.querySelector('[data-builder-section="${code}"]').click(); await t.sleep(500);`]),
-  ['Recipe Generator: draft folder', 'app', `document.querySelector('[data-view=recipeGenerator]').click(); await t.sleep(800);
+  ['Recipe Generator: drafts, every folder ticked', 'app', `document.querySelector('[data-view=recipeGenerator]').click(); await t.sleep(800);
+    (await t.until(() => document.querySelector('[data-rg-tab=drafts]'))).click(); await t.until(() => document.getElementById('rg-folders-all'));
+    document.getElementById('rg-folders-all').click(); await t.sleep(200);`],
+  ['Recipe Generator: delete confirmation', 'app', `document.getElementById('rg-folders-delete-btn').click(); await t.until(() => document.getElementById('rgd-apply'));
+    document.querySelector('.rgd-folders details').open = true; await t.sleep(200);`],
+  ['Recipe Generator: draft folder', 'app', `document.getElementById('rgd-cancel').click(); await t.sleep(300); document.querySelector('[data-view=recipeGenerator]').click(); await t.sleep(800);
     (await t.until(() => document.querySelector('[data-rg-tab=drafts]'))).click(); await t.sleep(600);
     (await t.until(() => document.querySelector('[data-rg-open-folder="0"]'))).click(); await t.until(() => document.querySelector('.rg-drafts-table'));`],
   ['Recipe Generator: Recipe Generated', 'app', `document.querySelector('[data-rg-tab=generated]').click(); await t.until(() => document.querySelector('.rg-generated-table'));`],

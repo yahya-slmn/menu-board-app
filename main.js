@@ -51,6 +51,7 @@ const { planIngredientsSave, applyIngredientSaves } = require('./lib/catalogIngr
 const { splitRowsByCatalog, annotateRow } = require('./lib/menuIngredientsCatalog');
 const { planCodeRemoval, applyCodeRemoval, writeCodeRemovalWorkbook } = require('./lib/codeRemoval');
 const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMatch');
+const { planGeneratedDelete, nextRgCode } = require('./lib/generatedRecipeDelete');
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
 const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
 const { variantDisplayName } = require('./lib/masterItemsPlan');
@@ -2972,15 +2973,13 @@ ipcMain.handle('search-generated-recipes', async (e, query) => {
 // counter, same "find the highest existing number and increment client-side" tradeoff those two
 // already accept (not race-proof against two simultaneous confirms, fine for a single-chef-team
 // desktop tool).
+// The highest RG number among codes in use AND codes of deleted confirmed recipes (deleted_generated_recipe_codes, migration
+// 20261004110000), plus one: a deleted recipe's code is never given to another one. Before that table exists, codes in use only.
 async function nextGeneratedRecipeCode() {
   const { data, error } = await supabase.from('generated_recipes').select('code').like('code', 'RG-%');
   if (error) throw supaFail('nextGeneratedRecipeCode', error);
-  let max = 0;
-  for (const row of data) {
-    const n = parseInt(row.code.slice(3), 10);
-    if (!isNaN(n) && n > max) max = n;
-  }
-  return `RG-${String(max + 1).padStart(5, '0')}`;
+  const { data: gone } = await supabase.from('deleted_generated_recipe_codes').select('code');
+  return nextRgCode(data.map((r) => r.code), (gone || []).map((r) => r.code));
 }
 
 // Single-photo model (mirrors RECIPE_PHOTOS_BUCKET/uploadRecipePhoto/deleteRecipePhoto exactly)
@@ -3144,15 +3143,78 @@ ipcMain.handle('save-generated-recipe', async (e, payload) => {
   return { id: recipeId, code, status };
 });
 
-ipcMain.handle('delete-generated-recipe', async (e, id) => {
-  const { data: existing } = await supabase.from('generated_recipes').select('photo_path').eq('id', id).single();
-  // Cascades to generated_recipe_ingredients AND generated_recipe_process_wastes via process_id
-  // ON DELETE CASCADE.
+// THE delete of one generated recipe -- used by the single Delete button and the bulk delete alike. A confirmed recipe's
+// RG code is recorded first (deleted_generated_recipe_codes), so it is never reused; without that table a confirmed recipe
+// is not deleted. Deletes only: the recipe, its processes (with their ingredient and waste rows, ON DELETE CASCADE) and its
+// photo in the Recipe Generator's own store.
+async function deleteGeneratedRecipeById(id, who = null) {
+  const { data: existing } = await supabase.from('generated_recipes').select('name, code, status, photo_path').eq('id', id).maybeSingle();
+  if (!existing) return { success: true, alreadyGone: true };
+  if (existing.status === 'confirmed' && existing.code) {
+    const { error: cErr } = await supabase.from('deleted_generated_recipe_codes').upsert({ code: existing.code, recipe_name: existing.name, deleted_by: who }, { onConflict: 'code', ignoreDuplicates: true });
+    if (cErr) throw new Error(`Not deleted: its code ${existing.code} could not be recorded (${cErr.message}) -- is migration 20261004110000 applied?`);
+  }
   await supabase.from('generated_recipe_processes').delete().eq('generated_recipe_id', id);
   const { error } = await supabase.from('generated_recipes').delete().eq('id', id);
   if (error) throw supaFail('delete-generated-recipe', error);
-  if (existing?.photo_path) await deleteGeneratedRecipePhoto(existing.photo_path);
+  if (existing.photo_path) await deleteGeneratedRecipePhoto(existing.photo_path);
   return { success: true };
+}
+ipcMain.handle('delete-generated-recipe', async (e, id) => deleteGeneratedRecipeById(id, await signedInLogin()));
+
+// Bulk delete (2026-10-04, lib/generatedRecipeDelete.js): the plan the confirmation shows -- per folder, every recipe with
+// the menu dish it was made for and the Master Item sharing that exact name (not affected) -- then apply = the shared
+// single delete above for each recipe of THAT plan, a failure never stopping the rest.
+let rgDeletePlan = null; // { token, ids }
+async function inChunks(ids, size, fn) { const out = []; for (let i = 0; i < ids.length; i += size) out.push(...(await fn(ids.slice(i, i + size)))); return out; }
+ipcMain.handle('plan-generated-recipe-delete', async (e, { ids }) => {
+  const recipes = await inChunks(ids, 300, async (part) => {
+    const { data, error } = await supabase.from('generated_recipes').select('id, name, code, status, source_menu_label, source_dish_name').in('id', part);
+    if (error) throw supaFail('bulk delete: load recipes', error);
+    return data;
+  });
+  const procs = await inChunks(recipes.map((r) => r.id), 300, async (part) => {
+    const { data, error } = await supabase.from('generated_recipe_processes').select('id, generated_recipe_id').in('generated_recipe_id', part);
+    if (error) throw supaFail('bulk delete: load processes', error);
+    return data;
+  });
+  const ingredientRows = await inChunks(procs.map((p) => p.id), 300, async (part) => {
+    const { data, error } = await supabase.from('generated_recipe_ingredients').select('process_id').in('process_id', part);
+    if (error) throw supaFail('bulk delete: load ingredients', error);
+    return data;
+  });
+  const recipeOfProc = new Map(procs.map((p) => [p.id, p.generated_recipe_id]));
+  const dependents = new Map();
+  for (const p of procs) { const d = dependents.get(p.generated_recipe_id) || { processes: 0, ingredients: 0 }; d.processes++; dependents.set(p.generated_recipe_id, d); }
+  for (const i of ingredientRows) { const rid = recipeOfProc.get(i.process_id); const d = dependents.get(rid); if (d) d.ingredients++; }
+  // Master Items sharing the dish's exact name (shown, not affected).
+  let masters = [];
+  if (await masterItemsReady()) {
+    const keys = [...new Set(recipes.flatMap((r) => [r.source_dish_name, r.name]).map((x) => String(x ?? '').toLowerCase().replace(/\s+/g, ' ').trim()).filter(Boolean))];
+    const ms = await inChunks(keys, 200, async (part) => (await supabase.from('master_items').select('id, name, name_key').in('name_key', part)).data || []);
+    const vs = await inChunks(ms.map((m) => m.id), 300, async (part) => (await supabase.from('dish_variants').select('master_item_id, ingredients_text').in('master_item_id', part)).data || []);
+    masters = ms.map((m) => ({ ...m, versions: vs.filter((v) => v.master_item_id === m.id).length, versionsWithList: vs.filter((v) => v.master_item_id === m.id && String(v.ingredients_text || '').trim()).length }));
+  }
+  const plan = planGeneratedDelete({ recipes, masters, dependents });
+  const { error: codesErr } = await supabase.from('deleted_generated_recipe_codes').select('code').limit(1);
+  rgDeletePlan = { token: crypto.randomUUID(), ids: recipes.map((r) => r.id) };
+  return { token: rgDeletePlan.token, ...plan, missing: ids.length - recipes.length, codeTableReady: !codesErr };
+});
+ipcMain.handle('apply-generated-recipe-delete', async (e, { token }) => {
+  if (!rgDeletePlan || rgDeletePlan.token !== token) throw new Error('That preview is out of date -- select again.');
+  const { ids } = rgDeletePlan;
+  rgDeletePlan = null;
+  const who = await signedInLogin();
+  let done = 0;
+  const deleted = [], failed = [];
+  const one = async (id) => {
+    try { await deleteGeneratedRecipeById(id, who); deleted.push(id); } catch (err) { failed.push({ id, error: err.message || String(err) }); }
+    done++;
+    if (!e.sender.isDestroyed()) e.sender.send('rg-delete-progress', { done, total: ids.length });
+  };
+  for (let i = 0; i < ids.length; i += 4) await Promise.all(ids.slice(i, i + 4).map(one));
+  if (failed.length) log.warn('[recipe generator] bulk delete failures:', failed);
+  return { deleted: deleted.length, failed };
 });
 
 ipcMain.handle('export-generated-recipes', async (e, { recipeIds, savePath, targetLanguage }) => {

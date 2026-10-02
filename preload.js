@@ -29,6 +29,13 @@ contextBridge.exposeInMainWorld('api', {
   nameMapLoad: () => ipcRenderer.invoke('name-map-load'),
   previewMasterItemsBuild: () => ipcRenderer.invoke('preview-master-items-build'),
   listMasterItems: () => ipcRenderer.invoke('list-master-items'),
+  planGeneratedRecipeDelete: (payload) => ipcRenderer.invoke('plan-generated-recipe-delete', payload),
+  applyGeneratedRecipeDelete: (payload) => ipcRenderer.invoke('apply-generated-recipe-delete', payload),
+  onRgDeleteProgress: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('rg-delete-progress', listener);
+    return () => ipcRenderer.removeListener('rg-delete-progress', listener);
+  },
   masterItemDetail: (masterId) => ipcRenderer.invoke('master-item-detail', masterId),
   masterItemsSaveList: (payload) => ipcRenderer.invoke('master-items-save-list', payload),
   masterItemsMoveRow: (payload) => ipcRenderer.invoke('master-items-move-row', payload),

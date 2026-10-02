@@ -7051,12 +7051,13 @@ function renderDraftFolderList(container, ns, main, drafts) {
     .sort((a, b) => b.latest - a.latest);
 
   container.innerHTML = `
+    <div class="rg-bulk-bar"><button class="secondary" id="rg-folders-delete-btn" disabled>Delete selected</button><span class="rg-bulk-note" id="rg-folders-note"></span></div>
     <div class="table-scroll"><table class="recipes-table rg-drafts-table">
-      <thead><tr><th>Source Menu</th><th>Pending Review</th><th></th></tr></thead>
+      <thead><tr><th><label class="rg-check"><input type="checkbox" id="rg-folders-all" aria-label="Select every folder" /> Source Menu</label></th><th>Pending Review</th><th></th></tr></thead>
       <tbody>
         ${folders.map((f, i) => `
           <tr>
-            <td>${f.label}</td>
+            <td><label class="rg-check"><input type="checkbox" class="rg-folder-check" data-folder="${i}" aria-label="Select the folder ${rgEscape(f.label)}" /> ${f.label}</label></td>
             <td>${f.rows.length} to review</td>
             <td style="text-align:right"><button class="icon-btn" data-rg-open-folder="${i}">Open</button></td>
           </tr>
@@ -7064,6 +7065,22 @@ function renderDraftFolderList(container, ns, main, drafts) {
       </tbody>
     </table></div>
   `;
+  // Bulk delete (2026-10-04): tick folders (or "Select all"), then "Delete selected" -- every draft in them, after the
+  // confirmation (openRgDeleteModal) lists exactly what goes.
+  const folderChecks = [...container.querySelectorAll('.rg-folder-check')];
+  const allFolders = container.querySelector('#rg-folders-all');
+  const delFolders = container.querySelector('#rg-folders-delete-btn');
+  const pickedIds = () => folderChecks.filter(c => c.checked).flatMap(c => folders[Number(c.dataset.folder)].rows.map(r => r.id));
+  const syncFolders = () => {
+    const n = pickedIds().length, k = folderChecks.filter(c => c.checked).length;
+    allFolders.checked = k > 0 && k === folderChecks.length;
+    allFolders.indeterminate = k > 0 && k < folderChecks.length;
+    delFolders.disabled = n === 0;
+    delFolders.textContent = n ? `Delete selected (${n} draft${n > 1 ? 's' : ''} in ${k} folder${k > 1 ? 's' : ''})` : 'Delete selected';
+  };
+  folderChecks.forEach(c => c.addEventListener('change', syncFolders));
+  allFolders.addEventListener('change', () => { folderChecks.forEach(c => { c.checked = allFolders.checked; }); syncFolders(); });
+  delFolders.addEventListener('click', () => openRgDeleteModal(pickedIds(), () => renderRecipeGeneratorTabs(main, ns)));
   container.querySelectorAll('[data-rg-open-folder]').forEach(btn => {
     btn.addEventListener('click', () => {
       state[ns.stateKey].draftFolder = folders[parseInt(btn.dataset.rgOpenFolder, 10)].label;
@@ -7146,10 +7163,11 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
     return;
   }
 
+  const picked = new Set(); // ticked drafts of this folder (kept across the category filter)
   function rowMarkup(d) {
     return `
       <tr>
-        <td>${d.name}</td>
+        <td><label class="rg-check"><input type="checkbox" class="rg-draft-check" data-id="${d.id}" ${picked.has(d.id) ? 'checked' : ''} aria-label="Select ${rgEscape(d.name)}" /> ${d.name}</label></td>
         <td>${d.category || '–'}</td>
         <td>${d.source_menu_label || '–'}</td>
         <td>${new Date(d.created_at).toLocaleDateString()}</td>
@@ -7173,6 +7191,8 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
       ${needsRegroup ? `<button class="secondary" id="rg-regroup-btn" title="Some recipes here were generated before recipes were grouped, so they're grouped by a guess (Staff &quot;Main Dish&quot; lands in Other). Pick the menu file they came from to group them properly. Shows what will change first.">Re-group from the original menu…</button><input type="file" id="rg-regroup-file" accept=".xlsx" hidden />` : ''}
     </div>
     <div id="rg-regroup-panel" role="status" aria-live="polite"></div>
+    <div class="rg-bulk-bar"><label class="rg-check"><input type="checkbox" id="rg-draft-all" /> Select all in this folder</label>
+      <button class="secondary" id="rg-draft-delete-btn" disabled>Delete selected</button><span class="rg-bulk-note" id="rg-draft-note"></span></div>
     <div id="rg-draft-table"></div>
   `;
   wireBack();
@@ -7197,6 +7217,32 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
       </tbody>
     </table></div>
   `;
+    // What "Delete selected" acts on: the ticked drafts on screen (a draft ticked, then hidden by the category filter, is
+    // never deleted unseen -- the note says so), same rule as the Recipe Generated list.
+    const shownIds = new Set(shown.map(d => d.id));
+    const actionIds = () => [...picked].filter(id => shownIds.has(id));
+    const allBox = document.getElementById('rg-draft-all');
+    const delBtn = document.getElementById('rg-draft-delete-btn');
+    const sync = () => {
+      const n = actionIds().length, hidden = picked.size - n;
+      allBox.checked = shown.length > 0 && shown.every(d => picked.has(d.id));
+      allBox.indeterminate = n > 0 && !allBox.checked;
+      delBtn.disabled = n === 0;
+      delBtn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
+      document.getElementById('rg-draft-note').textContent = hidden > 0 ? `${hidden} ticked draft${hidden > 1 ? 's are' : ' is'} hidden by the category filter and won't be deleted.` : '';
+    };
+    tableEl.querySelectorAll('.rg-draft-check').forEach(cb => cb.addEventListener('change', () => {
+      const id = Number(cb.dataset.id);
+      if (cb.checked) picked.add(id); else picked.delete(id);
+      sync();
+    }));
+    allBox.onchange = () => {
+      for (const d of shown) { if (allBox.checked) picked.add(d.id); else picked.delete(d.id); }
+      tableEl.querySelectorAll('.rg-draft-check').forEach(cb => { cb.checked = picked.has(Number(cb.dataset.id)); });
+      sync();
+    };
+    delBtn.onclick = () => openRgDeleteModal(actionIds(), () => { s.returnScroll = main.scrollTop; renderRecipeGeneratorTabs(main, ns); });
+    sync();
     tableEl.querySelectorAll('[data-rg-review]').forEach(btn => {
       btn.addEventListener('click', () => {
         s.returnScroll = document.getElementById('main').scrollTop;
@@ -7215,6 +7261,61 @@ function renderDraftFolderContents(container, ns, main, drafts, folderLabel) {
   }
   filterEl.addEventListener('change', () => { s.draftCategory = filterEl.value; renderTable(); });
   renderTable();
+}
+
+// Recipe Generator bulk delete -- the ONE confirmation for the Drafts folder list, a draft folder and the Recipe Generated
+// list (main.js plan- / apply-generated-recipe-delete, lib/generatedRecipeDelete.js). It lists exactly what goes, per
+// folder: every recipe, the menu dish it was made for, and the Master Item sharing that name (shown, not affected -- no
+// table links a generated recipe to the Dish Catalog). Nothing is deleted before "Delete N". Each recipe goes through the
+// app's single delete; a failure never stops the rest.
+async function openRgDeleteModal(ids, onDone) {
+  if (!ids.length) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal rgd-modal" role="dialog" aria-modal="true" aria-labelledby="rgd-title">
+    <h2 id="rgd-title">Delete ${ids.length} recipe(s)</h2><div id="rgd-body" role="status">Checking what would be deleted…</div></div>`;
+  document.body.appendChild(overlay);
+  const body = overlay.querySelector('#rgd-body');
+  let busy = false;
+  const close = () => { if (busy) return; overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  let p;
+  try { p = await window.api.planGeneratedRecipeDelete({ ids }); } catch (err) { body.textContent = `Couldn't check: ${err.message}`; return; }
+  const blocked = p.confirmed > 0 && !p.codeTableReady;
+  body.innerHTML = `
+    <p><strong>${p.total}</strong> recipe(s) from <strong>${p.folders.length}</strong> folder(s): ${p.drafts} draft(s)${p.confirmed ? `, ${p.confirmed} confirmed (their codes ${p.codes.map(rgEscape).join(', ')} are never given to another recipe)` : ''}.
+      <span class="crm-examples">With them: ${p.dependentRows.processes} process(es) and ${p.dependentRows.ingredients} ingredient row(s). This cannot be undone.</span></p>
+    ${p.missing ? `<p class="field-warning">${p.missing} of the selected recipe(s) were already deleted meanwhile.</p>` : ''}
+    ${blocked ? '<p class="field-warning">Confirmed recipes can\'t be deleted until migration 20261004110000 is applied (it keeps their codes from being reused). Deleting drafts only works now.</p>' : ''}
+    <div class="rgd-folders">${p.folders.map(f => `<details ${p.folders.length === 1 ? 'open' : ''}><summary><strong>${rgEscape(f.folder)}</strong> — ${f.recipes.length} recipe(s)${f.confirmed ? ` (${f.drafts} draft(s), ${f.confirmed} confirmed)` : ''}</summary>
+      <ul>${f.recipes.map(r => `<li><strong>${rgEscape(r.name)}</strong>${r.code ? ` <span class="nm-meta">${rgEscape(r.code)}</span>` : ` <span class="nm-meta">draft</span>`}
+        <span class="crm-examples">Made for the menu dish “${rgEscape(r.dish)}”${r.master
+          ? ` · Master Item “${rgEscape(r.master.name)}”: ${r.master.versions} version(s), ${r.master.versionsWithList} with a saved ingredient list — not affected by this delete`
+          : ' · no Master Item of that name'}</span></li>`).join('')}</ul></details>`).join('')}</div>
+    <p class="ci-hint">Only these Recipe Generator recipes are deleted. Recipe Book, Recipe Extractor, the Dish Catalog, Master Items and their saved ingredient lists, and the menus are not touched${p.sharingAMasterItem ? ` (${p.sharingAMasterItem} of these share a name with a Master Item, listed above)` : ''}.</p>
+    <div class="actions"><span id="rgd-progress" class="mi2-msg"></span><button class="secondary" id="rgd-cancel">Cancel</button>
+      <button class="primary danger-fill" id="rgd-apply" ${blocked || !p.total ? 'disabled' : ''}>Delete ${p.total}</button></div>`;
+  body.querySelector('#rgd-cancel').addEventListener('click', close);
+  body.querySelector('#rgd-apply').addEventListener('click', async (e) => {
+    busy = true;
+    e.currentTarget.disabled = true;
+    body.querySelector('#rgd-cancel').disabled = true;
+    const prog = body.querySelector('#rgd-progress');
+    const unsubscribe = window.api.onRgDeleteProgress(({ done, total }) => { prog.textContent = `Deleting ${done} of ${total}…`; });
+    try {
+      const r = await window.api.applyGeneratedRecipeDelete({ token: p.token });
+      busy = false;
+      const names = new Map(p.folders.flatMap(f => f.recipes.map(x => [x.id, x.name])));
+      body.innerHTML = `<ul class="crm-groups"><li><strong>${r.deleted}</strong> recipe(s) deleted.</li>
+        ${r.failed.length ? `<li class="ci-failed">${r.failed.length} not deleted: ${r.failed.map(f => `${rgEscape(names.get(f.id) || '#' + f.id)} (${rgEscape(f.error)})`).join('; ')}</li>` : ''}</ul>
+        <div class="actions"><button class="primary" id="rgd-done">Done</button></div>`;
+      body.querySelector('#rgd-done').addEventListener('click', () => { close(); onDone(); });
+    } catch (err) {
+      busy = false;
+      prog.textContent = `Nothing more was deleted: ${err.message}`;
+    } finally { unsubscribe(); }
+  });
 }
 
 // Adapted from renderRecipeListView's own content logic (search/month-group/export-selected/
@@ -7386,17 +7487,9 @@ async function renderGeneratedConfirmedList(container, ns, main) {
     }
   });
 
-  deleteSelectedBtn.addEventListener('click', async () => {
-    const ids = actionIds(), count = ids.length;
-    if (count === 0 || !confirm(`Delete ${count} selected recipe${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
-    deleteSelectedBtn.disabled = true;
-    deleteSelectedBtn.textContent = 'Deleting…';
-    try {
-      for (const id of ids) await ns.api.del(id);
-    } catch (err) {
-      alert(`Delete failed: ${err.message}`);
-    }
-    renderRecipeGeneratorTabs(main, ns);
+  deleteSelectedBtn.addEventListener('click', () => {
+    const ids = actionIds();
+    if (ids.length) openRgDeleteModal(ids, () => renderRecipeGeneratorTabs(main, ns));
   });
 
   searchInput.addEventListener('input', renderFiltered);

@@ -12,7 +12,7 @@
     "publish": "electron-builder --mac --publish always",
     "tour": "node scripts/layout-tour/run.js",
     "test:roundtrip": "node scripts/menu-ingredients-roundtrip.js",
-    "test": "node scripts/menu-ingredients-roundtrip.js && node scripts/recipe-groups-check.js && node scripts/menu-ingredients-check.js && node scripts/reviewed-recipe-check.js && node scripts/catalog-ingredients-check.js && node scripts/catalog-ingredients-save-check.js && node scripts/menu-ingredients-catalog-check.js && node scripts/code-removal-check.js && node scripts/ingredient-names-check.js && node scripts/master-items-check.js && node scripts/master-items-build-check.js && node scripts/master-items-screen-check.js && node scripts/master-items-switch-check.js"
+    "test": "node scripts/menu-ingredients-roundtrip.js && node scripts/recipe-groups-check.js && node scripts/menu-ingredients-check.js && node scripts/reviewed-recipe-check.js && node scripts/catalog-ingredients-check.js && node scripts/catalog-ingredients-save-check.js && node scripts/menu-ingredients-catalog-check.js && node scripts/code-removal-check.js && node scripts/ingredient-names-check.js && node scripts/master-items-check.js && node scripts/master-items-build-check.js && node scripts/master-items-screen-check.js && node scripts/master-items-switch-check.js && node scripts/rg-delete-check.js"
   },
   "build": {
     "appId": "com.menuboard.app",
