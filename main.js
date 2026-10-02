@@ -54,6 +54,7 @@ const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMa
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
 const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
 const { variantDisplayName } = require('./lib/masterItemsPlan');
+const { withVariantLists, buildMasterList, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
   normalizeProcessesToNetWeight, netWeightOfProcesses, REFERENCE_NET_WEIGHT_GRAMS, isSaladCategory, dedupeWithinUpload, resolveSectionFromSheetName, isStudentSection, reviewedIngredientsOf,
@@ -534,9 +535,22 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
 
   const { data: items, error: itemsErr } = await supabase
     .from('menu_items')
-    .select(`id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id, created_by_label${await catalogIngredientsAvailable() ? `, ${INGREDIENT_COLUMNS}` : ''}`)
+    .select(`id, name, is_daily_repeating, is_active, rc_code, category_id, protein_type_id, calories_per_100g, calories_unverified, am_snack_style, is_ai_generated, ai_menu_run_id, created_by_label${await masterItemsReady() ? ', dish_variant_id' : ''}`)
     .in('id', itemIds);
   if (itemsErr) throw supaFail('get-items: load menu_items', itemsErr);
+  // The saved list is the dish VERSION's (MV4): load those versions, and how many catalog rows share each.
+  const variantIds = [...new Set(items.map((mi) => mi.dish_variant_id).filter((x) => x != null))];
+  const variantById = new Map();
+  const sharedBy = new Map();
+  for (let i = 0; i < variantIds.length; i += 300) {
+    const part = variantIds.slice(i, i + 300);
+    const { data: vs, error: vErr } = await supabase.from('dish_variants').select(`id, ${INGREDIENT_COLUMNS}`).in('id', part);
+    if (vErr) throw supaFail('get-items: load dish_variants', vErr);
+    for (const v of vs) variantById.set(v.id, v);
+    const { data: users, error: uErr } = await supabase.from('menu_items').select('dish_variant_id').in('dish_variant_id', part);
+    if (uErr) throw supaFail('get-items: count rows per version', uErr);
+    for (const u of users) sharedBy.set(u.dish_variant_id, (sharedBy.get(u.dish_variant_id) || 0) + 1);
+  }
 
   return items
     .map(mi => {
@@ -564,11 +578,13 @@ ipcMain.handle('get-items', async (e, sectionCode) => {
         // An AM / PM Snack with chicken or beef: kept in the catalog, never put on a new menu
         // (lib/categoryRules.js) -- the Dish Catalog tags it so it isn't silently missing from menus.
         snack_rule_blocked: !!snackLunchOnlyHit(cat?.code, pt?.code ?? null, [['name', mi.name]]),
-        // The saved, chef-approved Menu Ingredients list (undefined until the M2 migration is applied).
-        ingredients_text: mi.ingredients_text ?? null,
-        allergens_text: mi.allergens_text ?? null,
-        ingredients_updated_at: mi.ingredients_updated_at ?? null,
-        ingredients_updated_by: mi.ingredients_updated_by ?? null,
+        // The saved, chef-approved Menu Ingredients list: the dish VERSION's (MV4), shared by variant_rows catalog rows.
+        variant_id: mi.dish_variant_id ?? null,
+        variant_rows: mi.dish_variant_id != null ? (sharedBy.get(mi.dish_variant_id) || 1) : 0,
+        ingredients_text: variantById.get(mi.dish_variant_id)?.ingredients_text ?? null,
+        allergens_text: variantById.get(mi.dish_variant_id)?.allergens_text ?? null,
+        ingredients_updated_at: variantById.get(mi.dish_variant_id)?.ingredients_updated_at ?? null,
+        ingredients_updated_by: variantById.get(mi.dish_variant_id)?.ingredients_updated_by ?? null,
         _mpSort: cat?.meal_period_sort_order ?? 0,
         _cSort: cat?.sort_order ?? 0,
       };
@@ -700,30 +716,24 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
       throw supaFail('add-item: insert item_portions', portErr);
     }
   }
-  // An approved ingredient list typed in Add Item: saved with its history row, like any other save.
-  const ingredientsWarning = await saveManualIngredients({ itemId, name, ingredientsText, allergensText, expectedUpdatedAt: null, old: null });
+  // A new dish has no version yet (Master Items links it), so a list typed in Add Item can't be saved here.
+  const ingredientsWarning = (ingredientsText !== undefined && String(ingredientsText ?? '').trim()) ? 'The dish was added. Its ingredient list was not saved: a new dish gets its version in Master Items first.' : null;
   return { success: true, itemId, ...(ingredientsWarning ? { ingredientsWarning } : {}) };
 });
 
-// Add / Edit Item's Ingredients / Allergens (Dish Catalog ingredients, M2): written only when sent and different from
-// the saved text, through the same compare-and-swap + history as a file save (source 'manual'). Returns a warning for
-// the form (another person saved the list since the form opened, or the history row failed), else null.
-async function saveManualIngredients({ itemId, name, ingredientsText, allergensText, expectedUpdatedAt, old }) {
+// Add / Edit Item's Ingredients / Allergens: since MV4 they edit the dish VERSION the row uses (shared by every row using
+// it), through lib/masterItems.js saveVariantList -- compare-and-swap on the version's ingredients_updated_at + a history
+// row. Written only when sent and different. A row linked to no version can't hold a list (Master Items links it).
+// Returns a warning for the form, else null.
+async function saveManualIngredients({ variantId, ingredientsText, allergensText, expectedUpdatedAt }) {
   if (ingredientsText === undefined && allergensText === undefined) return null;
-  if (!(await catalogIngredientsAvailable())) return null;
-  const tidy = (v) => String(v ?? '').trim().replace(/\s+/g, ' ');
-  const oldIngredients = old ? old.ingredients_text : null;
-  const oldAllergens = old ? old.allergens_text : null;
-  if (tidy(ingredientsText) === tidy(oldIngredients) && tidy(allergensText) === tidy(oldAllergens)) return null;
-  const r = await applyIngredientSaves({ db: supabase, who: await signedInLogin(), source: 'manual', saves: [
-    { itemId, name, ingredients: ingredientsText, allergens: allergensText, expectedUpdatedAt: expectedUpdatedAt ?? null, oldIngredients, oldAllergens },
-  ] });
-  if (r.conflicts.length) {
-    const c = r.conflicts[0];
-    return `The ingredient list was not saved: ${c.by || 'someone'} changed it${c.at ? ` at ${new Date(c.at).toLocaleString()}` : ''} after you opened this form. Your other changes are saved -- reopen the dish to see the new list.`;
+  if (!(await masterItemsReady())) return null;
+  if (variantId == null) return 'The ingredient list was not saved: this dish is not linked to a version yet (Master Items).';
+  const r = await saveVariantList({ db: supabase, variantId, ingredients: ingredientsText, allergens: allergensText, expectedUpdatedAt: expectedUpdatedAt ?? null, who: await signedInLogin(), source: 'manual' });
+  if (r.conflict) {
+    return `The ingredient list was not saved: ${r.conflict.by || 'someone'} changed it${r.conflict.at ? ` at ${new Date(r.conflict.at).toLocaleString()}` : ''} after you opened this form. Your other changes are saved -- reopen the dish to see the new list.`;
   }
-  if (r.failed.length) return `The ingredient list was not saved: ${r.failed[0].error}`;
-  if (r.historyError) log.warn(`[catalog ingredients] item ${itemId}: list saved, history row failed: ${r.historyError}`);
+  if (r.historyError) log.warn(`[master items] version ${variantId}: list saved, history row failed: ${r.historyError}`);
   return null;
 }
 
@@ -830,10 +840,10 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
   // Only when the form sends them (the Edit Item form does once the migration is applied); compared with what is saved
   // NOW, and written only if nobody saved a list since the form opened (ingredientsExpectedUpdatedAt).
   let ingredientsWarning = null;
-  if ((ingredientsText !== undefined || allergensText !== undefined) && await catalogIngredientsAvailable()) {
-    const { data: cur, error: curErr } = await supabase.from('menu_items').select('ingredients_text, allergens_text').eq('id', id).maybeSingle();
-    if (curErr) throw supaFail('update-item: read the saved ingredient list', curErr);
-    ingredientsWarning = await saveManualIngredients({ itemId: id, name, ingredientsText, allergensText, expectedUpdatedAt: ingredientsExpectedUpdatedAt, old: cur });
+  if ((ingredientsText !== undefined || allergensText !== undefined) && await masterItemsReady()) {
+    const { data: cur, error: curErr } = await supabase.from('menu_items').select('dish_variant_id').eq('id', id).maybeSingle();
+    if (curErr) throw supaFail('update-item: read the dish version', curErr);
+    ingredientsWarning = await saveManualIngredients({ variantId: cur ? cur.dish_variant_id : null, ingredientsText, allergensText, expectedUpdatedAt: ingredientsExpectedUpdatedAt });
   }
   return { success: true, ...(ingredientsWarning ? { ingredientsWarning } : {}) };
 });
@@ -1284,6 +1294,56 @@ ipcMain.handle('apply-master-items-build', async (e, { token, includeJoining }) 
   return { ...r, conflicts: r.conflicts.length };
 });
 
+// Master Items screen (MV3, lib/masterItems.js): master items with their versions, the catalog rows using each, and the
+// version-level writes (list, move a row to another version of the same dish, delete / unlink-and-delete).
+async function loadAllVariants() {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('dish_variants').select('*').order('id').range(from, from + 999);
+    if (error) throw supaFail('master items: load dish_variants', error);
+    all.push(...data);
+    if (data.length < 1000) return all;
+  }
+}
+
+ipcMain.handle('list-master-items', async () => {
+  if (!(await masterItemsReady())) return { unavailable: true };
+  const masters = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('master_items').select('id, name, name_key').order('id').range(from, from + 999);
+    if (error) throw supaFail('master items: load master_items', error);
+    masters.push(...data);
+    if (data.length < 1000) break;
+  }
+  const variants = await loadAllVariants();
+  const links = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('menu_items').select('id, dish_variant_id').not('dish_variant_id', 'is', null).order('id').range(from, from + 999);
+    if (error) throw supaFail('master items: load links', error);
+    links.push(...data);
+    if (data.length < 1000) break;
+  }
+  const variantOf = new Map(links.map((l) => [l.id, l.dish_variant_id]));
+  const catalog = await loadCatalogForImport();
+  const rows = catalog.filter((it) => variantOf.has(it.id)).map((it) => ({ id: it.id, name: it.name, is_active: it.is_active, dish_variant_id: variantOf.get(it.id),
+    category_name: getCategoryByCode(it.category_code)?.name || it.category_code || '', sections: it.sections, sectionNames: it.sections.map((c) => getSectionByCode(c)?.name || c) }));
+  const recipeIds = [...new Set(variants.map((v) => v.recipe_id).filter((x) => x != null))];
+  let recipes = [];
+  if (recipeIds.length) {
+    const { data, error } = await supabase.from('recipes').select('id, code, name').in('id', recipeIds);
+    if (error) throw supaFail('master items: load recipes', error);
+    recipes = data;
+  }
+  return { masters: buildMasterList({ masters, variants, rows, recipes }), unlinkedRows: catalog.length - rows.length };
+});
+ipcMain.handle('master-items-save-list', async (e, { variantId, ingredients, allergens, expectedUpdatedAt }) => {
+  const r = await saveVariantList({ db: supabase, variantId, ingredients, allergens, expectedUpdatedAt, who: await signedInLogin(), source: 'manual' });
+  if (r.historyError) log.warn(`[master items] version ${variantId}: list saved, history row failed: ${r.historyError}`);
+  return r;
+});
+ipcMain.handle('master-items-move-row', async (e, { rowId, fromVariantId, toVariantId }) => moveRowToVersion({ db: supabase, rowId, fromVariantId, toVariantId, who: await signedInLogin() }));
+ipcMain.handle('master-items-delete', async (e, { variantId, masterId, unlink }) => deleteVersionOrMaster({ db: supabase, variantId, masterId, unlink, who: await signedInLogin() }));
+
 // One-time calorie review (lib/calorieReview.js): export every active Daycare / KG-LP / MS-UP dish for a
 // researcher, then import the reviewed values. Preview first: the plan is kept here and only the plan
 // the chef saw is written (apply-calorie-import with its token). No AI.
@@ -1431,15 +1491,18 @@ ipcMain.handle('apply-catalog-import', async (e, { token, createdBy, picks }) =>
 // chose, through the compare-and-swap on ingredients_updated_at, and appends a history row per save.
 let catalogIngredientsPlan = null; // { token, plan, fileNames }
 
+// Every catalog row with the list of the dish VERSION it uses (MV4, lib/masterItems.js withVariantLists) -- the one place
+// a list lives. Used by Menu Ingredients' reuse (M3) and the approved-file save (M2). A row linked to no version has no list.
 async function loadCatalogForIngredients() {
   const all = [];
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('menu_items').select(`id, name, category_id, is_active, ${INGREDIENT_COLUMNS}`).order('id').range(from, from + 999);
+    const { data, error } = await supabase.from('menu_items').select('id, name, category_id, is_active, dish_variant_id').order('id').range(from, from + 999);
     if (error) throw supaFail('catalog ingredients: load menu_items', error);
     all.push(...data);
     if (data.length < 1000) break;
   }
-  return all.map(it => ({ ...it, category_code: getCategoryById(it.category_id)?.code }));
+  const variants = (await masterItemsReady()) ? await loadAllVariants() : [];
+  return withVariantLists(all, variants).map(it => ({ ...it, category_code: getCategoryById(it.category_id)?.code }));
 }
 
 ipcMain.handle('preview-catalog-ingredients-save', async (e, { files }) => {
@@ -1471,7 +1534,7 @@ ipcMain.handle('apply-catalog-ingredients-save', async (e, { token, picks }) => 
     const entry = byKey.get(key);
     const v = entry && entry.versions[Number(version) || 0];
     if (!v) continue;
-    saves.push({ itemId: entry.itemId, name: entry.name, ingredients: v.ingredients, allergens: v.allergens, expectedUpdatedAt: entry.expectedUpdatedAt,
+    saves.push({ variantId: entry.variantId, name: entry.name, ingredients: v.ingredients, allergens: v.allergens, expectedUpdatedAt: entry.expectedUpdatedAt,
       oldIngredients: entry.saved ? entry.saved.ingredients : null, oldAllergens: entry.saved ? entry.saved.allergens : null });
   }
   const result = await applyIngredientSaves({ db: supabase, saves, who: await signedInLogin(), source: 'menu_upload', sourceFile: fileNames.join(', ') });

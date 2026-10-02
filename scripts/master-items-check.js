@@ -53,7 +53,7 @@ expect(variantDisplayName({ sections: ['STAFF'], date: '2026-10-02T10:00:00Z', r
 
 // ---- E. randomised: the guarantees for the real lists
 let seed = 7;
-const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return (seed >>> 16) % n; }; // high bits: the low ones repeat
 const NAMES = ['Kabsa', 'kabsa', 'KABSA ', 'Mac & Cheese', 'mac  & cheese', 'Soup', 'Soups', 'Rice', 'Pie'];
 const LISTS = [null, null, 'a - b', 'b - A', 'a - b - c', 'x', ' X ', 'y - z'];
 const SECS = ['DAYCARE', 'KG_LP', 'MS_UP', 'STAFF', 'CEO'];

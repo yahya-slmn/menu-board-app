@@ -852,6 +852,7 @@ async function renderView() {
   main.classList.toggle('build-mode', state.currentView === 'menuPlanner' && state.menuPlanner.mode === 'build');
   try {
   if (state.currentView === 'items') return await renderItemsView(main);
+  if (state.currentView === 'masterItems') return await renderMasterItemsView(main);
   if (state.currentView === 'menuPlanner') return await renderMenuPlannerView(main);
   if (state.currentView === 'aiMenu') return await renderAiMenuView(main);
   if (state.currentView === 'history') return await renderHistoryView(main);
@@ -1610,7 +1611,7 @@ function csRenderPlan() {
     ${plan.disagree.length ? csTable('cs-disagree', plan.disagree, csDisagreeRow) : '<p class="ci-empty">None: every dish has one list in these files.</p>'}
 
     <h2 class="ci-h2" id="cs-h-new">New lists (${plan.new.length}) <span class="ci-bulk"><button class="secondary small" data-bulk="cs-new" data-on="1">Select all</button><button class="secondary small" data-bulk="cs-new" data-on="0">Select none</button></span> <button class="ci-jump ci-top" data-jump="cs-body">Back to top</button></h2>
-    <p class="ci-hint">Dishes with no saved list yet.</p>
+    <p class="ci-hint">Dish versions with no saved list yet. A list is saved on the dish's version, shared by every Dish Catalog row using it.</p>
     ${plan.new.length ? csTable('cs-new', plan.new, e => csListRow(e, 'new')) : '<p class="ci-empty">None.</p>'}
 
     <h2 class="ci-h2" id="cs-h-changed">Changed (${plan.changed.length}) <span class="ci-bulk"><button class="secondary small" data-bulk="cs-changed" data-on="1">Select all</button><button class="secondary small" data-bulk="cs-changed" data-on="0">Select none</button></span> <button class="ci-jump ci-top" data-jump="cs-body">Back to top</button></h2>
@@ -1625,6 +1626,7 @@ function csRenderPlan() {
         ${ns.notInCatalog.length ? `<li><strong>${ns.notInCatalog.length} dish(es) are not in the Dish Catalog</strong> under that category. Add them with Dish Catalog → Import dishes from menus…, then save this file again:
           <span class="cs-names">${ns.notInCatalog.map(d => `${aiEsc(d.name)} (${aiEsc(d.sections)})`).join(' · ')}</span></li>` : ''}
         ${ns.blankDishes.length ? `<li>${ns.blankDishes.length} dish(es) have no list in the file (blank Ingredients): ${ns.blankDishes.map(aiEsc).join(' · ')}</li>` : ''}
+        ${(ns.notLinked || []).length ? `<li>${ns.notLinked.length} dish(es) are not linked to a version yet, so they can't hold a list -- link them in Master Items: ${ns.notLinked.map(aiEsc).join(' · ')}</li>` : ''}
         <li>${ns.servedAsIs} Fruit Bar / Fruit Basket / Salad Bar row(s): served as is, never saved.</li>
         ${ns.unclear ? `<li>${ns.unclear} row(s) with no Dish Catalog category (drinks, retired rows).</li>` : ''}
       </ul>
@@ -1832,6 +1834,156 @@ async function openMasterItemsBuildModal(onDone) {
   });
 }
 
+// ============================================================
+// MASTER ITEMS (MV3, lib/masterItems.js): one master item per distinct dish, its VERSIONS (the versions that really differ,
+// e.g. MS-UP's and Staff's Macaroni & Cheese), and the Dish Catalog rows using each version. One ingredient list per
+// version, shared by every row using it. A row's "uses version" choice is about which version of the dish it serves --
+// never which sections: where a dish is served stays in the Dish Catalog.
+// ============================================================
+const MI_PAGE = 100;
+
+async function renderMasterItemsView(main) {
+  main.innerHTML = `
+    <div class="topbar"><div><h1>Master Items</h1><span class="page-description">One entry per dish, its versions, and the Dish Catalog rows using each version</span></div></div>
+    <div class="search-bar"><label for="mi2-search">Search by name</label><input id="mi2-search" type="search" value="${aiEsc(state.masterItemsQuery || '')}" />
+      <span id="mi2-count" class="mi2-count"></span></div>
+    <div id="mi2-content"><div class="loading-state" role="status">Loading…</div></div>`;
+  const content = document.getElementById('mi2-content');
+  let data;
+  try { data = await window.api.listMasterItems(); } catch (err) { content.innerHTML = `<div class="empty-state">Couldn't load master items: ${aiEsc(err.message)}</div>`; return; }
+  if (data.unavailable) { content.innerHTML = '<div class="empty-state">Master items need their database update (migration 20261003120000).</div>'; return; }
+  state.masterItemsData = data;
+  let shown = MI_PAGE;
+  const search = document.getElementById('mi2-search');
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    state.masterItemsQuery = search.value;
+    const list = q ? data.masters.filter(m => m.name.toLowerCase().includes(q)) : data.masters;
+    const versions = list.reduce((n, m) => n + m.versions.length, 0);
+    document.getElementById('mi2-count').textContent = `${list.length} dish(es) · ${versions} version(s)${data.unlinkedRows ? ` · ${data.unlinkedRows} catalog row(s) not linked` : ''}`;
+    if (!list.length) { content.innerHTML = '<div class="empty-state">No dish matches.</div>'; return; }
+    content.innerHTML = `<div class="table-scroll"><table class="items-table master-items-table">
+      <thead><tr><th>Dish</th><th>Versions</th><th>Catalog rows</th><th>Code</th><th></th></tr></thead>
+      <tbody>${list.slice(0, shown).map(m => `<tr>
+        <td><strong>${aiEsc(m.name)}</strong></td>
+        <td>${m.versions.map(v => `<div class="mi2-version"><span>${aiEsc(v.displayName)}</span>
+          <button class="icon-btn" data-ing="${v.id}" title="${v.ingredients ? aiEsc(v.ingredients) : 'No list yet'}">Ingredients${v.ingredients ? '' : ' (none)'}</button></div>`).join('')}</td>
+        <td>${m.rows}</td>
+        <td>${m.versions.some(v => v.recipe) ? m.versions.filter(v => v.recipe).map(v => aiEsc(v.recipe.code)).join(', ') : '<span class="list-empty">—</span>'}</td>
+        <td style="text-align:right"><button class="icon-btn" data-open="${m.id}">Edit</button><button class="icon-btn danger" data-del="${m.id}">Delete</button></td>
+      </tr>`).join('')}</tbody></table></div>
+      ${list.length > shown ? `<button class="secondary" id="mi2-more">Show ${Math.min(MI_PAGE, list.length - shown)} more (${list.length - shown} left)</button>` : ''}`;
+    content.querySelector('#mi2-more')?.addEventListener('click', () => { shown += MI_PAGE; draw(); });
+    const findVersion = (id) => { for (const m of data.masters) { const v = m.versions.find(x => x.id === id); if (v) return { m, v }; } return null; };
+    content.querySelectorAll('[data-ing]').forEach(b => b.addEventListener('click', () => { const f = findVersion(Number(b.dataset.ing)); openVersionIngredientsModal(f.m, f.v, () => renderMasterItemsView(main)); }));
+    content.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => openMasterItemModal(data.masters.find(m => m.id === Number(b.dataset.open)), () => renderMasterItemsView(main))));
+    content.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => masterItemsDelete({ master: data.masters.find(m => m.id === Number(b.dataset.del)) }, () => renderMasterItemsView(main))));
+  };
+  let t = null;
+  search.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { shown = MI_PAGE; draw(); }, 150); });
+  draw();
+}
+
+const miWhen = (at) => (at ? new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const miRowsText = (v) => v.rows.map(r => `${r.sections.join(', ') || 'no section'} · ${r.category}`).join('; ');
+
+// One version's list: view and edit. Saved only if nobody saved it since this opened; shared by every row using it.
+function openVersionIngredientsModal(master, version, onSaved) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal mi2-modal" role="dialog" aria-modal="true" aria-labelledby="mi2-ing-title">
+    <h2 id="mi2-ing-title">${aiEsc(master.name)}</h2>
+    <p class="ci-hint"><strong>${aiEsc(version.displayName)}</strong> · used by ${version.rows.length} catalog row(s): ${aiEsc(miRowsText(version))}</p>
+    ${miListFields(version)}
+    <div class="actions"><span class="mi2-msg" role="status"></span><button class="secondary" data-x>Cancel</button><button class="primary" data-save>Save</button></div></div>`;
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.querySelector('[data-x]').addEventListener('click', close);
+  overlay.querySelector('[data-save]').addEventListener('click', () => miSaveList(overlay, version, () => { close(); onSaved(); }));
+  overlay.querySelector('textarea').focus();
+}
+
+function miListFields(v) {
+  return `<div class="field"><label>Ingredients <span class="field-note">approved list, " - " between ingredients${v.rows.length > 1 ? ` · shared by ${v.rows.length} catalog rows` : ''}</span></label>
+      <textarea class="mi2-ing" rows="4">${aiEsc(v.ingredients)}</textarea></div>
+    <div class="field"><label>Allergens</label><input class="mi2-all" value="${aiEsc(v.allergens)}" />
+      ${v.updatedAt ? `<div class="field-note">Saved ${aiEsc(miWhen(v.updatedAt))}${v.updatedBy ? ` by ${aiEsc(v.updatedBy)}` : ''}</div>` : ''}</div>`;
+}
+
+async function miSaveList(scope, version, onDone) {
+  const msg = scope.querySelector('.mi2-msg');
+  msg.textContent = 'Saving…';
+  try {
+    const r = await window.api.masterItemsSaveList({ variantId: version.id, ingredients: scope.querySelector('.mi2-ing').value, allergens: scope.querySelector('.mi2-all').value, expectedUpdatedAt: version.updatedAt });
+    if (r.conflict) { msg.textContent = `Not saved: ${r.conflict.by || 'someone'} saved this list ${r.conflict.at ? miWhen(r.conflict.at) : ''} after you opened it. Reopen to see it.`; return; }
+    showToast(r.unchanged ? 'No change.' : 'List saved.');
+    onDone();
+  } catch (err) { msg.textContent = `Not saved: ${err.message}`; }
+}
+
+// The edit window: every version with its list and the catalog rows using it; each row's "Uses version" control.
+function openMasterItemModal(master, onChanged) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const versionOptions = (current) => master.versions.map(v => `<option value="${v.id}" ${v.id === current ? 'selected' : ''}>${aiEsc(v.displayName)}</option>`).join('') + '<option value="new">A new version (a copy of this list, to edit)</option>';
+  overlay.innerHTML = `<div class="modal mi2-modal mi2-edit" role="dialog" aria-modal="true" aria-labelledby="mi2-edit-title">
+    <h2 id="mi2-edit-title">${aiEsc(master.name)}</h2>
+    <p class="ci-hint">${master.versions.length} version(s) · ${master.rows} Dish Catalog row(s). Each row below uses one version of this dish; where a dish is served (sections, categories) is set in the Dish Catalog.</p>
+    ${master.versions.map(v => `<section class="mi2-vcard" data-v="${v.id}">
+      <div class="mi2-vhead"><strong>${aiEsc(v.displayName)}</strong>${v.recipe ? ` <span class="nm-meta">${aiEsc(v.recipe.code)}</span>` : ''}
+        <button class="icon-btn danger" data-delv="${v.id}">Delete version</button></div>
+      ${miListFields(v)}
+      <div class="mi2-vsave"><span class="mi2-msg" role="status"></span><button class="secondary small" data-savev="${v.id}">Save this list</button></div>
+      <table class="mi2-rows"><thead><tr><th>Dish Catalog row</th><th>Uses version</th></tr></thead><tbody>
+        ${v.rows.map(r => `<tr><td>${aiEsc(r.sections.join(', ') || 'no section')} · ${aiEsc(r.category)}${r.active ? '' : ' <span class="nm-meta">inactive</span>'}<span class="nm-meta">#${r.id} ${aiEsc(r.name)}</span></td>
+          <td><select data-row="${r.id}" data-from="${v.id}" aria-label="Which version row ${r.id} uses">${versionOptions(v.id)}</select></td></tr>`).join('') || '<tr><td colspan="2" class="list-empty">No catalog row uses this version.</td></tr>'}
+      </tbody></table></section>`).join('')}
+    <div class="actions"><button class="secondary danger-text" data-delm>Delete dish</button><button class="primary" data-x>Close</button></div></div>`;
+  document.body.appendChild(overlay);
+  let changed = false;
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); if (changed) onChanged(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.querySelector('[data-x]').addEventListener('click', close);
+  overlay.querySelectorAll('[data-savev]').forEach(b => b.addEventListener('click', () => {
+    const v = master.versions.find(x => x.id === Number(b.dataset.savev));
+    miSaveList(b.closest('.mi2-vcard'), v, () => { changed = true; close(); });
+  }));
+  overlay.querySelectorAll('select[data-row]').forEach(sel => sel.addEventListener('change', async () => {
+    const to = sel.value === 'new' ? null : Number(sel.value);
+    if (to === Number(sel.dataset.from)) return;
+    sel.disabled = true;
+    try {
+      const r = await window.api.masterItemsMoveRow({ rowId: Number(sel.dataset.row), fromVariantId: Number(sel.dataset.from), toVariantId: to });
+      if (r.stale) { alert('This row was changed by someone else meanwhile -- reopen to see it.'); }
+      changed = true; close();
+    } catch (err) { alert(`Not moved: ${err.message}`); sel.disabled = false; }
+  }));
+  overlay.querySelectorAll('[data-delv]').forEach(b => b.addEventListener('click', () => {
+    const v = master.versions.find(x => x.id === Number(b.dataset.delv));
+    masterItemsDelete({ master, version: v }, () => { changed = true; close(); });
+  }));
+  overlay.querySelector('[data-delm]').addEventListener('click', () => masterItemsDelete({ master }, () => { changed = true; close(); }));
+}
+
+// Delete a version or a whole dish: refused while catalog rows use it -- then "Unlink and delete" (the rows stay in the
+// catalog; only their link is cleared, and Menu Ingredients asks the AI for them until they are linked again).
+async function masterItemsDelete({ master, version = null }, onDone) {
+  const what = version ? `the version “${version.displayName}” of ${master.name}` : `the dish “${master.name}” and its ${master.versions.length} version(s)`;
+  const users = version ? version.rows.length : master.rows;
+  if (!users) {
+    if (!confirm(`Delete ${what}?`)) return;
+  } else if (!confirm(`${users} Dish Catalog row(s) use ${what}.\n\nUnlink and delete? Those rows stay in the Dish Catalog unchanged; only their link is cleared (Menu Ingredients will ask the AI for them until they are linked again). The list is kept in the history.`)) return;
+  try {
+    const r = await window.api.masterItemsDelete({ variantId: version ? version.id : null, masterId: version ? null : master.id, unlink: !!users });
+    if (r.inUse) { alert(`Not deleted: ${r.inUse} row(s) use it.`); return; }
+    showToast(r.unlinked ? `Deleted; ${r.unlinked} row(s) unlinked.` : 'Deleted.');
+    onDone();
+  } catch (err) { alert(`Not deleted: ${err.message}`); }
+}
+
 // Dish Catalog "Created By" (menu_items.created_by_label): free text with suggestions -- every label already
 // used plus the recipe people (list-created-by-labels in main.js). One <datalist> in <body>, refreshed when
 // the catalog or the item form opens and after an inline edit. A failed lookup just leaves no suggestions.
@@ -1874,7 +2026,8 @@ async function openItemModal(existingItem) {
   const isEdit = !!existingItem;
   const portions = isEdit ? await window.api.getItemPortions(existingItem.id) : [];
   // Dish Catalog ingredients (M2): the approved list fields appear once the migration is applied.
-  const ingredientsOn = await window.api.catalogIngredientsAvailable().catch(() => false);
+  // Edit only (MV4): the list belongs to the dish VERSION this row uses; a new dish gets its version in Master Items.
+  const ingredientsOn = isEdit && await window.api.catalogIngredientsAvailable().catch(() => false);
   const savedIngredients = isEdit ? (existingItem.ingredients_text || '') : '';
   const savedAllergens = isEdit ? (existingItem.allergens_text || '') : '';
 
@@ -1900,7 +2053,7 @@ async function openItemModal(existingItem) {
       </div>
       ${ingredientsOn ? `
       <div class="field">
-        <label for="m-ingredients">Ingredients <span class="field-note">approved list, " - " between ingredients</span></label>
+        <label for="m-ingredients">Ingredients <span class="field-note">approved list, " - " between ingredients${existingItem.variant_rows > 1 ? ` · shared by ${existingItem.variant_rows} catalog rows (this dish's version)` : ''}${existingItem.variant_id == null ? ' · not linked to a version yet (Master Items)' : ''}</span></label>
         <textarea id="m-ingredients" rows="3" placeholder="e.g. chicken - basmati rice - onion - garlic">${aiEsc(savedIngredients)}</textarea>
       </div>
       <div class="field">

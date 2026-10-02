@@ -1529,6 +1529,25 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 /* Dish Catalog -> Remove old codes (openCodeRemovalModal) */
 .modal.crm-modal { width: 560px; }
 .modal.mib-modal { width: 620px; }
+/* Master Items (renderMasterItemsView, MV3) */
+.mi2-count { font-size: 12.5px; color: var(--neutral); }
+table.items-table.master-items-table th:nth-child(1), table.items-table.master-items-table td:nth-child(1) { width: 26%; }
+table.items-table.master-items-table th:nth-child(2), table.items-table.master-items-table td:nth-child(2) { width: auto; }
+table.items-table.master-items-table th:nth-child(3), table.items-table.master-items-table td:nth-child(3) { width: 96px; }
+table.items-table.master-items-table th:nth-child(4), table.items-table.master-items-table td:nth-child(4) { width: 110px; }
+table.items-table.master-items-table th:nth-child(5), table.items-table.master-items-table td:nth-child(5) { width: 140px; }
+.mi2-version { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.modal.mi2-modal { width: 640px; }
+.mi2-vcard { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.mi2-vhead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.mi2-vhead .icon-btn { margin-left: auto; }
+.mi2-vsave { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin: -4px 0 8px; }
+.mi2-msg { font-size: 12.5px; color: var(--danger); margin-right: auto; }
+.mi2-rows { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.mi2-rows th { text-align: left; font-size: 11px; color: var(--neutral); text-transform: uppercase; letter-spacing: .04em; padding: 4px 0; }
+.mi2-rows td { padding: 4px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.mi2-rows select { max-width: 260px; font-size: 12.5px; }
+.danger-text { color: var(--danger); }
 .mib-join { display: block; font-size: 13px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
 .mib-modal .ci-details ul { max-height: 220px; overflow: auto; }
 .calorie-review-bar .bar-group { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }

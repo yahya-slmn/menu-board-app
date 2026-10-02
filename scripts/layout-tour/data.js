@@ -125,6 +125,18 @@ const NAME_MAP = { totalRows: 9313, resolvedRows: 848, masterCount: 1693, catego
   decided: [{ id: 1, name_key: 'olive oil', display_name: 'olive oil', ingredient_id: 5, decision: 'alias', decided_by: 'tetiana', decided_at: '2026-10-03T09:00:00Z', product: ING[4] },
     { id: 2, name_key: 'butter cream', display_name: 'butter cream', ingredient_id: null, decision: 'per_recipe', decided_by: 'tetiana', decided_at: '2026-10-03T09:05:00Z', product: null }] };
 
+// Master Items (MV3): long names, a dish with two versions used by several rows.
+const MV = (id, name, rows, list, recipe = null) => ({ id, displayName: name, ingredients: list, allergens: list ? 'gluten - dairy' : '', updatedAt: list ? '2026-10-02T09:00:00Z' : null,
+  updatedBy: list ? 'tetiana' : null, source: list ? 'menu_upload' : null, calories: null, recipe, rows });
+const MR = (id, name, category, sections) => ({ id, name, category, sections, active: true });
+const MASTER_ITEMS = { unlinkedRows: 0, masters: [
+  { id: 1, name: 'Macaroni & Cheese', rows: 4, versions: [
+    MV(10, 'KG-LP, MS-UP — 2 Oct 2026', [MR(4678, 'Macaroni & Cheese', 'Lunch Starch/Side', ['KG-LP', 'MS-UP']), MR(4717, 'Macaroni & Cheese', 'Lunch Vegetable Side', ['MS-UP'])], 'macaroni - cheddar cheese - milk - butter - flour - salt - black pepper'),
+    MV(11, 'Staff, CEO — 2 Oct 2026', [MR(2604, 'Macaroni & Cheese', 'Main Dish', ['Staff']), MR(3301, 'Macaroni & Cheese', 'Lunch Main Dish', ['CEO'])], 'macaroni - cheddar cheese - cream - parmesan - butter - garlic - nutmeg', { id: 3, code: 'TTY-00004', name: 'Macaroni & Cheese (Staff)' })] },
+  ...Array.from({ length: 30 }, (_, i) => ({ id: 100 + i, name: LONG[i % LONG.length] + (i > 8 ? ' ' + i : ''), rows: 1 + (i % 3), versions: [
+    MV(200 + i, ['KG-LP, MS-UP — 2 Oct 2026', 'Daycare — 3 Oct 2026', 'Staff — 3 Oct 2026'][i % 3], [MR(500 + i, LONG[i % LONG.length], 'Lunch Main Course', ['KG-LP', 'MS-UP'])], i % 2 ? LIST : '')] })),
+] };
+
 const handlers = {
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   // "Re-group from the original menu...": a canned preview (main.js builds it from the picked file) and its apply.
@@ -147,6 +159,7 @@ const handlers = {
   catalogIngredientsAvailable: () => true,
   listIngredients: () => ING, searchIngredients: (q) => ING.filter((m) => m.name.toLowerCase().includes(String(q).toLowerCase())).slice(0, 25),
   nameMapLoad: () => NAME_MAP,
+  listMasterItems: () => MASTER_ITEMS,
   previewMasterItemsBuild: () => ({ token: 'mb1', conflicts: 0,
     summary: { mastersToCreate: 2987, variantsToCreate: 3011, listsToCarry: 198, listRowsToLink: 202, joiningRows: 141, plainRowsToLink: 3105, rowsToPick: 9, savedListsInCatalog: 202 },
     lists: Array.from({ length: 198 }, (_, i) => ({ dish: LONG[i % LONG.length], variant: 'KG-LP, MS-UP — 2 Oct 2026', from: [`#${100 + i} Lunch Main Course [KG-LP, MS-UP]`], joining: i % 3 ? [] : [`#${900 + i} Main Dish [Staff]`], ingredients: LIST })),

@@ -788,8 +788,19 @@ then the recipe's name (`variantDisplayName`). Migration 20261003120000 (applied
 (assumption B, a tickbox) or are left to pick; checked on 2,000 random catalogs). MV2 `lib/masterItemsBuild.js` + Dish
 Catalog -> "Master items: Build master items…" (preview -> confirm; writes only master_items, dish_variants and the link;
 re-runnable; one `menu_item_ingredient_history` row per list carried, source 'variant_migration'). The old list / calorie
-columns on menu_items stay as a frozen copy until the features move (MV4 ingredients, MV5 calories). Next: MV3 Master Items
-screen (versions, Ingredients popup, edit, delete, the version picker), then MV4-MV6, then U3+ on versions.
+columns on menu_items stay as a frozen copy until the features move (MV4 ingredients, MV5 calories). MV2 was run on the
+live data 2026-10-03 and verified (`scripts/master-items-verify.js`: 202 lists each on one version, 3,499/3,499 rows linked).
+MV3 + MV4 (2026-10-04; migration 20261004100000 makes `menu_item_ingredient_history.item_id` optional -- version-level edits
+log `dish_variant_id` only): Master Items screen (`renderMasterItemsView`, nav under Dish Catalog; `lib/masterItems.js`):
+dishes with their versions, an Ingredients popup per version, the edit window with "Dish Catalog row -> Uses version" (another
+version of the same dish or a new copy; never sections), delete refused while used / unlink-and-delete. Every list write is a
+compare-and-swap on the version's `ingredients_updated_at`; a move only if the row still uses the version seen. ONE place per
+list since MV4: M3 reuse, the M2 approved-file save (one entry per version) and Edit Item's fields all read / write the VERSION
+(`withVariantLists` in the shared catalog loader); nothing writes menu_items' list columns any more. Proof:
+`scripts/master-items-switch-check.js` -- every row with its own list served byte-identically before / after (the assumption-B
+rows now get their version's list); real data: `master-items-verify.js --compare <snapshot>` showed 0 changed menu_items
+rows. Test generators must use the HIGH bits of the LCG (the low bits repeat; it once made the MV1 random test weaker than it
+looked). Next: MV5 calories on versions, MV6 new catalog rows linked, then U3+ on versions.
 
 ## AI Menu Generator (in progress on `feature/ai-menu-generator`)
 

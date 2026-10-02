@@ -21,12 +21,13 @@ const expect = (got, want, what) => {
 expect(listKey('Chicken - basmati  rice - Onion'), listKey('onion -  chicken - Basmati Rice'), 'case, spacing and order are one list');
 const categories = [{ code: 'AM_SNACK', name: 'AM Snack' }, { code: 'LUNCH_MAIN', name: 'Lunch Main Course' }, { code: 'SOUP_APPETIZER', name: 'Soup/Appetizer' }, { code: 'STAFF_MAIN', name: 'Main Dish' }];
 const catalog = [
-  { id: 1, name: 'Cheese Croissant', category_code: 'AM_SNACK', is_active: 1 },
-  { id: 2, name: 'Chicken Kabsa', category_code: 'LUNCH_MAIN', is_active: 1, ingredients_text: 'chicken - basmati rice - kabsa spice', allergens_text: '', ingredients_updated_at: '2026-10-02T08:00:00.000+00:00', ingredients_updated_by: 'tetiana' },
-  { id: 3, name: 'Lentil Soup', category_code: 'SOUP_APPETIZER', is_active: 1, ingredients_text: 'red lentils - onion - cumin', allergens_text: '', ingredients_updated_at: '2026-10-01T08:00:00.000+00:00', ingredients_updated_by: 'tetiana' },
-  { id: 4, name: 'Pumpkin Soup', category_code: 'SOUP_APPETIZER', is_active: 1 },
-  { id: 5, name: 'Pumpkin  soup', category_code: 'SOUP_APPETIZER', is_active: 1 },
-  { id: 6, name: 'Tuna Pasta', category_code: 'LUNCH_MAIN', is_active: 1 },
+  { id: 1, variant_id: 1, name: 'Cheese Croissant', category_code: 'AM_SNACK', is_active: 1 },
+  { id: 2, variant_id: 2, name: 'Chicken Kabsa', category_code: 'LUNCH_MAIN', is_active: 1, ingredients_text: 'chicken - basmati rice - kabsa spice', allergens_text: '', ingredients_updated_at: '2026-10-02T08:00:00.000+00:00', ingredients_updated_by: 'tetiana' },
+  { id: 3, variant_id: 3, name: 'Lentil Soup', category_code: 'SOUP_APPETIZER', is_active: 1, ingredients_text: 'red lentils - onion - cumin', allergens_text: '', ingredients_updated_at: '2026-10-01T08:00:00.000+00:00', ingredients_updated_by: 'tetiana' },
+  { id: 4, variant_id: 4, name: 'Pumpkin Soup', category_code: 'SOUP_APPETIZER', is_active: 1 },
+  { id: 5, variant_id: 5, name: 'Pumpkin  soup', category_code: 'SOUP_APPETIZER', is_active: 1 },
+  { id: 6, variant_id: 6, name: 'Tuna Pasta', category_code: 'LUNCH_MAIN', is_active: 1 },
+  { id: 7, variant_id: null, name: 'Unlinked Stew', category_code: 'LUNCH_MAIN', is_active: 1 },
 ];
 const row = (sheetName, category, dishName, ingredientsText, allergensText = '', n = 1) => ({ sheetName, layout: sheetName === 'Staff' ? 'STAFF' : 'SCHOOL', category, period: 'Lunch', dishName, ingredientsText, allergensText, rowNumber: n, weekday: 'Sunday', date: `1${n}-09-2026` });
 const croissant = 'flour - butter - cheese - milk';
@@ -59,6 +60,18 @@ const tie = planIngredientsSave({ catalog, categories, files: [{ fileName: 'f', 
 ] }] });
 expect(tie.disagree[0].versions.map((v) => v.reason), ['1 row: KG-LP (first in the file -- same number of rows)', '1 row: Staff'], 'a tie says so');
 expect(planIngredientsSave({ catalog, categories, files: [{ fileName: 'f', rows: [row('KG - LP', 'AM Snack', 'Cheese Croissant', undefined, undefined, 1)] }] }).hasLists, false, 'a plain menu (no Ingredients column) is recognised');
+
+// MV4: the list belongs to the VERSION. Two catalog rows sharing a version are one entry; a dish linked to no version can't hold one.
+const shared = planIngredientsSave({ categories, catalog: [
+  { id: 20, variant_id: 77, name: 'Shared Stew', category_code: 'LUNCH_MAIN', is_active: 1 },
+  { id: 21, variant_id: 77, name: 'Shared Stew', category_code: 'STAFF_MAIN', is_active: 1 },
+  { id: 7, variant_id: null, name: 'Unlinked Stew', category_code: 'LUNCH_MAIN', is_active: 1 },
+], files: [{ fileName: 'f', rows: [
+  row('KG - LP', 'Lunch Main Course', 'Shared Stew', 'beef - carrot', '', 1), row('Staff', 'Main Dish', 'Shared Stew', 'beef - carrot', '', 2),
+  row('KG - LP', 'Lunch Main Course', 'Unlinked Stew', 'lamb - onion', '', 3),
+] }] });
+expect([shared.new.map((e) => [e.key, e.variantId, e.versions.map((v) => v.reason)]), shared.notSaved.notLinked],
+  [[['variant:77', 77, ['2 rows: KG-LP, Staff']]], ['Unlinked Stew']], 'one entry per version (rows sharing it counted together); an unlinked dish is listed, not saved');
 
 // ---- B. the save, against a stand-in database ---------------------------------------------------------------
 function fakeDb(items) {
@@ -94,22 +107,22 @@ function fakeDb(items) {
   ];
   const db = fakeDb(items);
   const r = await applyIngredientSaves({ db, who: 'tetiana', source: 'menu_upload', sourceFile: 'September week_04_Ingredients.xlsx', now: () => '2026-10-02T10:00:00.000Z', saves: [
-    { itemId: 2, name: 'Chicken Kabsa', ingredients: 'chicken - rice', allergens: '', expectedUpdatedAt: '2026-10-02T08:00:00.000+00:00', oldIngredients: 'old', oldAllergens: '' },
-    { itemId: 3, name: 'Lentil Soup', ingredients: 'lentils', allergens: '', expectedUpdatedAt: '2026-10-01T08:00:00.000+00:00', oldIngredients: 'old', oldAllergens: '' },
-    { itemId: 4, name: 'Cheese Croissant', ingredients: croissant, allergens: 'gluten - dairy', expectedUpdatedAt: null, oldIngredients: null, oldAllergens: null },
-    { itemId: 99, name: 'Deleted Dish', ingredients: 'x', allergens: '', expectedUpdatedAt: null },
+    { variantId: 2, name: 'Chicken Kabsa', ingredients: 'chicken - rice', allergens: '', expectedUpdatedAt: '2026-10-02T08:00:00.000+00:00', oldIngredients: 'old', oldAllergens: '' },
+    { variantId: 3, name: 'Lentil Soup', ingredients: 'lentils', allergens: '', expectedUpdatedAt: '2026-10-01T08:00:00.000+00:00', oldIngredients: 'old', oldAllergens: '' },
+    { variantId: 4, name: 'Cheese Croissant', ingredients: croissant, allergens: 'gluten - dairy', expectedUpdatedAt: null, oldIngredients: null, oldAllergens: null },
+    { variantId: 99, name: 'Deleted Dish', ingredients: 'x', allergens: '', expectedUpdatedAt: null },
   ] });
-  expect(r.saved.map((s) => s.itemId).sort(), [2, 4], 'unchanged-since-preview dishes are saved');
-  expect(r.conflicts, [{ itemId: 3, name: 'Lentil Soup', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], 'a list saved by someone else since the preview is a conflict, with who and when');
+  expect(r.saved.map((s) => s.variantId).sort(), [2, 4], 'unchanged-since-preview dishes are saved');
+  expect(r.conflicts, [{ variantId: 3, name: 'Lentil Soup', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], 'a list saved by someone else since the preview is a conflict, with who and when');
   expect(items[1].ingredients_text, 'old', 'a conflict writes nothing');
-  expect(r.failed.map((f) => [f.itemId, f.error]), [[99, 'the dish is no longer in the catalog']], 'a deleted dish fails cleanly');
+  expect(r.failed.map((f) => [f.variantId, f.error]), [[99, 'this version of the dish no longer exists']], 'a deleted version fails cleanly');
   expect([items[2].ingredients_text, items[2].allergens_text, items[2].ingredients_updated_by, items[2].ingredients_source, items[2].ingredients_updated_at],
     [croissant, 'gluten - dairy', 'tetiana', 'menu_upload', '2026-10-02T10:00:00.000Z'], 'the saved fields');
   expect(items[0].allergens_text, null, 'a blank allergens cell is stored as nothing');
-  expect(db.history.map((h) => [h.item_id, h.old_ingredients, h.new_ingredients, h.source, h.source_file, h.changed_by]).sort(), [
-    [2, 'old', 'chicken - rice', 'menu_upload', 'September week_04_Ingredients.xlsx', 'tetiana'],
-    [4, null, croissant, 'menu_upload', 'September week_04_Ingredients.xlsx', 'tetiana'],
-  ], 'one history row per save, none for a conflict');
+  expect(db.history.map((h) => [h.item_id, h.dish_variant_id, h.old_ingredients, h.new_ingredients, h.source, h.source_file, h.changed_by]).sort(), [
+    [null, 2, 'old', 'chicken - rice', 'menu_upload', 'September week_04_Ingredients.xlsx', 'tetiana'],
+    [null, 4, null, croissant, 'menu_upload', 'September week_04_Ingredients.xlsx', 'tetiana'],
+  ], 'one history row per save, on the version (no catalog row), none for a conflict');
   expect(r.historyError, null, 'history written');
 
   if (failures.length) {
