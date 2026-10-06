@@ -135,6 +135,9 @@ const RECIPE_NS = {
     newRecipeHint: 'Click "+ New Recipe" to create the first one.',
     allowManualNew: true,
     requireIngredientLink: true,
+    // The ingredient picker's "add" wording: the Recipe Book adds to Nayyara Ingredients (the purchasing list, `ingredients`).
+    addIngredientWords: 'to Nayyara Ingredients',
+    addIngredientErrorWords: 'to Nayyara Ingredients',
     photoModel: 'single',
     openNew: () => openNewRecipeForm(RECIPE_NS.book),
     openEdit: (id) => openEditRecipeForm(RECIPE_NS.book, id),
@@ -164,6 +167,9 @@ const RECIPE_NS = {
     // covers hand-typed recipes, and mixing the two would blur why an EX- recipe exists.
     allowManualNew: false,
     photoModel: 'gallery',
+    // The Extractor adds to its OWN list (extracted_ingredients): its wording stays as it was.
+    addIngredientWords: 'as new ingredient',
+    addIngredientErrorWords: 'as a new ingredient',
     extract: (payload) => window.api.extractRecipeForExtractor(payload),
     openNew: () => openNewRecipeForm(RECIPE_NS.extractor),
     openEdit: (id) => openEditRecipeForm(RECIPE_NS.extractor, id),
@@ -5830,7 +5836,7 @@ function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, 
         <span class="autocomplete-meta">${[m.category, m.default_unit].filter(Boolean).join(' · ')}</span>
       </div>
     `).join('')}
-    ${!exact ? `<div class="autocomplete-item autocomplete-add" data-add="1">+ Add "${query}" as new ingredient</div>` : ''}
+    ${!exact ? `<div class="autocomplete-item autocomplete-add" data-add="1">+ Add "${query}" ${ns.addIngredientWords}</div>` : ''}
   `;
   listEl.hidden = false;
 
@@ -5851,7 +5857,7 @@ function renderAutocompleteList(ns, listEl, matches, query, inputEl, unitInput, 
         const created = await ns.api.addIngredient({ name: query, defaultUnit: 'G' });
         selectIngredientForRow(created, inputEl, unitInput, row, listEl);
       } catch (err) {
-        alert(`Couldn't add "${query}" as a new ingredient: ${err.message}`);
+        alert(`Couldn't add "${query}" ${ns.addIngredientErrorWords}: ${err.message}`);
       }
     });
   }
@@ -6936,7 +6942,7 @@ async function saveProcessRecipeForm(ns) {
         const row = proc.ingredientRows[i];
         if (row.name.trim() !== '' && !row.ingredientId) {
           const label = proc.name.trim() || 'this process';
-          return alert(`"${label}", row ${i + 1}: please pick "${row.name}" from the dropdown (or add it as a new ingredient) before saving.`);
+          return alert(`"${label}", row ${i + 1}: please pick "${row.name}" from the dropdown (or add it to Nayyara Ingredients) before saving.`);
         }
       }
     }
@@ -10034,8 +10040,8 @@ async function renderIngredientsView(main) {
 
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Ingredients</h1><span class="page-description">Canonical ingredient master</span></div>
-      <button class="primary" id="add-ingredient-btn">+ Add Ingredient</button>
+      <div><h1>Nayyara Ingredients</h1><span class="page-description">The company's purchasing list (FB- codes)</span></div>
+      <button class="primary" id="add-ingredient-btn">+ Add Nayyara ingredient</button>
     </div>
     ${ingredientTabsHtml('master')}
     <div id="merge-suggestions"></div>
@@ -10059,7 +10065,7 @@ async function renderIngredientsView(main) {
   const content = document.getElementById('ingredients-content');
 
   if (ingredients.length === 0) {
-    content.innerHTML = `<div class="empty-state"><div class="display">No ingredients yet</div>Click "+ Add Ingredient" to create the first one.</div>`;
+    content.innerHTML = `<div class="empty-state"><div class="display">No Nayyara ingredients yet</div>Click "+ Add Nayyara ingredient" to create the first one.</div>`;
     return;
   }
 
@@ -10074,7 +10080,7 @@ async function renderIngredientsView(main) {
     );
 
     if (filtered.length === 0) {
-      content.innerHTML = `<div class="empty-state">No ingredients match the current filters.</div>`;
+      content.innerHTML = `<div class="empty-state">No Nayyara ingredients match the current filters.</div>`;
       return;
     }
 
@@ -10150,8 +10156,8 @@ const NM_PAGE = 20;
 const NM_SHOWN = 8;
 
 function ingredientTabsHtml(active) {
-  return `<div class="mode-toggle nm-tabs" role="tablist" aria-label="Ingredients">
-    <button type="button" class="mode-toggle-btn ${active === 'master' ? 'active' : ''}" role="tab" aria-selected="${active === 'master'}" data-ing-tab="master">Master list</button>
+  return `<div class="mode-toggle nm-tabs" role="tablist" aria-label="Nayyara Ingredients">
+    <button type="button" class="mode-toggle-btn ${active === 'master' ? 'active' : ''}" role="tab" aria-selected="${active === 'master'}" data-ing-tab="master">Nayyara list</button>
     <button type="button" class="mode-toggle-btn ${active === 'names' ? 'active' : ''}" role="tab" aria-selected="${active === 'names'}" data-ing-tab="names">Name map</button>
   </div>`;
 }
@@ -10169,10 +10175,10 @@ const nmProduct = (c) => `${aiEsc(c.name)}<span class="nm-meta">${[c.product_cod
 async function renderNameMapTab(main) {
   main.innerHTML = `
     <div class="topbar">
-      <div><h1>Ingredients</h1><span class="page-description">Kitchen names used by recipes, each mapped once to a product of the master list</span></div>
+      <div><h1>Nayyara Ingredients</h1><span class="page-description">Kitchen names used by recipes, each mapped once to a product of Nayyara Ingredients</span></div>
     </div>
     ${ingredientTabsHtml('names')}
-    <div id="nm-body"><div class="loading-state" role="status">Reading the recipes and the master list…</div></div>`;
+    <div id="nm-body"><div class="loading-state" role="status">Reading the recipes and Nayyara Ingredients…</div></div>`;
   wireIngredientTabs(main);
   const body = document.getElementById('nm-body');
   let data;
@@ -10190,7 +10196,7 @@ function nmRender(body, nm) {
   body.innerHTML = `
     <div class="nm-progress" role="status">
       <div class="nm-bar" aria-hidden="true"><span style="width:${pct}%"></span></div>
-      <span><strong>${pct}%</strong> of recipe ingredient rows link to the master list (${d.resolvedRows} of ${d.totalRows}) · <strong>${d.queue.length}</strong> name(s) to decide · ${d.decided.length} spelling(s) decided</span>
+      <span><strong>${pct}%</strong> of recipe ingredient rows link to Nayyara Ingredients (${d.resolvedRows} of ${d.totalRows}) · <strong>${d.queue.length}</strong> name(s) to decide · ${d.decided.length} spelling(s) decided</span>
     </div>
     <div class="mode-toggle nm-view" style="margin-bottom:14px; max-width:320px;">
       <button type="button" class="mode-toggle-btn ${nm.view === 'todo' ? 'active' : ''}" data-nm-view="todo">To decide (${d.queue.length})</button>
@@ -10201,7 +10207,7 @@ function nmRender(body, nm) {
   body.querySelectorAll('[data-nm-view]').forEach(b => b.addEventListener('click', () => { nm.view = state.nameMapView = b.dataset.nmView; nmRender(body, nm); }));
   const list = body.querySelector('#nm-list');
   if (nm.view === 'done') return nmRenderDecided(list, body, nm);
-  if (!todo.length) { list.innerHTML = '<div class="empty-state">Every name used by the recipes links to the master list.</div>'; return; }
+  if (!todo.length) { list.innerHTML = '<div class="empty-state">Every name used by the recipes links to Nayyara Ingredients.</div>'; return; }
   list.innerHTML = todo.slice(0, nm.shown).map(g => nmCardHtml(g, nm)).join('')
     + (todo.length > nm.shown ? `<button class="secondary" id="nm-more">Show ${Math.min(NM_PAGE, todo.length - nm.shown)} more (${todo.length - nm.shown} left)</button>` : '');
   list.querySelector('#nm-more')?.addEventListener('click', () => { nm.shown += NM_PAGE; nmRender(body, nm); });
@@ -10220,13 +10226,13 @@ function nmCardHtml(g, nm) {
         <span class="nm-uses">${g.rows} recipe row(s)${g.examples.length ? ` · e.g. ${g.examples.map(aiEsc).join(', ')}` : ''}</span>
       </div>
       <fieldset class="nm-cands">
-        <legend>${g.candidates.length ? `${g.candidates.length} product(s) in the master list could be this -- pick the right one:` : 'No product in the master list shares a word with this name -- search, or add it as new:'}</legend>
+        <legend>${g.candidates.length ? `${g.candidates.length} product(s) in Nayyara Ingredients could be this -- pick the right one:` : 'No product in Nayyara Ingredients shares a word with this name -- search, or add it as new:'}</legend>
         ${many ? `<input type="search" class="nm-filter" placeholder="Filter these ${g.candidates.length} products" aria-label="Filter the products for ${aiEsc(main)}" />` : ''}
         <div class="nm-options">
           ${g.candidates.map((c, i) => `<label class="nm-option" data-name="${aiEsc(c.name)}" ${i >= NM_SHOWN ? 'hidden data-extra' : ''}><input type="radio" name="nm-${aiEsc(g.key)}" value="${c.id}" /> ${nmProduct(c)}</label>`).join('')}
         </div>
         ${many ? `<button type="button" class="nm-link nm-showall">Show all ${g.candidates.length}</button>` : ''}
-        <div class="nm-search-row"><input type="search" class="nm-search" placeholder="Search the whole master list…" aria-label="Search the master list for ${aiEsc(main)}" /></div>
+        <div class="nm-search-row"><input type="search" class="nm-search" placeholder="Search all of Nayyara Ingredients…" aria-label="Search Nayyara Ingredients for ${aiEsc(main)}" /></div>
         <div class="nm-results"></div>
       </fieldset>
       <div class="nm-actions">
@@ -10236,10 +10242,10 @@ function nmCardHtml(g, nm) {
         <button class="nm-link nm-skip">Skip for now</button>
       </div>
       <div class="nm-newform" hidden>
-        <label>Name in the master list <input class="nm-new-name" value="${aiEsc(nmTitle(main))}" /></label>
+        <label>Name in Nayyara Ingredients <input class="nm-new-name" value="${aiEsc(nmTitle(main))}" /></label>
         <label>Category <input class="nm-new-cat" list="nm-categories" /></label>
         <label>Unit <input class="nm-new-unit" value="G" size="4" /></label>
-        <button class="primary nm-new-save">Add to the master list</button>
+        <button class="primary nm-new-save">Add to Nayyara Ingredients</button>
         <span class="ci-hint">Marked as added from the name review (no product code yet).</span>
       </div>
       <div class="nm-msg" role="status"></div>
@@ -10279,7 +10285,7 @@ function nmWireCard(card, body, nm) {
       const shown = new Set([...card.querySelectorAll('.nm-options input')].map(i => i.value));
       out.innerHTML = found.length
         ? found.filter(f => !shown.has(String(f.id))).map(f => `<label class="nm-option" data-name="${aiEsc(f.name)}"><input type="radio" name="nm-${aiEsc(g.key)}" value="${f.id}" /> ${nmProduct(f)}</label>`).join('') || '<span class="ci-hint">Already listed above.</span>'
-        : `<span class="ci-hint">Nothing in the master list contains “${aiEsc(q)}”.</span>`;
+        : `<span class="ci-hint">Nothing in Nayyara Ingredients contains “${aiEsc(q)}”.</span>`;
     }, 250);
   });
   const done = (text) => {
@@ -10301,7 +10307,7 @@ function nmWireCard(card, body, nm) {
         setTimeout(() => renderNameMapTab(document.getElementById('main')), 1200);
         return;
       }
-      if (r && r.duplicate) { msg.textContent = `“${r.duplicate.name}” is already in the master list: pick it above instead.`; return; }
+      if (r && r.duplicate) { msg.textContent = `“${r.duplicate.name}” is already in Nayyara Ingredients: pick it above instead.`; return; }
       done(okText);
     } catch (err) { msg.textContent = `Not saved: ${err.message}`; }
   };
@@ -10317,7 +10323,7 @@ function nmWireCard(card, body, nm) {
   card.querySelector('.nm-new-save').addEventListener('click', () => {
     const f = card.querySelector('.nm-newform');
     handle(() => window.api.nameMapAddIngredient({ name: f.querySelector('.nm-new-name').value, category: f.querySelector('.nm-new-cat').value, defaultUnit: f.querySelector('.nm-new-unit').value, spellings }),
-      `Added “${f.querySelector('.nm-new-name').value.trim()}” to the master list`);
+      `Added “${f.querySelector('.nm-new-name').value.trim()}” to Nayyara Ingredients`);
   });
 }
 
@@ -10396,7 +10402,7 @@ async function openIngredientMergeModal({ merged, survivor = null, options = nul
     show(survivor.id, merged.id);
   } else {
     pick.innerHTML = `<p>Merge “<strong>${aiEsc(merged.name)}</strong>” into:</p>
-      <input type="search" id="nmm-search" placeholder="Search the master list…" aria-label="The ingredient to keep" style="width:100%" /><div id="nmm-results" class="nm-results"></div>`;
+      <input type="search" id="nmm-search" placeholder="Search Nayyara Ingredients…" aria-label="The ingredient to keep" style="width:100%" /><div id="nmm-results" class="nm-results"></div>`;
     let t = null;
     pick.querySelector('#nmm-search').addEventListener('input', (e) => {
       clearTimeout(t);
@@ -10776,7 +10782,7 @@ async function openIngredientModal(existingIngredient) {
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal">
-      <h2>${editing ? 'Edit Ingredient' : 'Add Ingredient'}</h2>
+      <h2>${editing ? 'Edit Nayyara ingredient' : 'Add Nayyara ingredient'}</h2>
       <div class="field">
         <label>Ingredient name</label>
         <input id="im-name" value="${existingIngredient?.name || ''}" />

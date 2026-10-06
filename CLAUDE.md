@@ -67,7 +67,7 @@ terminal instead of `[object Object]`.
   view-render functions (`renderItemsView`, `renderGenerateView`,
   `renderBuildMenuView`, `renderHistoryView`, `renderExportAllView`,
   `renderRecipeListView`/`renderRecipeFormView`, `renderCalculatorView`,
-  `renderIngredientsView`) swapped via `state.currentView`. Generate Menu, Build Menu and Export
+  `renderIngredientsView` -- the Nayyara Ingredients screen) swapped via `state.currentView`. Generate Menu, Build Menu and Export
   All Sections sit behind ONE nav entry, **Menu Planner** (`renderMenuPlannerView`, 2026-09-25): a
   Generate / Build switch (Generate adds All Sections = Export All / One Section = Generate Menu) above
   the three screens' own, unchanged render functions, drawn into `#planner-body` (`display: contents`,
@@ -811,13 +811,20 @@ this branch: migration 20261002100000 applied; M3's real-data check (`scripts/ca
 M2 save) was clean on 2026-10-03 -- 283 rows served from the catalog, 0 problems, AI calls 236 -> 46 for the week. Then the
 unification, decided with the chef 2026-10-02: Dish Catalog is every dish's identity; ONE Recipe Book code (TTY-) for every
 recipe there (typed, generated-and-confirmed, extracted), which is also its linked dishes' code; one recipe may be linked from
-several catalog entries (D3 = option b: `menu_items.recipe_id`); ONE ingredients master list (`ingredients`) -- generated and
-extracted ingredients are matched by exact name, and unmatched names go to a review (never created silently: the master is a
+several catalog entries (D3 = option b: `menu_items.recipe_id`); ONE ingredients master list, Nayyara Ingredients (the `ingredients` table) -- generated and
+extracted ingredients are matched by exact name, and unmatched names go to a review (never created silently: Nayyara Ingredients is a
 purchasing list, "Oil Olive" / "Spice Cumin Seed" / "Flour Wheat White", so exact matching finds only ~3% of the AI's culinary
 names; ~170 names cover 90% of usage). The Recipe Extractor becomes an upload into Recipe Book. Phases: U0 measure (done,
 `scripts/unification-measure.js`), U1 remove the old codes (done), U2 ingredient aliases + review + duplicate clean-up, U3
 recipe links + TTY counter, U4 confirmed drafts -> Recipe Book, U5 Extractor into Recipe Book, U6 one-pass upload, U7 a
 dish's Ingredients button, U8 drop old columns / tables by hand.
+TWO ingredient lists (2026-10-06): **Nayyara Ingredients** = the `ingredients` table, the company's purchasing list (FB-
+codes) -- the one Recipe Book, the Name map, aliases and merges use. The rename is LABELS ONLY (screens, buttons, dialogs,
+messages); the table and its columns keep their names. The shared ingredient picker takes its "add" wording from RECIPE_NS
+(`addIngredientWords` / `addIngredientErrorWords`): Recipe Book "to Nayyara Ingredients", Recipe Extractor unchanged ("as new
+ingredient" -- it adds to its own `extracted_ingredients`); `scripts/ingredient-picker-labels-check.js` (npm test) checks
+both. **General Ingredients** = `general_ingredients`, a separate REFERENCE list of ~2,150 world ingredients imported from the
+kitchen_ingredients Excel file: not linked to `ingredients`, not used by Recipe Book, the Name map or any generator.
 U2 (built 2026-10-03; migration 20261003110000, applied by hand): `ingredient_aliases` (one row per spelling, unique
 `name_key` = lowercased / single-spaced; decision 'alias' -> `ingredient_id`, or 'per_recipe'), `ingredients.added_from`
 ('name_review' for rows created in the review) / `added_by`, `ingredient_merge_history`. `lib/ingredientMatch.js` (pure):
@@ -826,8 +833,8 @@ returns every fitting product best first as SUGGESTIONS (descriptor words rank, 
 one word ("egg" / "eggs") most-used first; `suggestMerges` = punctuation / word-order duplicates only (never Full Fat / Low
 Fat). `lib/ingredientNames.js`: the writes (db passed in): a decision per spelling (a spelling decided by someone else first
 is handed back, not overwritten), "add as new" (refuses a name already in the list), undo, merge (recipe rows + aliases move,
-the duplicate's name kept as an alias, duplicate deleted, logged; a product-code choice when both have one). Ingredients
-screen: Master list | Name map tabs (`renderNameMapTab`: every candidate shown, none preselected, filter + whole-list search,
+the duplicate's name kept as an alias, duplicate deleted, logged; a product-code choice when both have one). Nayyara Ingredients
+screen: Nayyara list | Name map tabs (`renderNameMapTab`: every candidate shown, none preselected, filter + whole-list search,
 Same as / Add as new / Decide per recipe / Skip, a Decided list with Undo); "Merge into…" on each master row and a suggested
 merges panel. `scripts/name-map-measure.js` (read-only, login) shows the real queue. U4 / U5 use `buildResolver` to link. Note: `extracted_recipe_ingredients` links by
 `extracted_ingredient_id` / `extracted_recipe_process_id` (Recipe Book: `ingredient_id` / `process_id`).
