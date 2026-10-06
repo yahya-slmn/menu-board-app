@@ -8,10 +8,10 @@
 //
 //   cd ~/menu-board && node scripts/density-trial.js                  # references + 6 recipes with 2+ processes
 //   cd ~/menu-board && node scripts/density-trial.js TTY-00012 TTY-00031  # references + these recipes
-//   cd ~/menu-board && node scripts/density-trial.js --references-only    # the reference mixtures only, no login
+//   cd ~/menu-board && node scripts/density-trial.js --references-only    # the reference mixtures only
 //
-// Asks for your login (run it in a normal Terminal window) unless --references-only (the function only needs the
-// project's public key; recipes need a signed-in session because of RLS). Report: backups/density-trial.txt
+// Always asks for your login (run it in a normal Terminal window): since 2026-10-06 the function refuses a call without
+// a signed-in user, and recipes need one anyway because of RLS. Report: backups/density-trial.txt
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -48,12 +48,10 @@ const hasFlour = (rows) => rows.some(r => /flour|semolina|farine|طحين/i.test
   const args = process.argv.slice(2);
   const refsOnly = args.includes('--references-only');
   const codes = args.filter(a => !a.startsWith('--')).map(s => s.trim().toUpperCase()).filter(Boolean);
-  if (!refsOnly) {
-    const id = (await ask('Menu Board login ID: ')).trim().toLowerCase();
-    const password = await ask('Password: ', { hidden: true });
-    const { error: authError } = await supabase.auth.signInWithPassword({ email: `${id}@${loginDomain()}`, password });
-    if (authError) { console.error('Sign-in failed:', authError.message); process.exit(1); }
-  }
+  const id = (await ask('Menu Board login ID: ')).trim().toLowerCase();
+  const password = await ask('Password: ', { hidden: true });
+  const { error: authError } = await supabase.auth.signInWithPassword({ email: `${id}@${loginDomain()}`, password });
+  if (authError) { console.error('Sign-in failed:', authError.message); process.exit(1); }
 
   const out = [];
   const line = (s = '') => { out.push(s); console.log(s); };

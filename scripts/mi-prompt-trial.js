@@ -42,15 +42,15 @@ const menuPath = (args.find((a, i) => a !== '--out' && !(outAt >= 0 && i === out
 const outPath = outAt >= 0 ? args[outAt + 1] : path.join(__dirname, '..', 'backups', `mi-prompt-trial-${new Date().toISOString().slice(0, 10)}.xlsx`);
 if (!menuPath) { console.error('Usage: node scripts/mi-prompt-trial.js <menu.xlsx> [--out report.xlsx]'); process.exit(2); }
 
-// The app's own Supabase URL and public (anon) key, as lib/supabaseClient.js has them.
+// The app's own Supabase URL, as lib/supabaseClient.js has it.
 const clientSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'supabaseClient.js'), 'utf8');
 const SUPABASE_URL = clientSrc.match(/https:\/\/[a-z0-9]+\.supabase\.co/)[0];
-const ANON_KEY = (clientSrc.match(/['"](eyJ[A-Za-z0-9._-]+|sb_publishable_[A-Za-z0-9_-]+)['"]/) || [])[1];
+const { signIn, functionHeaders } = require('./script-auth'); // functions need a signed-in session (2026-10-06)
 
 async function callFunction(slug, items) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/${slug}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+    headers: await functionHeaders(),
     body: JSON.stringify({ items }),
     signal: AbortSignal.timeout(150_000),
   });
@@ -88,7 +88,7 @@ async function runSide(label, slug, dishes, batchSize, toItem) {
 const count = (s) => String(s || '').split(' - ').map((x) => x.trim()).filter(Boolean).length;
 
 (async () => {
-  if (!ANON_KEY) throw new Error('Could not read the anon key from lib/supabaseClient.js');
+  await signIn();
   const { workbook } = await loadWorkbookFromBuffer(fs.readFileSync(menuPath));
   const { rows } = await parseWorkbookDishes(workbook, SCHOOL_VOCAB);
   const dishes = dishesForSuggestion(rows);

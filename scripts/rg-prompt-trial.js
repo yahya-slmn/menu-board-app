@@ -30,10 +30,10 @@ if (!filePath) { console.error('Usage: node scripts/rg-prompt-trial.js <menu-wit
 
 const clientSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'supabaseClient.js'), 'utf8');
 const SUPABASE_URL = clientSrc.match(/https:\/\/[a-z0-9]+\.supabase\.co/)[0];
-const ANON_KEY = (clientSrc.match(/['"](eyJ[A-Za-z0-9._-]+|sb_publishable_[A-Za-z0-9_-]+)['"]/) || [])[1];
+const { signIn, functionHeaders } = require('./script-auth'); // functions need a signed-in session (2026-10-06)
 async function generate(slug, items) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/${slug}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+    method: 'POST', headers: await functionHeaders(),
     body: JSON.stringify({ items, existingWasteTypeNames: WASTE_TYPES }), signal: AbortSignal.timeout(180_000),
   });
   const body = await res.json().catch(() => ({}));
@@ -82,6 +82,7 @@ function adherence(reviewed, names) {
 }
 
 (async () => {
+  await signIn();
   const { workbook } = await loadWorkbookFromBuffer(fs.readFileSync(filePath));
   const { rows } = await parseWorkbookDishes(workbook, SCHOOL_VOCAB);
   const meta = rows.map((r) => ({ ...r, dayLabel: `${r.weekday} ${r.date}`, section: resolveSectionFromSheetName(r.sheetName),

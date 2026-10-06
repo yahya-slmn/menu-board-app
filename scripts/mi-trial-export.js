@@ -28,10 +28,10 @@ if (!menuPath || !outPath) { console.error('Usage: node scripts/mi-trial-export.
 
 const clientSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'supabaseClient.js'), 'utf8');
 const SUPABASE_URL = clientSrc.match(/https:\/\/[a-z0-9]+\.supabase\.co/)[0];
-const ANON_KEY = (clientSrc.match(/['"](eyJ[A-Za-z0-9._-]+|sb_publishable_[A-Za-z0-9_-]+)['"]/) || [])[1];
+const { signIn, functionHeaders } = require('./script-auth'); // functions need a signed-in session (2026-10-06)
 async function suggest(items) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/suggest-dish-ingredients-trial`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+    method: 'POST', headers: await functionHeaders(),
     body: JSON.stringify({ items }), signal: AbortSignal.timeout(150_000),
   });
   const body = await res.json().catch(() => ({}));
@@ -40,6 +40,7 @@ async function suggest(items) {
 }
 
 (async () => {
+  await signIn();
   const { workbook } = await loadWorkbookFromBuffer(fs.readFileSync(menuPath));
   const { rows, dishColumnBySheet } = await parseWorkbookDishes(workbook, SCHOOL_VOCAB);
   const dishes = dishesForSuggestion(rows);
