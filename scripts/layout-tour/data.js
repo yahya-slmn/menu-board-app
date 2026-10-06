@@ -155,6 +155,13 @@ const PICK_DISHES = Array.from({ length: 1500 }, (_, key) => {
 
 const handlers = {
   prepareRecipeGeneration: () => ({ success: true, fileName: 'September week_01-04_Ingredients.xlsx', failures: [], dishes: PICK_DISHES, estimate: { secondsPerBatch: 65, batchSize: 8 } }),
+  // Menu Ingredients history: 12 entries -- a 4-file upload, long names, one incomplete, edited ones.
+  miHistoryList: () => ({ runs: Array.from({ length: 12 }, (_, i) => ({ id: 40 - i, created_at: `2026-10-0${6 - (i % 5)}T0${8 + (i % 2)}:15:00.000Z`, created_by: ['tetiana', 'hana', 'yahya'][i % 3],
+    file_names: i === 0 ? ['September week_01.xlsx', 'September week_02.xlsx', 'September week_03.xlsx', 'September week_04.xlsx']
+      : [i === 3 ? 'Ramadan special menu with the extended Staff lunch options and the CEO breakfast rotation (final, revised).xlsx' : `October week_0${(i % 4) + 1}.xlsx`],
+    row_count: i === 0 ? 1540 : 385, failed_files: i === 5 ? [{ fileName: 'old layout.xlsx', error: 'No recognizable menu rows' }] : null,
+    complete: i !== 7, version: i % 4 === 1 ? 3 : 1, updated_at: '2026-10-06T11:40:00.000Z', updated_by: 'hana' })) }),
+  miHistoryOpen: () => ({ uploadToken: 'tour-history', files: MI_FILES, meta: { id: 39, file_names: ['October week_02.xlsx'], created_at: '2026-10-05T09:15:00.000Z', created_by: 'hana', version: 3, complete: true } }),
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   // "Re-group from the original menu...": a canned preview (main.js builds it from the picked file) and its apply.
   previewRegroupGeneratedRecipes: ({ fileName } = {}) => ({ success: true, token: 't1', total: 6, willGroup: 5, notFound: ['Mystery Dish'],

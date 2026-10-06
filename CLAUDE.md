@@ -263,6 +263,19 @@ category group and overall (acting on the rows the search shows), search, live c
 of 8, measured 2026-10-03; no cost is shown, the user's decision 2026-10-06). The result panel (`renderRgResult`) lists made / warnings / skipped. Dedupe still merges
 near-identical spellings (`findDuplicateMatch`), as before.
 
+**Menu Ingredients history** (2026-10-06; migration 20261006100000, applied by hand; `lib/menuIngredientsHistory.js`): every
+generation is saved in the BACKGROUND when it finishes (`saveGenerationToHistory`, never awaited; event
+`menu-ingredients-history`: saved / incomplete / failed / unavailable -- a failed save is a warning only, review and export
+keep working from memory). One entry = one upload: `menu_ingredient_runs` (who / when, file names, row count, the review rows
+exactly as the screen holds them -- gzip JSON in base64, `rows_gz` -- `version`, `complete`) + `menu_ingredient_run_files`
+(the ORIGINAL workbook(s), base64: export edits the original file). History tab (`renderMiHistoryList`): Open (the same
+review; originals re-registered so Export works), Export to Excel (opens it, then today's export), Delete (anyone signed in,
+with a confirmation). Edits: "Save changes", saved only if the entry is still the version she opened (compare-and-swap on
+`version` in the UPDATE); otherwise nothing is written and she can "Save mine as a new history entry" or open theirs. Export
+now always starts from a FRESH copy of the original (exporting twice = the same file). History never writes to the Dish
+Catalog (M2 / M3 unchanged; an entry is a snapshot, never refreshed from the catalog). `scripts/menu-ingredients-history-check.js`
+(npm test): history export byte-identical to the export after generation, edits export, a stale save refused.
+
 **Master Items recipes (R1 / R2): STOPPED 2026-10-06** -- the company's own system will own recipes, prices and the ingredients
 master; Menu Board does no ingredients-master matching. The R2 code is parked, never committed: `git stash` "R2 Master Items
 recipes (parked 2026-10-06)" on one Mac, and `backups/r2-parked-2026-10-06/` (patch + untracked files). Left live on purpose:

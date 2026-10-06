@@ -74,6 +74,18 @@ contextBridge.exposeInMainWorld('api', {
 
   parseAndSuggestMenuIngredients: (payload) => ipcRenderer.invoke('parse-and-suggest-menu-ingredients', payload),
   exportMenuIngredients: (payload) => ipcRenderer.invoke('export-menu-ingredients', payload),
+  // Menu Ingredients history: auto-saved generations (the event says saved / incomplete / failed / unavailable), and the
+  // History tab's list, open, save (only if unchanged since opened), save as new, delete.
+  onMenuIngredientsHistory: (callback) => {
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('menu-ingredients-history', listener);
+    return () => ipcRenderer.removeListener('menu-ingredients-history', listener);
+  },
+  miHistoryList: () => ipcRenderer.invoke('mi-history-list'),
+  miHistoryOpen: (id) => ipcRenderer.invoke('mi-history-open', id),
+  miHistorySave: (payload) => ipcRenderer.invoke('mi-history-save', payload),
+  miHistorySaveAsNew: (payload) => ipcRenderer.invoke('mi-history-save-as-new', payload),
+  miHistoryDelete: (id) => ipcRenderer.invoke('mi-history-delete', id),
   cleanMenusForSharing: (payload) => ipcRenderer.invoke('clean-menus-for-sharing', payload),
   onCleanMenuProgress: (callback) => {
     const listener = (event, payload) => callback(payload);

@@ -54,6 +54,7 @@ const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMa
 const { planGeneratedDelete, nextRgCode } = require('./lib/generatedRecipeDelete');
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
 const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
+const miHistory = require('./lib/menuIngredientsHistory');
 const { variantDisplayName } = require('./lib/masterItemsPlan');
 const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
 const { linkNewRow, relinkRenamedRow, planLinks } = require('./lib/variantLink');
@@ -2050,7 +2051,7 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
 
   const results = read.map((f) => {
     if (!f.success) return f;
-    menuIngredientsFiles.set(f.fileIndex, { fileName: f.fileName, workbook: f.workbook, dishColumnBySheet: f.dishColumnBySheet });
+    menuIngredientsFiles.set(f.fileIndex, { fileName: f.fileName, base64: files[f.fileIndex].base64, dishColumnBySheet: f.dishColumnBySheet });
     const fileFailures = [...f.failures, ...failures];
     // The renderer doesn't show `failures`, so this log is the ONLY place that detail survives (electron-log's file
     // transport persists log.warn in a packaged build too).
@@ -2063,8 +2064,57 @@ ipcMain.handle('parse-and-suggest-menu-ingredients', async (e, { files, uploadTo
     return { fileIndex: f.fileIndex, fileName: f.fileName, success: true, rows: f.annotated.map(({ policyLog, ...r }) => r), failures: fileFailures };
   });
   miLog(`handler RETURNING success=true -- ${ok.length}/${files.length} file(s) succeeded, ${uniqueDishes.length} dish(es) to the AI, ${fromCatalog.size} row(s) from the Dish Catalog, ${follows.size} following row(s)`);
-  return { success: true, files: results, uploadToken };
+  // Saved to history in the BACKGROUND (never awaited): the review appears at once, and a failed save is only a warning.
+  saveGenerationToHistory(e.sender, uploadToken, results, ok.map((f) => ({ fileIndex: f.fileIndex, fileName: f.fileName, base64: files[f.fileIndex].base64 })));
+  return { success: true, files: results, uploadToken, historyPending: true };
 });
+
+// ============================================================
+// Menu Ingredients history (2026-10-06, lib/menuIngredientsHistory.js; migration 20261006100000, applied by hand). Every
+// generation is saved (who, when, the review rows and the original workbooks); the History tab reopens, edits (saved only if
+// unchanged since opened), exports and deletes. Never writes to the Dish Catalog.
+// ============================================================
+function sendHistoryEvent(sender, payload) {
+  if (sender && !sender.isDestroyed()) sender.send('menu-ingredients-history', payload);
+}
+async function saveGenerationToHistory(sender, uploadToken, files, originals) {
+  try {
+    if (!(await miHistory.historyAvailable(supabase))) { sendHistoryEvent(sender, { uploadToken, status: 'unavailable' }); return; }
+    const r = await miHistory.createRun(supabase, { who: await signedInLogin(), files, originals });
+    if (!r.complete) log.warn(`[menu-ingredients] history entry ${r.id} saved without all its files: ${r.error}`);
+    sendHistoryEvent(sender, { uploadToken, status: r.complete ? 'saved' : 'incomplete', runId: r.id, version: r.version, error: r.error || null });
+  } catch (err) {
+    log.warn(`[menu-ingredients] couldn't save this generation to history: ${err.message}`);
+    sendHistoryEvent(sender, { uploadToken, status: 'failed', error: err.message });
+  }
+}
+
+ipcMain.handle('mi-history-list', async () => {
+  if (!(await miHistory.historyAvailable(supabase))) return { unavailable: true };
+  return { runs: await miHistory.listRuns(supabase) };
+});
+
+// Opens an entry: its review, and its original workbooks registered as the current upload so Export works as after a
+// generation. -> { uploadToken, files, meta } | { gone: true } | { error }.
+ipcMain.handle('mi-history-open', async (e, id) => {
+  const run = await miHistory.loadRun(supabase, Number(id));
+  if (!run) return { gone: true };
+  if (!run.meta.complete) return { error: 'This entry is incomplete: its original file(s) were not saved, so it can\'t be exported. Delete it, or upload the file again.' };
+  const token = crypto.randomUUID();
+  const registered = new Map();
+  for (const o of run.originals) {
+    const { workbook } = await loadWorkbookFromBuffer(Buffer.from(o.base64, 'base64'));
+    const { dishColumnBySheet } = await parseWorkbookDishes(workbook, schoolCategoryVocabulary());
+    registered.set(o.fileIndex, { fileName: o.fileName, base64: o.base64, dishColumnBySheet });
+  }
+  menuIngredientsToken = token;
+  menuIngredientsFiles = registered;
+  return { uploadToken: token, files: run.review, meta: run.meta };
+});
+
+ipcMain.handle('mi-history-save', async (e, { id, expectedVersion, files }) => miHistory.saveRunEdits(supabase, { id: Number(id), expectedVersion: Number(expectedVersion), files, who: await signedInLogin() }));
+ipcMain.handle('mi-history-save-as-new', async (e, { fromId, files }) => miHistory.saveRunAsNew(supabase, { fromId: Number(fromId), files, who: await signedInLogin() }));
+ipcMain.handle('mi-history-delete', async (e, id) => miHistory.deleteRun(supabase, Number(id)));
 
 
 // The exported file is always named after the ORIGINAL uploaded file, not a generic default --
@@ -2108,9 +2158,12 @@ ipcMain.handle('export-menu-ingredients', async (e, { files, uploadToken }) => {
       miLog(`export bailing out -- no in-memory workbook for fileIndex ${fileIndex}`);
       return { success: false, error: "This file's data is no longer current (a newer upload replaced it) -- please upload it again before exporting." };
     }
+    // A FRESH copy of the original file every time (history keeps the original bytes): exporting twice, or from a reopened
+    // history entry, gives the same file as the first export after a generation.
+    const { workbook } = await loadWorkbookFromBuffer(Buffer.from(entry.base64, 'base64'));
     miLog(`starting restructureAndAppendIngredients() for file ${fileIndex} "${entry.fileName}"`);
-    await restructureAndAppendIngredients(entry.workbook, rows, entry.dishColumnBySheet);
-    const buffer = Buffer.from(await entry.workbook.xlsx.writeBuffer());
+    await restructureAndAppendIngredients(workbook, rows, entry.dishColumnBySheet);
+    const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
     outputs.push({ fileName: ingredientsExportFileName(entry.fileName), buffer });
   }
 

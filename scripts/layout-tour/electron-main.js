@@ -69,6 +69,12 @@ const STEPS = [
     state.catalogIngredientsSave.files = [{ name: 'September week_04_Ingredients.xlsx', base64: '' }]; renderCatalogIngredientsSaveView(document.getElementById('main'));
     await t.click('Read files'); await t.until(() => document.getElementById('cs-apply'));`],
   ['Menu Ingredients: save lists (result)', 'app', `document.getElementById('cs-apply').click(); await t.until(() => document.getElementById('cs-done'));`],
+  ['Menu Ingredients: History tab', 'app', `state.catalogIngredientsSave.open = false; state.menuIngredients.tab = 'history';
+    document.querySelector('[data-view=menuIngredients]').click(); await t.until(() => document.querySelector('.mi-history-table'));`],
+  ['Menu Ingredients: opened entry, unsaved changes', 'app', `document.querySelector('.mi-history-table [data-open]').click(); await t.until(() => document.querySelector('.mi-ingredients-input'));
+    const inp = document.querySelector('.mi-ingredients-input'); inp.value += ' - fresh basil'; inp.dispatchEvent(new Event('input', { bubbles: true })); await t.until(() => document.getElementById('mi-hist-save'));`],
+  ['Menu Ingredients: someone else saved first', 'app', `state.menuIngredients.history.conflict = { by: 'tetiana', at: '2026-10-06T12:05:00.000Z' }; miRenderHistoryBar();
+    await t.until(() => document.getElementById('mi-hist-as-new'));`],
   ['Ingredients: master list (merge suggestions)', 'app', `document.querySelector('[data-view=ingredients]').click(); await t.until(() => document.querySelector('.ingredients-table'));
     await t.until(() => document.querySelector('.nm-merges')); document.querySelector('.nm-merges').open = true; await t.sleep(300);`],
   ['Ingredients: merge dialog', 'app', `document.querySelector('[data-sugg="0"]').click(); await t.until(() => document.querySelector('#nmm-apply:not([disabled])'));`],

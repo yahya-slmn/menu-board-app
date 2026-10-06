@@ -31,7 +31,7 @@ const state = {
   // upload attempt and echoed back by main.js once its parse actually wins the race to be
   // "current"; a later export sends it back so main.js can refuse to export against a superseded
   // upload's in-memory workbooks (see main.js's own comment on menuIngredientsToken).
-  menuIngredients: { files: [], uploadToken: null },
+  menuIngredients: { files: [], uploadToken: null, tab: 'generator', history: null, opened: null },
   // Dish Catalog -> "Import dishes from menus" (renderCatalogImportView): shown in place of the catalog
   // while open. files: [{ name, base64 }] kept so a section pick can re-read them; sel: key -> the
   // chef's tick / name / category / protein per row; overrides: 'file::sheet' -> section code.
@@ -4198,13 +4198,14 @@ async function renderExportAllView(main) {
 
 // ============================================================
 // MENU INGREDIENTS GENERATOR -- upload a menu .xlsx this app itself produced, review/edit an
-// AI-suggested ingredient list per dish, export the annotated file. Purely one-shot: nothing
-// here is ever saved to Supabase (see state.menuIngredients' own comment and main.js's
-// parse-and-suggest-menu-ingredients/export-menu-ingredients handlers).
+// AI-suggested ingredient list per dish, export the annotated file. Since 2026-10-06 every generation is also saved to
+// History (renderMiHistoryList, the history helpers above renderMenuIngredientsFiles): reopened, edited (saved only if
+// unchanged since opened), exported again. History never writes to the Dish Catalog.
 // ============================================================
 function renderMenuIngredientsView(main) {
   if (state.catalogIngredientsSave.open) return renderCatalogIngredientsSaveView(main);
   const mi = state.menuIngredients;
+  if (mi.tab === 'history') return renderMiHistoryList(main);
   const hasUpload = mi.files.length > 0;
   const exportableFiles = mi.files.filter(f => f.rows && f.rows.length);
   const totalRows = exportableFiles.reduce((sum, f) => sum + f.rows.length, 0);
@@ -4214,6 +4215,7 @@ function renderMenuIngredientsView(main) {
     <div class="topbar">
       <div><h1>Menu Ingredients Generator</h1><span class="page-description">Upload a menu, review AI-suggested ingredients, export. Approved lists can be saved to the Dish Catalog.</span></div>
     </div>
+    ${miHistoryTabsHtml('generator')}
     <div class="generate-controls" style="align-items:center;">
       <button class="primary" id="mi-upload-btn">${hasUpload ? 'Upload Different File(s)' : 'Upload Menu File(s)'}</button>
       <input type="file" id="mi-file-input" accept=".xlsx" multiple hidden />
@@ -4222,6 +4224,8 @@ function renderMenuIngredientsView(main) {
       <span id="mi-export-status" style="color:var(--neutral); font-size:12.5px;"></span>
     </div>
     <div id="mi-progress-wrap"></div>
+    <div id="mi-history-bar"></div>
+    ${hasUpload && mi.opened ? `<div class="mi-opened-note">Opened from History: ${(mi.opened.names || []).map(miEsc).join(', ')} · generated ${miEsc(miWhen(mi.opened.createdAt))}${mi.opened.createdBy ? ` by ${miEsc(mi.opened.createdBy)}` : ''}</div>` : ''}
     ${hasUpload ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${totalRows} dish row(s) parsed across ${exportableFiles.length} of ${mi.files.length} file(s)${catalogRows ? ` · ${catalogRows} from the Dish Catalog (saved, approved lists -- no AI)` : ''}</div>` : ''}
     <div id="mi-review"></div>
   `;
@@ -4235,6 +4239,8 @@ function renderMenuIngredientsView(main) {
   // visible marker -- see renderMenuIngredientsFiles below -- since that's not a per-row gap, it's
   // the entire file missing from the export.
 
+  miWireTabs(main);
+  miRenderHistoryBar();
   document.getElementById('mi-save-lists-btn').addEventListener('click', () => {
     Object.assign(state.catalogIngredientsSave, { open: true, plan: null, result: null, sel: {}, files: [] });
     renderCatalogIngredientsSaveView(main);
@@ -4247,6 +4253,7 @@ function renderMenuIngredientsView(main) {
     const files = [...e.target.files];
     e.target.value = '';
     if (files.length === 0) return;
+    if (!miConfirmLeave()) return;
     // Temporary diagnostic logging for the "hangs on second upload" investigation -- mirrors
     // main.js's own miLog calls so a live repro shows definitively whether the renderer or the
     // main process is the one that actually stops making progress. Remove once confirmed fixed.
@@ -4326,7 +4333,10 @@ function renderMenuIngredientsView(main) {
       // Sharing's own post-loop reconcile -- guaranteed to reflect the true final state even if a
       // progress event was somehow missed.
       result.files.forEach((f) => setRowStatus(f.fileIndex, f.success ? 'done' : 'error', f.success ? 'Done' : f.error));
-      state.menuIngredients = { files: result.files, uploadToken };
+      // Saved to history in the background (main.js saveGenerationToHistory); its event may already have arrived.
+      state.menuIngredients = { files: result.files, uploadToken, tab: 'generator', opened: null, history: miFreshHistory(result.historyPending ? 'pending' : null) };
+      const early = miHistoryEarly.get(uploadToken);
+      if (early) { miHistoryEarly.delete(uploadToken); Object.assign(state.menuIngredients.history, { status: early.status, runId: early.runId ?? null, version: early.version ?? null, error: early.error || null }); }
       renderMenuIngredientsView(main);
       miLog('view re-rendered with new files');
     } catch (err) {
@@ -4408,6 +4418,191 @@ function renderMenuIngredientsView(main) {
 // N files uploaded together each get their own clearly-labeled review table rather than one
 // table with no indication of which file a row came from. A file that failed to parse entirely
 // (f.error set, f.rows empty) shows its error inline instead of an empty table.
+// ============================================================
+// MENU INGREDIENTS HISTORY (2026-10-06; main.js mi-history-*, lib/menuIngredientsHistory.js). Every generation is saved in the
+// background (who, when, the review rows, the original workbooks); the History tab reopens an entry into the same review,
+// where edits are saved back -- only if nobody saved it since it was opened -- and exported as after a generation.
+// state.menuIngredients.history: { runId, version, status: 'pending' | 'saved' | 'incomplete' | 'failed' | 'unavailable' |
+// 'deleted' | null, error, dirty, saving, conflict: { by, at } | null }. A failed save is a warning only: the review and
+// export keep working from memory. History never writes to the Dish Catalog.
+// ============================================================
+const miHistoryEarly = new Map(); // uploadToken -> the save event, when it arrives before the review is on screen
+
+function miFreshHistory(status = null) {
+  return { runId: null, version: null, status, error: null, dirty: false, saving: false, conflict: null };
+}
+
+function miApplyHistoryEvent(p) {
+  const mi = state.menuIngredients;
+  if (!mi.history || p.uploadToken !== mi.uploadToken) { miHistoryEarly.set(p.uploadToken, p); return; }
+  Object.assign(mi.history, { status: p.status, runId: p.runId ?? null, version: p.version ?? null, error: p.error || null });
+  miRenderHistoryBar();
+}
+if (window.api && window.api.onMenuIngredientsHistory) window.api.onMenuIngredientsHistory(miApplyHistoryEvent);
+
+// An edit on the review (typing, "Edit for this section", "Use ... again"): unsaved until Save changes.
+function miMarkDirty() {
+  const h = state.menuIngredients.history;
+  if (!h || h.dirty) return;
+  h.dirty = true;
+  miRenderHistoryBar();
+}
+
+// The line under the controls saying where this review stands in history, with Save changes when it has unsaved edits.
+function miRenderHistoryBar() {
+  const el = document.getElementById('mi-history-bar');
+  const h = state.menuIngredients.history;
+  if (!el) return;
+  if (!h || !h.status || h.status === 'unavailable') { el.innerHTML = ''; return; }
+  const canSave = h.runId != null && h.status !== 'deleted' && h.status !== 'failed';
+  let text;
+  if (h.conflict) {
+    text = `<strong>Not saved:</strong> ${miEsc(h.conflict.by || 'someone')} saved this entry ${miEsc(miWhen(h.conflict.at))}, after you opened it. Your edits are still on screen.`;
+  } else if (h.status === 'pending') text = 'Saving to history…';
+  else if (h.status === 'failed') text = `<strong>Not saved to history:</strong> ${miEsc(h.error || 'unknown error')}. The review and Export still work.`;
+  else if (h.status === 'incomplete') text = `<strong>Saved to history without its original file(s)</strong> (${miEsc(h.error || 'unknown error')}): it can't be exported from History later. Export it now if you need the file.`;
+  else if (h.status === 'deleted') text = 'This history entry was deleted. The review and Export still work; your edits can\'t be saved to it.';
+  else if (h.saving) text = 'Saving changes…';
+  else if (h.dirty) text = '<strong>Unsaved changes</strong> to this history entry.';
+  else text = `Saved to history${h.version > 1 ? ` · version ${h.version}` : ''}.`;
+  const warn = h.conflict || ['failed', 'incomplete', 'deleted'].includes(h.status);
+  el.innerHTML = `<div class="mi-history-bar ${warn ? 'mi-history-warn' : ''}" role="status"><span>${text}</span>
+    ${h.conflict ? `<button type="button" class="secondary" id="mi-hist-as-new">Save mine as a new history entry</button>
+      <button type="button" class="nm-link" id="mi-hist-theirs">Open their version</button>`
+      : h.dirty && canSave ? `<button type="button" class="primary" id="mi-hist-save" ${h.saving || h.status === 'pending' ? 'disabled' : ''}>Save changes</button>` : ''}</div>`;
+  el.querySelector('#mi-hist-save')?.addEventListener('click', miSaveHistoryEdits);
+  el.querySelector('#mi-hist-as-new')?.addEventListener('click', miSaveHistoryAsNew);
+  el.querySelector('#mi-hist-theirs')?.addEventListener('click', () => {
+    if (!confirm('Open the saved version? Your unsaved edits on screen will be dropped.')) return;
+    miOpenHistoryEntry(h.runId, { force: true });
+  });
+}
+
+async function miSaveHistoryEdits() {
+  const mi = state.menuIngredients;
+  const h = mi.history;
+  if (!h || h.runId == null || h.saving) return;
+  h.saving = true;
+  miRenderHistoryBar();
+  try {
+    const r = await window.api.miHistorySave({ id: h.runId, expectedVersion: h.version, files: mi.files });
+    if (r.saved) Object.assign(h, { version: r.version, dirty: false, conflict: null });
+    else if (r.conflict) h.conflict = r.conflict;
+    else if (r.gone) h.status = 'deleted';
+  } catch (err) {
+    alert(`Couldn't save the changes: ${err.message}`);
+  } finally {
+    h.saving = false;
+    miRenderHistoryBar();
+  }
+}
+
+async function miSaveHistoryAsNew() {
+  const mi = state.menuIngredients;
+  const h = mi.history;
+  h.saving = true;
+  miRenderHistoryBar();
+  try {
+    const r = await window.api.miHistorySaveAsNew({ fromId: h.runId, files: mi.files });
+    Object.assign(h, { runId: r.id, version: r.version, status: r.complete ? 'saved' : 'incomplete', error: r.error || null, dirty: false, conflict: null });
+    showToast('Saved as a new history entry.');
+  } catch (err) {
+    alert(`Couldn't save a new entry: ${err.message}`);
+  } finally {
+    h.saving = false;
+    miRenderHistoryBar();
+  }
+}
+
+// Unsaved edits on screen are lost when another entry or a new upload replaces the review: ask first.
+function miConfirmLeave() {
+  const h = state.menuIngredients.history;
+  return !(h && h.dirty) || confirm('This review has unsaved changes. Replace it anyway? Your edits will be lost.');
+}
+
+// Opens a history entry into the review (Generator tab). then: optional, run after it is on screen (Export from the list).
+async function miOpenHistoryEntry(id, { force = false, then = null } = {}) {
+  if (!force && !miConfirmLeave()) return false;
+  let r;
+  try { r = await window.api.miHistoryOpen(id); } catch (err) { alert(`Couldn't open it: ${err.message}`); return false; }
+  if (r.gone) { alert('This history entry was deleted meanwhile.'); renderView(); return false; }
+  if (r.error) { alert(r.error); return false; }
+  state.menuIngredients = { files: r.files, uploadToken: r.uploadToken, tab: then ? 'history' : 'generator',
+    history: { ...miFreshHistory('saved'), runId: r.meta.id, version: r.meta.version },
+    opened: { names: r.meta.file_names, createdAt: r.meta.created_at, createdBy: r.meta.created_by } };
+  if (then) await then();
+  renderView();
+  return true;
+}
+
+function miHistoryTabsHtml(active) {
+  return `<div class="mode-toggle mi-tabs" role="tablist" aria-label="Menu Ingredients">
+    <button type="button" class="mode-toggle-btn ${active === 'generator' ? 'active' : ''}" role="tab" aria-selected="${active === 'generator'}" data-mi-tab="generator">Generator</button>
+    <button type="button" class="mode-toggle-btn ${active === 'history' ? 'active' : ''}" role="tab" aria-selected="${active === 'history'}" data-mi-tab="history">History</button>
+  </div>`;
+}
+function miWireTabs(main) {
+  main.querySelectorAll('[data-mi-tab]').forEach(b => b.addEventListener('click', () => {
+    if (state.menuIngredients.tab === b.dataset.miTab) return;
+    state.menuIngredients.tab = b.dataset.miTab;
+    renderMenuIngredientsView(main);
+  }));
+}
+
+// The History tab: every saved generation, newest first.
+async function renderMiHistoryList(main) {
+  main.innerHTML = `
+    <div class="topbar">
+      <div><h1>Menu Ingredients Generator</h1><span class="page-description">Every generation is saved here: reopen it, edit, export it again</span></div>
+    </div>
+    ${miHistoryTabsHtml('history')}
+    <div id="mi-history-list"><div class="loading-state" role="status">Loading the history…</div></div>`;
+  miWireTabs(main);
+  const box = document.getElementById('mi-history-list');
+  let data;
+  try { data = await window.api.miHistoryList(); } catch (err) { box.innerHTML = `<div class="empty-state">Couldn't load the history: ${miEsc(err.message)}</div>`; return; }
+  if (data.unavailable) { box.innerHTML = '<div class="empty-state">History needs its database update (migration 20261006100000). Generation works as before.</div>'; return; }
+  if (!data.runs.length) { box.innerHTML = '<div class="empty-state">Nothing saved yet. Every generation from now on is saved here.</div>'; return; }
+  const openId = state.menuIngredients.history && state.menuIngredients.history.runId;
+  box.innerHTML = `<div class="table-scroll"><table class="items-table mi-history-table">
+    <thead><tr><th>File(s)</th><th>Generated</th><th>Rows</th><th>Last saved</th><th></th></tr></thead>
+    <tbody>${data.runs.map(r => `<tr>
+      <td>${(r.file_names || []).map(miEsc).join('<br>') || '<span class="list-empty">—</span>'}
+        ${r.complete ? '' : ' <span class="mi-history-tag">incomplete: original file missing</span>'}
+        ${r.id === openId ? ' <span class="mi-history-tag mi-history-open">open now</span>' : ''}
+        ${r.failed_files && r.failed_files.length ? `<div class="nm-meta">${r.failed_files.length} file(s) of this upload couldn't be read</div>` : ''}</td>
+      <td>${miEsc(miWhen(r.created_at))}<div class="nm-meta">${miEsc(r.created_by || '')}</div></td>
+      <td>${r.row_count}</td>
+      <td>${r.version > 1 ? `${miEsc(miWhen(r.updated_at))}<div class="nm-meta">${miEsc(r.updated_by || '')} · version ${r.version}</div>` : '<span class="list-empty">not edited</span>'}</td>
+      <td class="mi-history-actions">
+        <button class="icon-btn" data-open="${r.id}" ${r.complete ? '' : 'disabled'}>Open</button>
+        <button class="icon-btn" data-export="${r.id}" ${r.complete ? '' : 'disabled'}>Export to Excel</button>
+        <button class="icon-btn danger" data-del="${r.id}">Delete</button></td>
+    </tr>`).join('')}</tbody></table></div>`;
+  box.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => miOpenHistoryEntry(Number(b.dataset.open))));
+  // Export from the list: the entry is opened (it becomes the current review) and exported exactly as after a generation.
+  box.querySelectorAll('[data-export]').forEach(b => b.addEventListener('click', () => miOpenHistoryEntry(Number(b.dataset.export), { then: async () => {
+    const mi = state.menuIngredients;
+    const exportable = mi.files.filter(f => f.rows && f.rows.length).map(f => ({ fileIndex: f.fileIndex, rows: f.rows }));
+    try {
+      const res = await window.api.exportMenuIngredients({ files: exportable, uploadToken: mi.uploadToken });
+      if (res.success) showToast(res.count > 1 ? `Exported ${res.count} files` : `Exported to ${res.path}`);
+      else if (!res.cancelled) alert(`Export failed: ${res.error || 'unknown error'}`);
+    } catch (err) { alert(`Export failed: ${err.message}`); }
+  } })));
+  box.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+    const r = data.runs.find(x => x.id === Number(b.dataset.del));
+    if (!confirm(`Delete this history entry?\n\n${(r.file_names || []).join(', ')}\nGenerated ${miWhen(r.created_at)}${r.created_by ? ` by ${r.created_by}` : ''}, ${r.row_count} rows.\n\nIts saved review and original file(s) are removed for everyone. This can't be undone. The Dish Catalog is not affected.`)) return;
+    try {
+      await window.api.miHistoryDelete(r.id);
+      const h = state.menuIngredients.history;
+      if (h && h.runId === r.id) Object.assign(h, { status: 'deleted' });
+      showToast('History entry deleted.');
+    } catch (err) { alert(`Couldn't delete it: ${err.message}`); }
+    renderMiHistoryList(main);
+  }));
+}
+
 function renderMenuIngredientsFiles(container, files) {
   const multi = files.length > 1;
   container.innerHTML = files.map((f, i) => `
@@ -4551,6 +4746,7 @@ function renderMenuIngredientsReview(container, rows, ctx) {
     if (!row || miFollowing(row)) return;
     const field = isIngredients ? 'ingredients' : 'allergens';
     row[field] = e.target.value;
+    miMarkDirty();
     // Every row still following this one takes the new text -- in the data the export sends, and on screen.
     for (const f of ctx.followersOf.get(miRowKey(row)) || []) {
       if (f.unlinked) continue;
@@ -4564,6 +4760,7 @@ function renderMenuIngredientsReview(container, rows, ctx) {
     if (!btn) return;
     const row = ctx.byKey.get(btn.dataset.miUnlink || btn.dataset.miRelink);
     if (!row) return;
+    miMarkDirty();
     if (btn.dataset.miUnlink) {
       row.unlinked = true; // her own copy now: it keeps the current text and becomes editable
     } else {
