@@ -276,6 +276,18 @@ now always starts from a FRESH copy of the original (exporting twice = the same 
 Catalog (M2 / M3 unchanged; an entry is a snapshot, never refreshed from the catalog). `scripts/menu-ingredients-history-check.js`
 (npm test): history export byte-identical to the export after generation, edits export, a stale save refused.
 
+**Menu Ingredients review = Build Menu's grid** (2026-10-06, `miRenderGrid` / `miOpenPop` in renderer.js; data, export,
+history and AI calls unchanged): one section at a time (`state.menuIngredients.activeSheet`), its days stacked as `.day-table`s
+(category cells spanning their dishes), section tabs + the history status / Save changes docked at the bottom
+(`.main.build-mode`, `.build-scroll#mi-scroll`, `.builder-tabs#mi-sheet-strip`). Ingredients cells are two clipped lines with
+markers in a side column (red "⚠ n" removed terms, catalog, regional, same as / edited) -- never a line of their own, so every
+school day fits 1280x800 (Mac and Windows; Staff's 32-row day scrolls, agreed). ONE popover (#mi-pop, absolute inside
+#mi-scroll, over the cell, >= 460px, kept inside the scroll area's clientWidth so never under a Windows scrollbar, moved up
+near the bottom): full text editable + every note + Edit for this section. Enter / Space open; Enter / Esc / click outside
+close (edits kept, focus back); Tab / Shift+Tab move to the next / previous dish. Only the active section is drawn (1,540 rows:
+Staff tab 640 rows, ~12 ms). The top history line shows only warnings in this layout (it must never change height while
+typing). Tour steps assert the grid never moves when a cell opens (`window.__tourNote` prints measurements).
+
 **Master Items recipes (R1 / R2): STOPPED 2026-10-06** -- the company's own system will own recipes, prices and the ingredients
 master; Menu Board does no ingredients-master matching. The R2 code is parked, never committed: `git stash` "R2 Master Items
 recipes (parked 2026-10-06)" on one Mac, and `backups/r2-parked-2026-10-06/` (patch + untracked files). Left live on purpose:

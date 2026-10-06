@@ -8,7 +8,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { handlers, MI_FILES } = require('./data.js');
+const { handlers, MI_FILES, MI_WEEK, MI_MONTH } = require('./data.js');
 
 // Content sizes (useContentSize): mac = the default 1280 x 820 window minus the 28px title bar; win = that window's
 // likely content on Windows 10/11 at 100% (about 8px of frame each side; title bar + menu bar + bottom frame about
@@ -64,17 +64,79 @@ const STEPS = [
   ['Menu Ingredients: review (catalog rows)', 'app', `document.getElementById('m-cancel').click(); await t.sleep(300);
     document.querySelector('[data-view=menuIngredients]').click(); await t.sleep(600);
     state.menuIngredients.files = ${JSON.stringify(MI_FILES)}; state.menuIngredients.uploadToken = 'tour';
-    renderMenuIngredientsView(document.getElementById('main')); await t.until(() => document.querySelector('.mi-from-catalog'));`],
+    renderMenuIngredientsView(document.getElementById('main')); await t.until(() => document.querySelector('.mi-mark-catalog'));`],
   ['Menu Ingredients: save lists (preview)', 'app', `await t.click('Save approved lists');
     state.catalogIngredientsSave.files = [{ name: 'September week_04_Ingredients.xlsx', base64: '' }]; renderCatalogIngredientsSaveView(document.getElementById('main'));
     await t.click('Read files'); await t.until(() => document.getElementById('cs-apply'));`],
   ['Menu Ingredients: save lists (result)', 'app', `document.getElementById('cs-apply').click(); await t.until(() => document.getElementById('cs-done'));`],
   ['Menu Ingredients: History tab', 'app', `state.catalogIngredientsSave.open = false; state.menuIngredients.tab = 'history';
     document.querySelector('[data-view=menuIngredients]').click(); await t.until(() => document.querySelector('.mi-history-table'));`],
-  ['Menu Ingredients: opened entry, unsaved changes', 'app', `document.querySelector('.mi-history-table [data-open]').click(); await t.until(() => document.querySelector('.mi-ingredients-input'));
-    const inp = document.querySelector('.mi-ingredients-input'); inp.value += ' - fresh basil'; inp.dispatchEvent(new Event('input', { bubbles: true })); await t.until(() => document.getElementById('mi-hist-save'));`],
+  ['Menu Ingredients: opened entry, unsaved changes', 'app', `document.querySelector('.mi-history-table [data-open]').click(); await t.until(() => document.querySelector('.mi-ing-cell'));
+    [...document.querySelectorAll('.mi-ing-cell')].find(c => !c.classList.contains('mi-following')).click();
+    const ta = (await t.until(() => document.getElementById('mi-pop'))).querySelector('textarea'); ta.value += ' - fresh basil'; ta.dispatchEvent(new Event('input'));
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await t.until(() => document.getElementById('mi-strip-save'));`],
   ['Menu Ingredients: someone else saved first', 'app', `state.menuIngredients.history.conflict = { by: 'tetiana', at: '2026-10-06T12:05:00.000Z' }; miRenderHistoryBar();
     await t.until(() => document.getElementById('mi-hist-as-new'));`],
+  ['Menu Ingredients grid: Daycare', 'app', `state.menuIngredients = { files: ${JSON.stringify(MI_WEEK)}, uploadToken: 'tour-grid', tab: 'generator', opened: null, history: miFreshHistory('saved') };
+    Object.assign(state.menuIngredients.history, { runId: 7, version: 1 });
+    renderMenuIngredientsView(document.getElementById('main')); await t.until(() => document.querySelector('.mi-grid'));
+    const sc = document.getElementById('mi-scroll'); sc.scrollTop = document.getElementById('mi-review').offsetTop - 8;
+    const h = {};
+    for (const s of ['Daycare', 'KG - LP', 'MS - UP (B-G)', 'CEO', 'Daycare']) { document.querySelector('[data-mi-sheet="' + s + '"]').click(); h[s] = Math.round(document.querySelector('.mi-day').offsetHeight); }
+    sc.scrollTop = document.getElementById('mi-review').offsetTop - 8;
+    window.__tourNote = 'one day: ' + Object.entries(h).map(([k, v]) => k + ' ' + v + 'px').join(', ') + ' -- scroll area ' + sc.clientHeight + 'px';`],
+  ['Menu Ingredients grid: Staff (32-row day)', 'app', `document.querySelector('[data-mi-sheet="Staff"]').click(); await t.until(() => document.querySelectorAll('.mi-grid tbody tr').length >= 160);
+    const sc = document.getElementById('mi-scroll'); const day = document.querySelector('.mi-day');
+    window.__tourNote = 'one Staff day is ' + Math.round(day.offsetHeight) + 'px tall in a ' + sc.clientHeight + 'px scroll area (scrolls, as agreed)';`],
+  ['Menu Ingredients: expanded cell (keyboard, no movement)', 'app', `document.querySelector('[data-mi-sheet="KG - LP"]').click(); await t.until(() => document.querySelector('.mi-grid'));
+    const sc = document.getElementById('mi-scroll'); sc.scrollTop = document.getElementById('mi-review').offsetTop - 8;
+    const boxes = () => [...document.querySelectorAll('.mi-grid')].map(x => { const b = x.getBoundingClientRect(); return [b.top, b.left, b.width, b.height].map(Math.round).join(','); }).join('|');
+    const before = boxes();
+    const cell = document.querySelectorAll('.mi-ing-cell')[4]; cell.focus();
+    cell.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const pop = await t.until(() => document.getElementById('mi-pop'));
+    if (boxes() !== before) throw new Error('the grid moved when the cell opened');
+    const pr = pop.getBoundingClientRect(), cr = cell.getBoundingClientRect();
+    if (Math.abs(pr.top - cr.top) > 1 || Math.abs(pr.left - cr.left) > 1) throw new Error('the popover is not over its cell');
+    const ta = pop.querySelector('textarea'); const row = miCtx.byKey.get(cell.dataset.key);
+    ta.value = ta.value + ' - fresh basil'; ta.dispatchEvent(new Event('input'));
+    if (!row.ingredients.endsWith(' - fresh basil')) throw new Error('the edit did not reach the row');
+    if (boxes() !== before) throw new Error('the grid moved while editing');
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    if (document.getElementById('mi-pop')) throw new Error('Esc did not close it');
+    if (document.activeElement !== cell) throw new Error('focus did not come back to the cell');
+    if (!cell.textContent.includes('fresh basil')) throw new Error('the edit is not in the closed cell');
+    if (!document.getElementById('mi-strip-save')) throw new Error('no Save changes in the docked strip after an edit');
+    const beforeNext = boxes(); // the edit made that row's text longer: opening the next cell is compared with this
+    cell.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    (await t.until(() => document.getElementById('mi-pop'))).querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    const next = document.querySelectorAll('.mi-ing-cell')[5];
+    await t.until(() => miPop && miPop.cell === next && document.activeElement === document.querySelector('#mi-pop textarea'));
+    if (document.querySelectorAll('.mi-pop').length !== 1) throw new Error('more than one cell open');
+    if (boxes() !== beforeNext) throw new Error('the grid moved with the next cell open');
+    window.__tourNote = 'no movement: every day table identical before / during; Enter opens, the edit reaches the row and stays after Esc, focus returns, Tab opens the next dish, one popover at a time';`],
+  ['Menu Ingredients: expanded cell, last row at the edge', 'app', `document.querySelector('[data-mi-sheet="Staff"]').click(); await t.until(() => document.querySelectorAll('.mi-grid tbody tr').length >= 160);
+    const sc = document.getElementById('mi-scroll'); sc.scrollTop = sc.scrollHeight; await t.sleep(150);
+    const boxes = () => [...document.querySelectorAll('.mi-grid')].map(x => { const b = x.getBoundingClientRect(); return [b.top, b.left, b.width, b.height].map(Math.round).join(','); }).join('|');
+    const before = boxes();
+    const cells = [...document.querySelectorAll('.mi-ing-cell')]; const cell = cells[cells.length - 1];
+    cell.click(); const pop = await t.until(() => document.getElementById('mi-pop'));
+    if (boxes() !== before) throw new Error('the grid moved when the cell opened');
+    const pr = pop.getBoundingClientRect(), sr = sc.getBoundingClientRect(), cr = cell.getBoundingClientRect();
+    const visRight = sr.left + sc.clientWidth, visBottom = sr.top + sc.clientHeight;
+    if (pr.right > visRight + 0.5) throw new Error('the popover runs ' + Math.round(pr.right - visRight) + 'px under the scrollbar / off the right');
+    if (pr.bottom > visBottom + 0.5) throw new Error('the popover runs ' + Math.round(pr.bottom - visBottom) + 'px below the visible area');
+    if (pr.left > cr.left + 1 || pr.right < cr.right - 1) throw new Error('the popover does not cover its cell');
+    window.__tourNote = 'last row of the last Staff day: popover ' + Math.round(pr.width) + 'px wide, ' + Math.round(visRight - pr.right) + 'px inside the visible edge (scrollbar ' + (sc.offsetWidth - sc.clientWidth) + 'px), ' + Math.round(visBottom - pr.bottom) + 'px above the bottom; grid unchanged';`],
+  ['Menu Ingredients grid: 1,540 rows in 4 files', 'app', `const main = document.getElementById('main');
+    const t0 = performance.now();
+    state.menuIngredients = { files: ${JSON.stringify(MI_MONTH)}, uploadToken: 'tour-month', tab: 'generator', opened: null, history: miFreshHistory('saved'), activeSheet: 'Staff' };
+    renderMenuIngredientsView(main);
+    const t1 = performance.now();
+    const rows = document.querySelectorAll('.mi-grid tbody tr').length, inputs = document.querySelectorAll('#mi-review input, #mi-review textarea').length, els = document.getElementById('mi-review').querySelectorAll('*').length;
+    const t2 = performance.now(); document.querySelector('[data-mi-sheet="Daycare"]').click(); const t3 = performance.now();
+    document.querySelector('[data-mi-sheet="Staff"]').click();
+    window.__tourNote = '1,540 rows: Staff tab (largest) draws ' + rows + ' rows, ' + inputs + ' inputs, ' + els + ' elements in ' + Math.round(t1 - t0) + ' ms; switching to Daycare ' + Math.round(t3 - t2) + ' ms (the old screen drew all 1,540 rows: 3,080 inputs)';`],
   ['Ingredients: master list (merge suggestions)', 'app', `document.querySelector('[data-view=ingredients]').click(); await t.until(() => document.querySelector('.ingredients-table'));
     await t.until(() => document.querySelector('.nm-merges')); document.querySelector('.nm-merges').open = true; await t.sleep(300);`],
   ['Ingredients: merge dialog', 'app', `document.querySelector('[data-sugg="0"]').click(); await t.until(() => document.querySelector('#nmm-apply:not([disabled])'));`],

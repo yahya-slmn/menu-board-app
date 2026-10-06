@@ -153,6 +153,52 @@ const PICK_DISHES = Array.from({ length: 1500 }, (_, key) => {
     existing: key % 11 === 0 ? { status: 'draft', code: null } : key % 17 === 0 ? { status: 'confirmed', code: `RG-0${1000 + key}` } : null };
 });
 
+// Menu Ingredients review grid: one realistic week (the real week-4 counts -- Daycare 9, KG-LP 13, MS-UP 14, Staff 32, CEO 9
+// rows a day), and four of them as one 1,540-row upload. "Same as" rows, served-as-is rows, removed terms, catalog rows, and
+// ingredient lists from short to the real longest (244 characters).
+const MI_SECTIONS = [
+  ['Daycare', ['AM Snack', 'Milk', 'Lunch Bread', 'Lunch Main Course', 'Lunch SALAD Side', 'Soup/Appetizer', 'Juice', 'Fruit Bar', 'PM Snack']],
+  ['KG - LP', ['Fruit Basket', 'AM Snack', 'Milk', 'Lunch Bread', 'Lunch Main Course', 'Lunch Main Course', 'Lunch Starch/Side', 'Lunch Starch/Side', 'Salad Bar', 'Fruit Bar', 'Soup/Appetizer', 'Juice', 'PM Snack']],
+  ['MS - UP (B-G)', ['Fruit Basket', 'AM Snack', 'Milk', 'Lunch Bread', 'Lunch Main Course', 'Lunch Main Course', 'Lunch Vegetable Side', 'Lunch Starch/Side', 'Lunch Starch/Side', 'Salad Bar', 'Fruit Bar', 'Soup/Appetizer', 'Juice', 'PM Snack']],
+  ['Staff', [...Array(6).fill('Main Dish'), 'Juice', 'Juice', 'Appetizer', 'Appetizer', 'Salad', 'Salad', 'Salad', ...Array(7).fill('Main Dish'), 'Sweets', 'Sweets', 'Bread', 'Bread', 'Beverages', 'Beverages', 'Beverages', 'Option 1', 'Option 1', 'Option 2', 'Option 2', 'Option 3']],
+  ['CEO', ['Main Dish', 'Juice', 'Yogurt', 'Main Dish', 'Salad', 'Juice', 'Snack', 'Bread', 'Snack']],
+];
+const MI_WORDS = ['chicken thighs', 'basmati rice', 'onion', 'garlic', 'tomato paste', 'seven spices', 'olive oil', 'salt', 'black pepper', 'cumin', 'carrot', 'zucchini', 'lemon juice', 'parsley', 'butter', 'full-fat milk', 'all-purpose flour', 'eggs', 'mozzarella cheese', 'canned crushed tomatoes', 'cinnamon', 'bay leaf', 'vegetable stock', 'cardamom', 'dried lime'];
+function miWeek(fileIndex, weekStart) {
+  const rows = [];
+  MI_SECTIONS.forEach(([sheetName, cats], si) => {
+    for (let d = 0; d < 5; d++) {
+      const date = `${String(weekStart + d).padStart(2, '0')}-10-2026`;
+      const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'][d];
+      cats.forEach((category, k) => {
+        const n = rows.length;
+        const served = /fruit bar|fruit basket|salad bar/i.test(category);
+        const len = 3 + ((n * 7) % 18);
+        rows.push({ sheetName, rowNumber: 4 + d * 40 + k, date, weekday, category, dishName: `${LONG[(n + si) % LONG.length]}${k % 4 === 0 ? '' : ` ${k}`}`,
+          layout: si < 3 ? 'school' : si === 3 ? 'staff' : 'ceo', period: /AM Snack|Milk|Juice|Yogurt/.test(category) || (si === 3 && k < 8) ? 'Breakfast' : 'Lunch',
+          fileIndex, servedAsIs: served, ingredients: served ? '' : Array.from({ length: len }, (_, j) => MI_WORDS[(n + j * 3) % MI_WORDS.length]).join(' - '),
+          allergens: served ? '' : ['gluten - dairy', 'dairy', 'egg - gluten', ''][n % 4], basis: n % 4 === 0 ? 'Regional: Kabsa (Saudi)' : 'General',
+          removedTerms: !served && n % 7 === 0 ? [{ segment: 'pine nuts', policy: 'nut' }, { segment: 'chili flakes', policy: 'spicy' }] : [], removedAllergenTerms: [],
+          catalog: !served && n % 5 === 0 ? { itemId: n, name: 'x', updatedAt: '2026-10-02T08:00:00.000Z', updatedBy: 'tetiana' } : null, followsRef: null, unlinked: false });
+      });
+    }
+  });
+  // KG-LP's AM Snack follows Daycare's (same day); Staff's first two lunch mains follow KG-LP's mains.
+  const at = (sheet, date, cat, nth = 0) => rows.filter((r) => r.sheetName === sheet && r.date === date && r.category === cat)[nth];
+  for (const r of rows) {
+    const src = r.sheetName === 'KG - LP' && r.category === 'AM Snack' ? at('Daycare', r.date, 'AM Snack') : null;
+    if (src) { Object.assign(r, { dishName: src.dishName, ingredients: src.ingredients, allergens: src.allergens, followsRef: { fileIndex, sheetName: src.sheetName, rowNumber: src.rowNumber } }); }
+  }
+  for (const r of rows.filter((x) => x.sheetName === 'Staff')) {
+    const i = rows.filter((x) => x.sheetName === 'Staff' && x.date === r.date && x.category === 'Main Dish').indexOf(r) - 6;
+    const src = i === 0 || i === 1 ? at('KG - LP', r.date, 'Lunch Main Course', i) : null;
+    if (src) Object.assign(r, { dishName: src.dishName, ingredients: src.ingredients, allergens: src.allergens, followsRef: { fileIndex, sheetName: src.sheetName, rowNumber: src.rowNumber }, unlinked: i === 1 && r.date.startsWith('05') });
+  }
+  return { fileIndex, fileName: `October week_0${fileIndex + 1}.xlsx`, success: true, failures: [], rows };
+}
+const MI_WEEK = [miWeek(0, 4)];
+const MI_MONTH = [0, 1, 2, 3].map((i) => miWeek(i, 4 + i * 7));
+
 const handlers = {
   prepareRecipeGeneration: () => ({ success: true, fileName: 'September week_01-04_Ingredients.xlsx', failures: [], dishes: PICK_DISHES, estimate: { secondsPerBatch: 65, batchSize: 8 } }),
   // Menu Ingredients history: 12 entries -- a 4-file upload, long names, one incomplete, edited ones.
@@ -214,4 +260,4 @@ const handlers = {
   applyCatalogIngredientsSave: () => ({ saved: Array.from({ length: 41 }, (_, i) => ({ itemId: i, name: 'x' })), failed: [{ itemId: 9, name: 'Lentil Soup', error: 'network error' }],
     conflicts: [{ itemId: 7, name: 'Slow-roasted herb chicken with saffron rice and toasted vermicelli', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], historyError: null }),
 };
-module.exports = { handlers, MI_FILES };
+module.exports = { handlers, MI_FILES, MI_WEEK, MI_MONTH };

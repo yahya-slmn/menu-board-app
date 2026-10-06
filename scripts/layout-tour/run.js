@@ -62,6 +62,7 @@ for (const config of configs) {
     const note = !r.error && r.group === 'rof' && config !== 'mac' && r.vOverflowMain > 0 ? ` (vertical: ${r.vOverflowMain}px, reported only)` : '';
     const size = r.error ? '' : `  main ${r.mainW}px${r.vbar ? `, scrollbar ${r.vbar}px` : ''}`;
     console.log(`  ${problems.length ? 'FAIL' : 'ok  '}  ${r.label.padEnd(36)}${size}${note}${problems.length ? '\n        ' + problems.join('\n        ') : ''}`);
+    if (r.note) console.log(`        ${r.note}`);
     for (const p of problems) failures.push(`${config} / ${r.label}: ${p}`);
   }
   if (consoleErrors.length) console.log(`  console errors (not failed):\n    ${[...new Set(consoleErrors)].slice(0, 10).join('\n    ')}`);

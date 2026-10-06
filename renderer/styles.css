@@ -1768,6 +1768,49 @@ table.items-table.master-items-table th:nth-child(5), table.items-table.master-i
 .mi-share-note { margin-top: 4px; font-size: 11.5px; color: var(--neutral); }
 .mi-share-btn { margin-left: 6px; padding: 0; border: 0; background: none; color: var(--sage); font: inherit; font-size: 11.5px; font-weight: 600; text-decoration: underline; cursor: pointer; }
 .mi-ingredients-input[readonly], .mi-allergens-input[readonly] { background: var(--paper-dim); color: var(--neutral); }
+/* Menu Ingredients review as Build Menu's grid (2026-10-06, miRenderGrid): day tables of the active section, compact
+   two-line ingredients cells with markers, one popover over the open cell, section tabs + history status docked below. */
+.mi-scroll { position: relative; }
+table.day-table.mi-grid { table-layout: fixed; }
+.mi-grid col.mi-col-cat { width: 128px; }
+.mi-grid col.mi-col-dish { width: 24%; }
+.mi-grid col.mi-col-all { width: 150px; }
+.mi-grid td { padding: 4px 10px; vertical-align: top; }
+.day-table.mi-grid thead th { padding: 7px 14px; }
+.mi-grid td.cat-cell { vertical-align: middle; width: auto; }
+.mi-grid .mi-dish { font-size: 13px; }
+.mi-dish-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.3; }
+.mi-ing-cell { position: relative; cursor: pointer; }
+.mi-ing-cell:hover { background: #f6f8f2; }
+.mi-ing-cell:focus-visible, .mi-ing-cell.mi-ing-open { outline: 2px solid var(--sage); outline-offset: -2px; }
+.mi-ing-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12.5px; line-height: 1.32; overflow-wrap: anywhere; }
+.mi-ing-empty, .mi-following .mi-ing-text { color: var(--neutral); font-style: italic; }
+.mi-ing-wrap { display: flex; gap: 6px; align-items: flex-start; }
+.mi-ing-wrap .mi-ing-text { flex: 1 1 auto; min-width: 0; }
+.mi-side { flex: 0 0 76px; display: flex; flex-wrap: wrap; justify-content: flex-end; align-content: flex-start; gap: 3px; }
+.mi-expand { font-size: 12px; line-height: 17px; color: var(--neutral); opacity: .55; padding: 0 2px; }
+.mi-ing-cell:hover .mi-expand, .mi-ing-cell:focus-visible .mi-expand { opacity: 1; }
+.mi-mark { font-size: 10.5px; line-height: 1.5; border-radius: 5px; padding: 0 6px; border: 1px solid var(--line); color: var(--neutral); background: var(--paper); white-space: nowrap; }
+.mi-mark-removed { background: var(--danger); border-color: var(--danger); color: white; font-weight: 700; }
+.mi-mark-catalog { color: var(--sage-dark); background: var(--sage-fill); border-color: var(--sage-fill); }
+.mi-mark-same { color: var(--cold-kitchen); }
+.mi-all-cell input { width: 100%; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 12.5px; }
+.mi-all-cell input[readonly] { background: var(--paper-dim); color: var(--neutral); }
+.mi-day-file { margin-left: 12px; font-size: 12px; opacity: .85; font-family: var(--font-ui); font-weight: 400; }
+.mi-file-failed { margin: 0 0 12px; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--danger); font-size: 13px; }
+.mi-pop { position: absolute; z-index: 20; box-sizing: border-box; background: var(--surface); border: 1px solid var(--sage); border-radius: 10px; box-shadow: 0 12px 32px rgba(37,59,52,.18); padding: 10px 12px; }
+.mi-pop-head { font-size: 12px; color: var(--neutral); margin-bottom: 6px; }
+.mi-pop-head strong { font-size: 13.5px; color: var(--ink); margin-right: 6px; }
+.mi-pop-text { display: block; width: 100%; box-sizing: border-box; resize: none; overflow-y: auto; font: inherit; font-size: 13px; line-height: 1.45; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.mi-pop-text[readonly] { background: var(--paper-dim); color: var(--neutral); }
+.mi-pop-notes:not(:empty) { margin-top: 6px; }
+.mi-pop-foot { margin-top: 6px; font-size: 11px; color: var(--neutral); }
+.mi-sheet-strip { justify-content: space-between; align-items: center; overflow: hidden; }
+.mi-sheet-tabs { display: flex; gap: 6px; overflow-x: auto; min-width: 0; }
+.mi-sheet-count { margin-left: 4px; opacity: .7; font-weight: 400; }
+.mi-strip-status { display: flex; gap: 10px; align-items: center; flex: none; font-size: 12.5px; color: var(--neutral); }
+.mi-strip-status .primary { padding: 6px 14px; font-size: 12.5px; }
+.mi-strip-warn { color: var(--accent); font-weight: 600; }
 /* Menu Ingredients history (2026-10-06): Generator | History tabs, the save line under the controls, the History list. The
    shared .items-table fixes a 740px minimum and widths by column position: reset here. */
 .mi-tabs { margin-bottom: 16px; max-width: 320px; }

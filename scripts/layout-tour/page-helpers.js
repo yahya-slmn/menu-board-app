@@ -17,6 +17,8 @@ window.__t = {
       if (/(auto|scroll)/.test(cs.overflowX) && el.scrollWidth > el.clientWidth + 1) hs.push(this.desc(el) + ' +' + (el.scrollWidth - el.clientWidth));
     }
     r.hScrollers = hs.filter(s => !s.startsWith('main#main'));
+    // A step may leave a note (measurements) for the report: window.__tourNote, printed beside the step, then cleared.
+    r.note = window.__tourNote || ''; window.__tourNote = '';
     return r;
   },
 };

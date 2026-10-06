@@ -4203,6 +4203,10 @@ async function renderExportAllView(main) {
 // unchanged since opened), exported again. History never writes to the Dish Catalog.
 // ============================================================
 function renderMenuIngredientsView(main) {
+  // The review is laid out like Build Menu: a scroll area plus section tabs docked at the bottom (build-mode). Every other
+  // state of this screen is a plain page.
+  main.classList.remove('build-mode');
+  miClosePop();
   if (state.catalogIngredientsSave.open) return renderCatalogIngredientsSaveView(main);
   const mi = state.menuIngredients;
   if (mi.tab === 'history') return renderMiHistoryList(main);
@@ -4211,7 +4215,7 @@ function renderMenuIngredientsView(main) {
   const totalRows = exportableFiles.reduce((sum, f) => sum + f.rows.length, 0);
   const catalogRows = exportableFiles.reduce((sum, f) => sum + f.rows.filter(r => r.catalog).length, 0);
 
-  main.innerHTML = `
+  const page = `
     <div class="topbar">
       <div><h1>Menu Ingredients Generator</h1><span class="page-description">Upload a menu, review AI-suggested ingredients, export. Approved lists can be saved to the Dish Catalog.</span></div>
     </div>
@@ -4229,6 +4233,10 @@ function renderMenuIngredientsView(main) {
     ${hasUpload ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">${totalRows} dish row(s) parsed across ${exportableFiles.length} of ${mi.files.length} file(s)${catalogRows ? ` · ${catalogRows} from the Dish Catalog (saved, approved lists -- no AI)` : ''}</div>` : ''}
     <div id="mi-review"></div>
   `;
+  main.classList.toggle('build-mode', hasUpload);
+  main.innerHTML = hasUpload
+    ? `<div class="build-scroll mi-scroll" id="mi-scroll">${page}</div><div class="builder-tabs mi-sheet-strip" id="mi-sheet-strip" role="tablist" aria-label="Menu sections"></div>`
+    : page;
   // Per-file `failures` (layout-inference notes, and any dish the AI genuinely couldn't suggest
   // anything for) is intentionally not rendered here anymore -- it's still returned from
   // parse-and-suggest-menu-ingredients and logged there (main.js, log.warn), just not shown as
@@ -4277,6 +4285,8 @@ function renderMenuIngredientsView(main) {
     // carrying that much retained DOM can feel unresponsive everywhere, not just in this view --
     // easy to mistake for the whole app being frozen.
     document.getElementById('mi-review').innerHTML = '';
+    document.getElementById('mi-sheet-strip')?.replaceChildren();
+    miClosePop();
     miLog('old review table(s) cleared, upload button disabled');
 
     const uploadToken = crypto.randomUUID();
@@ -4413,11 +4423,6 @@ function renderMenuIngredientsView(main) {
   }
 }
 
-// Wraps the existing per-file renderMenuIngredientsReview (unchanged below -- it already only
-// needs a container + a rows array, so it works as-is per file) in a heading per uploaded file, so
-// N files uploaded together each get their own clearly-labeled review table rather than one
-// table with no indication of which file a row came from. A file that failed to parse entirely
-// (f.error set, f.rows empty) shows its error inline instead of an empty table.
 // ============================================================
 // MENU INGREDIENTS HISTORY (2026-10-06; main.js mi-history-*, lib/menuIngredientsHistory.js). Every generation is saved in the
 // background (who, when, the review rows, the original workbooks); the History tab reopens an entry into the same review,
@@ -4450,6 +4455,7 @@ function miMarkDirty() {
 
 // The line under the controls saying where this review stands in history, with Save changes when it has unsaved edits.
 function miRenderHistoryBar() {
+  miRenderStripStatus();
   const el = document.getElementById('mi-history-bar');
   const h = state.menuIngredients.history;
   if (!el) return;
@@ -4466,6 +4472,9 @@ function miRenderHistoryBar() {
   else if (h.dirty) text = '<strong>Unsaved changes</strong> to this history entry.';
   else text = `Saved to history${h.version > 1 ? ` · version ${h.version}` : ''}.`;
   const warn = h.conflict || ['failed', 'incomplete', 'deleted'].includes(h.status);
+  // In the review grid the docked strip carries the everyday status and Save changes; up here only a warning, so typing in
+  // a cell never makes this line change height and push the grid.
+  if (document.getElementById('mi-sheet-strip') && !warn) { el.innerHTML = ''; return; }
   el.innerHTML = `<div class="mi-history-bar ${warn ? 'mi-history-warn' : ''}" role="status"><span>${text}</span>
     ${h.conflict ? `<button type="button" class="secondary" id="mi-hist-as-new">Save mine as a new history entry</button>
       <button type="button" class="nm-link" id="mi-hist-theirs">Open their version</button>`
@@ -4476,6 +4485,20 @@ function miRenderHistoryBar() {
     if (!confirm('Open the saved version? Your unsaved edits on screen will be dropped.')) return;
     miOpenHistoryEntry(h.runId, { force: true });
   });
+}
+
+// The docked strip's right end: a short history status and Save changes, always in reach while scrolling a long section.
+function miRenderStripStatus() {
+  const el = document.getElementById('mi-strip-status');
+  const h = state.menuIngredients.history;
+  if (!el) return;
+  if (!h || !h.status || h.status === 'unavailable') { el.innerHTML = ''; return; }
+  const canSave = h.runId != null && h.status !== 'deleted' && h.status !== 'failed' && !h.conflict;
+  const text = h.conflict ? 'Not saved: changed by someone else' : h.status === 'pending' ? 'Saving to history…' : h.status === 'failed' ? 'Not saved to history'
+    : h.status === 'deleted' ? 'History entry deleted' : h.saving ? 'Saving…' : h.dirty ? 'Unsaved changes' : 'Saved to history';
+  const warn = h.conflict || ['failed', 'incomplete', 'deleted'].includes(h.status) || h.dirty;
+  el.innerHTML = `<span class="${warn ? 'mi-strip-warn' : ''}">${text}</span>${h.dirty && canSave ? `<button type="button" class="primary" id="mi-strip-save" ${h.saving || h.status === 'pending' ? 'disabled' : ''}>Save changes</button>` : ''}`;
+  el.querySelector('#mi-strip-save')?.addEventListener('click', miSaveHistoryEdits);
 }
 
 async function miSaveHistoryEdits() {
@@ -4551,6 +4574,7 @@ function miWireTabs(main) {
 
 // The History tab: every saved generation, newest first.
 async function renderMiHistoryList(main) {
+  main.classList.remove('build-mode');
   main.innerHTML = `
     <div class="topbar">
       <div><h1>Menu Ingredients Generator</h1><span class="page-description">Every generation is saved here: reopen it, edit, export it again</span></div>
@@ -4604,20 +4628,8 @@ async function renderMiHistoryList(main) {
 }
 
 function renderMenuIngredientsFiles(container, files) {
-  const multi = files.length > 1;
-  container.innerHTML = files.map((f, i) => `
-    <div class="mi-file-block" style="margin-bottom:28px;">
-      ${multi ? `
-        <div style="font-weight:700; font-size:15px; margin-bottom:8px; padding-bottom:6px; border-bottom:2px solid var(--line);">
-          ${f.fileName}
-          ${f.rows && f.rows.length ? '' : `<span style="font-weight:400; font-size:12.5px; color:var(--danger, #c0392b); margin-left:8px;">${(f.error || 'No rows found').replace(/</g, '&lt;')}</span>`}
-        </div>
-      ` : ''}
-      <div id="mi-file-review-${i}"></div>
-    </div>
-  `).join('');
   // One lookup across every file of the upload: a row may follow a row of another file (same day, another section).
-  const ctx = { container, files, byKey: new Map(), followersOf: new Map(), multi };
+  const ctx = { container, files, byKey: new Map(), followersOf: new Map(), multi: files.length > 1 };
   for (const f of files) for (const r of f.rows || []) ctx.byKey.set(miRowKey(r), r);
   for (const r of ctx.byKey.values()) {
     if (!r.followsRef) continue;
@@ -4625,20 +4637,258 @@ function renderMenuIngredientsFiles(container, files) {
     if (!ctx.followersOf.has(k)) ctx.followersOf.set(k, []);
     ctx.followersOf.get(k).push(r);
   }
-  files.forEach((f, i) => {
-    if (f.rows && f.rows.length) renderMenuIngredientsReview(document.getElementById(`mi-file-review-${i}`), f.rows, ctx);
-    else if (!multi) {
-      document.getElementById(`mi-file-review-${i}`).innerHTML = `<div style="color:var(--danger, #c0392b); font-size:13px;">${(f.error || 'No rows found').replace(/</g, '&lt;')}</div>`;
-    }
-  });
+  // The section tabs, in the files' own order (a 4-week upload puts every file's days of a section under one tab).
+  ctx.sheets = [...new Set(files.flatMap(f => (f.rows || []).map(r => r.sheetName)))];
+  const mi = state.menuIngredients;
+  if (!ctx.sheets.includes(mi.activeSheet)) mi.activeSheet = ctx.sheets[0] || null;
+  miCtx = ctx;
+  miClosePop();
+  miRenderSheetStrip(ctx);
+  miRenderGrid(ctx);
+  if (!container.dataset.miWired) { container.dataset.miWired = '1'; miWireGrid(container); }
 }
 
-// Groups the flat rows list by sheet (section) then by date, preserving the source file's own
-// row order (both Maps fill in first-seen order, which is already sheet-by-sheet/row-by-row scan
-// order from lib/menuIngredients.js -- no re-sorting needed to match "the source file's own
-// structure"). Each ingredients/allergens <input> mutates its own row object's `ingredients`/
-// `allergens` field in place on input (see the delegated listener below) -- since
-// exportMenuIngredients is later called with this exact same rows array/objects.
+// ============================================================
+// The review as Build Menu's grid (2026-10-06): one section at a time, its days stacked as day tables (category cells
+// spanning their dishes, one dish per row), section tabs docked at the bottom (.main.build-mode / .build-scroll /
+// .builder-tabs, the classes Build Menu and the AI Menu Generator use). Ingredients cells are COMPACT (two lines, clipped),
+// with markers for what used to be note lines (removed terms -- prominent red --, Dish Catalog, regional basis, "Same as",
+// served as is). Clicking a cell (or its corner icon, or Enter / Space on it) opens ONE popover exactly over the cell with
+// the full text, editable, and every note; Esc / Enter / clicking outside closes it, Tab moves to the next cell. Edits go
+// into the same row objects as before (export, history and "Same as" propagation unchanged). Only the active section is
+// drawn, so 1,500 rows never become 3,000 inputs.
+// ============================================================
+let miCtx = null;
+let miPop = null; // { row, cell }
+
+function miRenderSheetStrip(ctx) {
+  const strip = document.getElementById('mi-sheet-strip');
+  if (!strip) return;
+  const mi = state.menuIngredients;
+  const count = (s) => ctx.files.reduce((n, f) => n + (f.rows || []).filter(r => r.sheetName === s).length, 0);
+  strip.innerHTML = `<div class="mi-sheet-tabs">${ctx.sheets.map(s => `<button type="button" class="nav-btn ${s === mi.activeSheet ? 'active' : ''}" role="tab" aria-selected="${s === mi.activeSheet}" data-mi-sheet="${miEsc(s)}">${miEsc(s)} <span class="mi-sheet-count">${count(s)}</span></button>`).join('')}</div>
+    <div class="mi-strip-status" id="mi-strip-status"></div>`;
+  strip.querySelectorAll('[data-mi-sheet]').forEach(b => b.addEventListener('click', () => {
+    if (mi.activeSheet === b.dataset.miSheet) return;
+    mi.activeSheet = b.dataset.miSheet;
+    miClosePop();
+    miRenderSheetStrip(ctx);
+    miRenderGrid(ctx);
+    const scroll = document.getElementById('mi-scroll');
+    const grid = document.getElementById('mi-review');
+    if (scroll && grid) scroll.scrollTop = Math.max(0, grid.offsetTop - 12);
+  }));
+  miRenderHistoryBar();
+}
+
+// Day order: dated days by date across every file, then weekday-only, as the Recipe Generator's lists (sortDayGroups).
+function miRenderGrid(ctx) {
+  const mi = state.menuIngredients;
+  const failed = ctx.files.filter(f => !(f.rows && f.rows.length));
+  const byDay = new Map();
+  for (const f of ctx.files) for (const r of f.rows || []) {
+    if (r.sheetName !== mi.activeSheet) continue;
+    const label = [r.weekday, r.date].filter(Boolean).join(' ') || null;
+    const key = `${label}|${ctx.multi ? r.fileIndex : ''}`;
+    if (!byDay.has(key)) byDay.set(key, { label, fileName: f.fileName, rows: [] });
+    byDay.get(key).rows.push(r);
+  }
+  const days = sortDayGroups([...byDay.values()].map(d => [d.label, d])).map(([, d]) => d);
+  ctx.container.innerHTML = `
+    ${failed.map(f => `<div class="mi-file-failed">${miEsc(f.fileName)}: ${miEsc(f.error || 'No rows found')} -- not in this review or the export.</div>`).join('')}
+    ${days.map(d => miDayTableHtml(d, ctx)).join('') || '<div class="empty-state">No rows in this section.</div>'}`;
+}
+
+function miDayTableHtml(day, ctx) {
+  const [weekday, ...rest] = String(day.label || '').split(' ');
+  const rows = day.rows;
+  return `<div class="day-table-wrap mi-day"><table class="day-table mi-grid">
+    <colgroup><col class="mi-col-cat" /><col class="mi-col-dish" /><col class="mi-col-ing" /><col class="mi-col-all" /></colgroup>
+    <thead><tr><th colspan="4"><span>${miEsc(weekday || 'No day recorded')}</span><span class="date">${miEsc(rest.join(' '))}</span>${ctx.multi ? `<span class="mi-day-file">${miEsc(day.fileName)}</span>` : ''}</th></tr></thead>
+    <tbody>${rows.map((row, i) => {
+      const first = i === 0 || rows[i - 1].category !== row.category;
+      let span = 1;
+      if (first) while (rows[i + span] && rows[i + span].category === row.category) span++;
+      const key = miEsc(miRowKey(row));
+      return `<tr>
+        ${first ? `<td class="cat-cell" rowspan="${span}">${miEsc(row.category || '')}</td>` : ''}
+        <td class="mi-dish"><div class="mi-dish-name" title="${miEsc(row.dishName)}">${miEsc(row.dishName)}</div></td>
+        <td class="mi-ing-cell ${miFollowing(row) ? 'mi-following' : ''}" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" data-key="${key}"
+          aria-label="Ingredients of ${miEsc(row.dishName)}: ${miEsc(row.ingredients || (row.servedAsIs ? 'served as is' : 'empty'))}">${miIngCellInner(row, ctx)}</td>
+        <td class="mi-all-cell"><input class="mi-allergens-input" data-file="${row.fileIndex}" data-sheet="${miEsc(row.sheetName)}" data-row="${row.rowNumber}" value="${miEsc(row.allergens || '')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} aria-label="Allergens of ${miEsc(row.dishName)}" /></td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+// The compact cell: two lines of text (clipped), the markers, the corner expander.
+function miIngCellInner(row, ctx) {
+  const removed = row.followsRef ? [] : [...(row.removedTerms || []), ...(row.removedAllergenTerms || [])];
+  const marks = [];
+  if (removed.length) marks.push(`<span class="mi-mark mi-mark-removed" title="Removed by the school's rules: ${miEsc(removed.map(r => `${r.segment} (${(MI_POLICY_NOTES[r.policy] || [r.policy])[0]})`).join(', '))} -- open the cell to see or add back">⚠ ${removed.length}</span>`);
+  if (row.followsRef) {
+    const source = ctx.byKey.get(miRowKey(row.followsRef));
+    if (source) marks.push(`<span class="mi-mark mi-mark-same" title="${row.unlinked ? `Edited for this section (was the same as ${miEsc(miSourceLabel(source, row, ctx))})` : `Same as ${miEsc(miSourceLabel(source, row, ctx))} -- not repeated`}">${row.unlinked ? 'edited' : 'same as'}</span>`);
+  } else if (row.catalog) marks.push(`<span class="mi-mark mi-mark-catalog" title="From the Dish Catalog${row.catalog.updatedBy ? ` · saved by ${miEsc(row.catalog.updatedBy)}` : ''}">catalog</span>`);
+  else if (row.basis && !/^general/i.test(row.basis)) marks.push(`<span class="mi-mark mi-mark-basis" title="${miEsc(row.basis)}">regional</span>`);
+  const text = row.ingredients
+    ? `<div class="mi-ing-text">${miEsc(row.ingredients)}</div>`
+    : `<div class="mi-ing-text mi-ing-empty">${row.servedAsIs ? 'Served as is: no ingredients generated' : 'empty -- click to add'}</div>`;
+  // Markers sit in a narrow column beside the text (never a line of their own), so a cell is never taller than two lines.
+  return `<div class="mi-ing-wrap">${text}<div class="mi-side">${marks.join('')}<span class="mi-expand" aria-hidden="true" title="Expand">⤢</span></div></div>`;
+}
+
+// An edit to a row's ingredients / allergens: into the row, into every row still following it (on screen and in the data the
+// export sends), and "Unsaved changes" for history.
+function miSetField(row, field, value, ctx) {
+  if (!row || miFollowing(row)) return;
+  row[field] = value;
+  miMarkDirty();
+  const touched = [row];
+  for (const f of ctx.followersOf.get(miRowKey(row)) || []) {
+    if (f.unlinked) continue;
+    f[field] = value;
+    touched.push(f);
+  }
+  for (const r of touched) {
+    if (field === 'ingredients') {
+      const cell = ctx.container.querySelector(`.mi-ing-cell[data-key="${CSS.escape(miRowKey(r))}"]`);
+      if (cell && !(miPop && miPop.row === r)) cell.innerHTML = miIngCellInner(r, ctx);
+    } else if (r !== row) {
+      const input = ctx.container.querySelector(`.mi-allergens-input[data-file="${r.fileIndex}"][data-sheet="${CSS.escape(r.sheetName)}"][data-row="${r.rowNumber}"]`);
+      if (input) input.value = value;
+    }
+  }
+}
+
+function miWireGrid(container) {
+  container.addEventListener('input', (e) => {
+    if (!e.target.classList.contains('mi-allergens-input') || !miCtx) return;
+    const row = miCtx.byKey.get(`${e.target.dataset.file}|${e.target.dataset.sheet}|${e.target.dataset.row}`);
+    miSetField(row, 'allergens', e.target.value, miCtx);
+  });
+  container.addEventListener('click', (e) => {
+    const cell = e.target.closest('.mi-ing-cell');
+    if (cell) miOpenPop(cell);
+  });
+  container.addEventListener('keydown', (e) => {
+    const cell = e.target.closest && e.target.closest('.mi-ing-cell');
+    if (cell && e.target === cell && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); miOpenPop(cell); }
+  });
+  // Clicking outside the open popover closes it (edits are already in the row).
+  document.addEventListener('pointerdown', (e) => {
+    if (!miPop) return;
+    const pop = document.getElementById('mi-pop');
+    if (pop && pop.contains(e.target)) return;
+    if (e.target.closest && e.target.closest('.mi-ing-cell') === miPop.cell) return;
+    miClosePop();
+  }, true);
+  window.addEventListener('resize', () => miClosePop());
+}
+
+function miOpenPop(cell) {
+  const ctx = miCtx;
+  const row = ctx && ctx.byKey.get(cell.dataset.key);
+  if (!row) return;
+  if (miPop && miPop.row === row) return;
+  miClosePop();
+  const scroll = document.getElementById('mi-scroll');
+  if (!scroll) return;
+  const following = miFollowing(row);
+  const pop = document.createElement('div');
+  pop.id = 'mi-pop';
+  pop.className = 'mi-pop';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', `Ingredients of ${row.dishName}`);
+  pop.innerHTML = `
+    <div class="mi-pop-head"><strong>${miEsc(row.dishName)}</strong> <span>${miEsc(row.category || '')} · ${miEsc(row.sheetName)}${row.weekday ? ` · ${miEsc(row.weekday)} ${miEsc(row.date || '')}` : ''}</span></div>
+    <textarea class="mi-pop-text" rows="3" ${following ? 'readonly aria-readonly="true"' : ''} aria-label="Ingredients, separated by dashes">${miEsc(row.ingredients || '')}</textarea>
+    <div class="mi-pop-notes">
+      ${miShareNote(row, ctx)}
+      ${row.servedAsIs ? '<div class="mi-basis">Served as is: no ingredients generated</div>' : ''}
+      ${row.followsRef ? '' : `${row.catalog ? miCatalogNote(row.catalog) : row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}${miRemovedNotes(row.removedAllergenTerms)}`}
+    </div>
+    <div class="mi-pop-foot">Enter or Esc closes · Tab moves to the next dish · edits are kept</div>`;
+  scroll.appendChild(pop);
+  miPop = { row, cell };
+  cell.setAttribute('aria-expanded', 'true');
+  cell.classList.add('mi-ing-open');
+  miPositionPop();
+  const ta = pop.querySelector('textarea');
+  const fit = () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(ta.scrollHeight + 2, 190)}px`; };
+  fit();
+  miPositionPop();
+  ta.addEventListener('input', () => {
+    const clean = ta.value.replace(/[\r\n]+/g, ' ');
+    if (clean !== ta.value) ta.value = clean;
+    miSetField(row, 'ingredients', clean, ctx);
+    fit();
+    miPositionPop();
+  });
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); miClosePop({ refocus: true }); }
+    else if (e.key === 'Tab') {
+      e.preventDefault();
+      const cells = [...ctx.container.querySelectorAll('.mi-ing-cell')];
+      const next = cells[cells.indexOf(cell) + (e.shiftKey ? -1 : 1)];
+      miClosePop({ refocus: !next });
+      if (next) { next.focus(); miOpenPop(next); }
+    }
+  });
+  // "Edit for this section" / "Use Daycare's again" inside the popover (the same rules as before).
+  pop.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-mi-unlink], [data-mi-relink]');
+    if (!btn) return;
+    miMarkDirty();
+    if (btn.dataset.miUnlink) row.unlinked = true;
+    else {
+      const source = ctx.byKey.get(miRowKey(row.followsRef));
+      row.unlinked = false;
+      row.ingredients = source.ingredients;
+      row.allergens = source.allergens;
+    }
+    const key = miRowKey(row);
+    miClosePop();
+    miRenderGrid(ctx);
+    const again = ctx.container.querySelector(`.mi-ing-cell[data-key="${CSS.escape(key)}"]`);
+    if (again) { again.focus(); miOpenPop(again); }
+  });
+  if (!following) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } else pop.querySelector('button, textarea').focus();
+}
+
+// Exactly over the cell, at least 460px wide, kept inside the scroll area's VISIBLE part: its clientWidth excludes a classic
+// (Windows) scrollbar, so the popover never slides under it; when there is no room below, it moves up to stay whole.
+function miPositionPop() {
+  const pop = document.getElementById('mi-pop');
+  const scroll = document.getElementById('mi-scroll');
+  if (!pop || !scroll || !miPop) return;
+  const gap = 8;
+  const s = scroll.getBoundingClientRect();
+  const c = miPop.cell.getBoundingClientRect();
+  const width = Math.min(Math.max(c.width, 460), scroll.clientWidth - 2 * gap);
+  let left = c.left - s.left + scroll.scrollLeft;
+  const maxLeft = scroll.scrollLeft + scroll.clientWidth - gap - width;
+  left = Math.max(scroll.scrollLeft + gap, Math.min(left, maxLeft));
+  pop.style.width = `${width}px`;
+  pop.style.left = `${left}px`;
+  let top = c.top - s.top + scroll.scrollTop;
+  const bottom = scroll.scrollTop + scroll.clientHeight - gap;
+  if (top + pop.offsetHeight > bottom) top = Math.max(scroll.scrollTop + gap, bottom - pop.offsetHeight);
+  pop.style.top = `${top}px`;
+}
+
+function miClosePop({ refocus = false } = {}) {
+  if (!miPop) return;
+  const { row, cell } = miPop;
+  miPop = null;
+  document.getElementById('mi-pop')?.remove();
+  if (cell && cell.isConnected) {
+    cell.setAttribute('aria-expanded', 'false');
+    cell.classList.remove('mi-ing-open');
+    if (miCtx) cell.innerHTML = miIngCellInner(row, miCtx);
+    if (refocus) cell.focus();
+  }
+}
+
 // A row whose list is the Dish Catalog's saved, approved one (M3, lib/menuIngredientsCatalog.js) instead of an AI
 // suggestion -- shown in place of the AI's basis line; the school's rules were still applied to it for this row.
 function miCatalogNote(c) {
@@ -4677,100 +4927,6 @@ const miRowKey = (r) => `${r.fileIndex}|${r.sheetName}|${r.rowNumber}`;
 function miSourceLabel(source, row, ctx) {
   const file = source.fileIndex !== row.fileIndex && ctx.multi ? ` (${(ctx.files.find((f) => f.fileIndex === source.fileIndex) || {}).fileName || 'another file'})` : '';
   return `${source.sheetName}'s ${source.dishName}${file}`;
-}
-
-function renderMenuIngredientsReview(container, rows, ctx) {
-  const bySheet = new Map();
-  for (const row of rows) {
-    if (!bySheet.has(row.sheetName)) bySheet.set(row.sheetName, new Map());
-    const byDate = bySheet.get(row.sheetName);
-    const dateKey = `${row.date}__${row.weekday}`;
-    if (!byDate.has(dateKey)) byDate.set(dateKey, []);
-    byDate.get(dateKey).push(row);
-  }
-
-  container.innerHTML = [...bySheet.entries()].map(([sheetName, byDate]) => `
-    <div class="day-card" style="margin-bottom:18px;">
-      <div class="day-head"><span>${sheetName}</span></div>
-      <div style="padding:12px 18px;">
-        ${[...byDate.entries()].map(([dateKey, dayRows]) => {
-          const [date, weekday] = dateKey.split('__');
-          return `
-            <div style="margin-bottom:16px;">
-              <div style="font-weight:600; color:var(--sage-dark); margin-bottom:6px;">${weekday.toUpperCase()} &middot; ${date}</div>
-              <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
-                <thead>
-                  <tr>
-                    <th style="width:160px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Category</th>
-                    <th style="width:260px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Dish</th>
-                    <th style="text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Ingredients</th>
-                    <th style="width:220px; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:11px; color:var(--neutral); text-transform:uppercase; letter-spacing:0.04em;">Allergens</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${dayRows.map(row => `
-                    <tr>
-                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.category || ''}</td>
-                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">${row.dishName}</td>
-                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
-                        <input class="mi-ingredients-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.ingredients || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
-                        ${miShareNote(row, ctx)}
-                        ${row.servedAsIs ? '<div class="mi-basis">Served as is: no ingredients generated</div>' : ''}${row.followsRef ? '' : `${row.catalog ? miCatalogNote(row.catalog) : row.basis ? `<div class="mi-basis">${miEsc(row.basis)}</div>` : ''}${miRemovedNotes(row.removedTerms)}`}
-                      </td>
-                      <td style="padding:6px 8px; border-bottom:1px solid var(--line);">
-                        <input class="mi-allergens-input" data-file="${row.fileIndex}" data-sheet="${sheetName}" data-row="${row.rowNumber}" value="${(row.allergens || '').replace(/"/g, '&quot;')}" ${miFollowing(row) ? 'readonly aria-readonly="true"' : ''} style="width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:6px; font-family:inherit; font-size:13px;" />
-                        ${row.followsRef ? '' : miRemovedNotes(row.removedAllergenTerms)}
-                      </td>
-                    </tr>
-                  `).join('')}
-                </tbody>
-              </table>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    </div>
-  `).join('');
-
-  // One delegated listener on the container instead of one per <input> -- at the scale a large
-  // menu file produces (thousands of rows), attaching a listener per row was itself a meaningful
-  // chunk of the retained-DOM weight this view can build up across uploads (see the comment above
-  // the innerHTML clear in renderMenuIngredientsView). A single listener that checks e.target
-  // scales to any row count at effectively zero added cost per row. Handles both the ingredients
-  // and allergens inputs the same way, keyed off which class actually fired.
-  container.addEventListener('input', (e) => {
-    const isIngredients = e.target.classList.contains('mi-ingredients-input');
-    const isAllergens = e.target.classList.contains('mi-allergens-input');
-    if (!isIngredients && !isAllergens) return;
-    const row = ctx.byKey.get(`${e.target.dataset.file}|${e.target.dataset.sheet}|${e.target.dataset.row}`);
-    if (!row || miFollowing(row)) return;
-    const field = isIngredients ? 'ingredients' : 'allergens';
-    row[field] = e.target.value;
-    miMarkDirty();
-    // Every row still following this one takes the new text -- in the data the export sends, and on screen.
-    for (const f of ctx.followersOf.get(miRowKey(row)) || []) {
-      if (f.unlinked) continue;
-      f[field] = row[field];
-      const input = ctx.container.querySelector(`.mi-${field}-input[data-file="${f.fileIndex}"][data-sheet="${CSS.escape(f.sheetName)}"][data-row="${f.rowNumber}"]`);
-      if (input) input.value = row[field];
-    }
-  });
-  container.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-mi-unlink], [data-mi-relink]');
-    if (!btn) return;
-    const row = ctx.byKey.get(btn.dataset.miUnlink || btn.dataset.miRelink);
-    if (!row) return;
-    miMarkDirty();
-    if (btn.dataset.miUnlink) {
-      row.unlinked = true; // her own copy now: it keeps the current text and becomes editable
-    } else {
-      const source = ctx.byKey.get(miRowKey(row.followsRef));
-      row.unlinked = false;
-      row.ingredients = source.ingredients;
-      row.allergens = source.allergens;
-    }
-    renderMenuIngredientsFiles(ctx.container, ctx.files);
-  });
 }
 
 const miFollowing = (row) => !!row.followsRef && !row.unlinked;
