@@ -4,3 +4,6 @@ supabase/.temp/
 
 # One-off local backups (e.g. Dough Shapes photos before removal)
 backups/
+
+# macOS Finder folder-view files (rewritten by Finder on its own)
+.DS_Store
