@@ -14,6 +14,7 @@
 // Deploy: `supabase functions deploy estimate-staff-main-attributes --use-api`.
 
 import Anthropic from "npm:@anthropic-ai/sdk";
+import { requireUser } from "../_shared/requireUser.ts";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 const MAX_ITEMS = 150;
@@ -73,6 +74,9 @@ function ok(body: Record<string, unknown>) {
 }
 
 Deno.serve(async (req) => {
+  // Signed-in users only, before anything else (see _shared/requireUser.ts).
+  const denied = await requireUser(req);
+  if (denied) return denied;
   if (req.method !== "POST") return ok({ success: false, error: "Method not allowed" });
   if (!ANTHROPIC_API_KEY) return ok({ success: false, error: "Server misconfigured: ANTHROPIC_API_KEY not set" });
   let body: { items?: Item[] };
