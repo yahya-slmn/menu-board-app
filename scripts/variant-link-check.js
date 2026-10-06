@@ -6,10 +6,14 @@
 //   C. relinkRenamedRow: same name -> nothing; renamed -> the new name's dish by the same rule; the old version keeps its
 //      list and calories; a row whose version changed meanwhile is not moved.
 //   D. a failure throws and leaves the row as it was (saved, unlinked).
+//   F. relinkOnEdit (Edit Item's save, 2026-10-06): a row with no version saved WITHOUT a rename is linked like a new row
+//      (joins its dish's only version / a new dish / a new version when 2+); renamed rows behave exactly as relinkRenamedRow
+//      (an unlinked row goes to the new name's dish); a linked row keeping its name is untouched; a row linked meanwhile is
+//      kept; a failure throws and leaves the row saved and unlinked.
 //   E. 2,000 random catalogs: the preview's prediction (planLinks) equals what linkNewRow does, every row ends on a version
 //      of its own name's dish, and nothing but menu_items.dish_variant_id changes on a row.
 // No login, no Supabase.
-const { nameKey, chooseVersion, planLinks, linkNewRow, relinkRenamedRow } = require('../lib/variantLink');
+const { nameKey, chooseVersion, planLinks, linkNewRow, relinkRenamedRow, relinkOnEdit } = require('../lib/variantLink');
 
 const failures = [];
 let count = 0;
@@ -134,6 +138,45 @@ const masterOfV = (t, vid) => t.dish_variants.find((v) => v.id === vid)?.master_
     threw = false;
     try { await linkNewRow({ db: db2, rowId: 4, name: 'Shakshuka', who: 'x' }); } catch { threw = true; }
     expect([threw, vOf(t2, 4), t2.dish_variants.length, t2.master_items.length], [true, null, 3, 3], 'D2 link write fails -> throws, the new version and master removed');
+  }
+
+  // F. Edit Item's save: link a row that has no version (relinkOnEdit)
+  {
+    const t = base(); const db = fakeDb(t);
+    const r1 = await relinkOnEdit({ db, rowId: 2, oldName: '  lentil   SOUP ', newName: '  lentil   SOUP ', fromVariantId: null, who: 'chef' });
+    expect([r1.moved, r1.via, r1.outcome, r1.variantId, vOf(t, 2)], [true, 'link', 'joined', 10, 10], 'F1 unlinked, not renamed -> joins its dish\'s only version');
+    expect(t.dish_variants.find((v) => v.id === 10).ingredients_text, 'lentils - onion', 'F1 the joined version keeps its list');
+    const r2 = await relinkOnEdit({ db, rowId: 4, oldName: 'Shakshuka', newName: 'Shakshuka', fromVariantId: null, who: 'chef' });
+    expect([r2.moved, r2.via, r2.outcome, t.master_items.length], [true, 'link', 'new-dish', 4], 'F2 unlinked, a dish not in Master Items yet -> new master item + version');
+    const r3 = await relinkOnEdit({ db, rowId: 3, oldName: 'Macaroni & Cheese', newName: 'Macaroni & Cheese', fromVariantId: null, who: 'chef' });
+    expect([r3.moved, r3.outcome, [20, 21].includes(r3.variantId), masterOfV(t, r3.variantId)], [true, 'new-version', false, 2], 'F3 unlinked, a dish with 2 versions -> a new empty version of it');
+    const r4 = await relinkOnEdit({ db, rowId: 1, oldName: 'Lentil Soup', newName: 'Lentil Soup', fromVariantId: 10, who: 'chef' });
+    expect([r4, vOf(t, 1)], [{ moved: false, unchanged: true }, 10], 'F4 linked, not renamed -> untouched');
+    const before = JSON.stringify(t);
+    const r5 = await relinkOnEdit({ db, rowId: 1, oldName: 'Lentil  soup', newName: 'lentil soup', fromVariantId: 10, who: 'chef' });
+    expect([r5.unchanged, JSON.stringify(t) === before], [true, true], 'F5 a case / spacing change is not a rename -> nothing written');
+  }
+  {
+    // Renames behave exactly as relinkRenamedRow (an unlinked row renamed goes to the NEW name's dish).
+    const t = base(); const db = fakeDb(t);
+    const r = await relinkOnEdit({ db, rowId: 5, oldName: 'shakshuka', newName: 'Lentil Soup', fromVariantId: null, who: 'chef' });
+    expect([r.moved, r.via, r.variantId, vOf(t, 5)], [true, 'rename', 10, 10], 'F6 unlinked and renamed -> the new name\'s dish (rename rule)');
+    const t2 = base(); const db2 = fakeDb(t2);
+    const ref = await relinkRenamedRow({ db: db2, rowId: 1, oldName: 'Lentil Soup', newName: 'Shakshuka', fromVariantId: 10, who: 'chef' });
+    const t3 = base(); const db3 = fakeDb(t3);
+    const got = await relinkOnEdit({ db: db3, rowId: 1, oldName: 'Lentil Soup', newName: 'Shakshuka', fromVariantId: 10, who: 'chef' });
+    expect([got.moved, got.outcome, got.via, JSON.stringify(t3)], [ref.moved, ref.outcome, 'rename', JSON.stringify(t2)], 'F7 a linked row renamed: the same writes as relinkRenamedRow');
+  }
+  {
+    // Linked by someone else meanwhile: kept, nothing new left behind.
+    const t = base(); const db = fakeDb(t, { beforeUpdate: (tt) => { tt.menu_items.find((r) => r.id === 4).dish_variant_id = 21; } });
+    const r = await relinkOnEdit({ db, rowId: 4, oldName: 'Shakshuka', newName: 'Shakshuka', fromVariantId: null, who: 'chef' });
+    expect([r.moved, r.already, vOf(t, 4), t.master_items.length, t.dish_variants.length], [false, true, 21, 3, 3], 'F8 linked meanwhile -> kept, the unused new dish removed');
+    // A failure throws; the row stays saved and unlinked, nothing new left behind.
+    const t2 = base(); const db2 = fakeDb(t2, { failOn: 'menu_items.update' });
+    let threw = false;
+    try { await relinkOnEdit({ db: db2, rowId: 4, oldName: 'Shakshuka', newName: 'Shakshuka', fromVariantId: null, who: 'chef' }); } catch { threw = true; }
+    expect([threw, vOf(t2, 4), t2.master_items.length, t2.dish_variants.length], [true, null, 3, 3], 'F9 link fails -> throws, row unlinked, nothing left behind');
   }
 
   // E. random catalogs (HIGH bits of the LCG -- the low bits repeat)

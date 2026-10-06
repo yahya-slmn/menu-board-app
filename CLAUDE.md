@@ -883,8 +883,10 @@ is a warning and the row stays unlinked; an abandoned link removes the version A
 row would see an empty dish). Add Item's typed list goes on the version only if it has none (an existing shared list is never
 overwritten). A rename in Edit Item moves the row to the new name's dish by the same rule (`relinkRenamedRow`, compare-and-swap on
 the old version; the old version keeps its list and calories; the form says which way it went). The catch-up button (Dish Catalog -> "Link
-rows without a version…") was removed 2026-10-06: a row whose automatic link fails now stays unlinked with a "please report it"
-warning; `scripts/variant-link-verify.js` lists such rows (0 on live data at its last run). `planLinks` stays in lib/variantLink.js. `scripts/variant-link-check.js`
+rows without a version…") was removed 2026-10-06: a row whose automatic link fails stays unlinked with a "please report it"
+warning, and is linked the next time it is saved in Edit Item (`relinkOnEdit`: a rename behaves as before; same name and no
+version -> `linkNewRow`; the list / calories sent with that save go on the version only if it has none);
+`scripts/variant-link-verify.js` lists such rows (0 on live data at its last run). `planLinks` stays in lib/variantLink.js. `scripts/variant-link-check.js`
 in npm test; `scripts/variant-link-verify.js` (read-only, login) on live data 2026-10-04: 3,499 rows, 3,289 master items, 3,292
 versions, 0 rows without a version, 0 under another name's dish, 0 empty masters, 0 unused versions -- PASS. Known limit: two
 rows of the same NEW dish added at the same moment can each get a version (merge in Master Items).

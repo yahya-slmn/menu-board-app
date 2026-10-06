@@ -54,7 +54,7 @@ const { planGeneratedDelete, nextRgCode } = require('./lib/generatedRecipeDelete
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
 const miHistory = require('./lib/menuIngredientsHistory');
 const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
-const { linkNewRow, relinkRenamedRow } = require('./lib/variantLink');
+const { nameKey, linkNewRow, relinkOnEdit } = require('./lib/variantLink');
 const { versionCalories, saveVersionCalories, setVersionCaloriesIfEmpty } = require('./lib/variantCalories');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
@@ -863,19 +863,25 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
   }
 
   // MV6: renamed -> the row moves to its NEW name's dish (lib/variantLink.js: its only version, else a new empty one); the
-  // old version keeps its list and calories. Never blocks the save: a failure is a warning.
+  // old version keeps its list and calories. Not renamed but with NO version yet (an earlier automatic link failed) -> linked
+  // now like a new row (2026-10-06, relinkOnEdit). Either way the list / calories sent with this save go on that version only
+  // if it has none (below). Never blocks the save: a failure is a warning.
   const warnings = [];
   let moved = null;
+  const renamed = !!before && nameKey(before.name) !== nameKey(name);
   if (linkReady && before) {
     try {
-      const r = await relinkRenamedRow({ db: supabase, rowId: id, oldName: before.name, newName: name, fromVariantId: before.dish_variant_id, who: await signedInLogin() });
+      const r = await relinkOnEdit({ db: supabase, rowId: id, oldName: before.name, newName: name, fromVariantId: before.dish_variant_id, who: await signedInLogin() });
       if (r.moved) moved = r;
       else if (r.stale) warnings.push('The dish was renamed, but its version was changed by someone else meanwhile, so it was not moved to the new name\'s dish. Check it in Master Items.');
     } catch (err) {
       log.warn(`[variant link] update-item #${id}: ${err.message}`);
-      warnings.push(`The dish was renamed, but it could not be moved to the new name's dish (${err.message}). Move it in Master Items.`);
+      warnings.push(renamed
+        ? `The dish was renamed, but it could not be moved to the new name's dish (${err.message}). Move it in Master Items.`
+        : `The dish was saved, but it could not be linked to a version (${err.message}): its ingredient list and calories can't be saved until it is. Please report it.`);
     }
   }
+  const nowUses = moved && moved.via === 'link' ? 'linked now, the dish uses' : 'renamed, the dish now uses';
 
   // Only when the form sends them (the Edit Item form does once the migration is applied); compared with what is saved
   // NOW, and written only if nobody saved a list since the form opened (ingredientsExpectedUpdatedAt).
@@ -885,7 +891,7 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
     if (moved) {
       // The form showed the OLD version's list: it goes on the new one only if that has no list yet.
       const r = await saveVariantList({ db: supabase, variantId: moved.variantId, ingredients: ingredientsText, allergens: allergensText, expectedUpdatedAt: null, who: await signedInLogin(), source: 'manual' });
-      if (r.conflict) warnings.push(`The ingredient list was not saved: renamed, the dish now uses the existing version of "${name}", which already has a list. Reopen the dish to see it.`);
+      if (r.conflict) warnings.push(`The ingredient list was not saved: ${nowUses} the existing version of "${name}", which already has a list. Reopen the dish to see it.`);
     } else {
       const w = await saveManualIngredients({ variantId: cur ? cur.dish_variant_id : null, ingredientsText, allergensText, expectedUpdatedAt: ingredientsExpectedUpdatedAt });
       if (w) warnings.push(w);
@@ -901,7 +907,7 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
     else if (moved) {
       if (caloriesPer100g != null) {
         const r = await setVersionCaloriesIfEmpty({ db: supabase, variantId, value: caloriesPer100g });
-        if (r.alreadySet != null) warnings.push(`The calories were not saved: renamed, the dish now uses the existing version of "${name}", which has ${r.alreadySet} kcal per 100 g.`);
+        if (r.alreadySet != null) warnings.push(`The calories were not saved: ${nowUses} the existing version of "${name}", which has ${r.alreadySet} kcal per 100 g.`);
       }
     } else {
       const r = await saveVersionCalories({ db: supabase, variantId, value: caloriesPer100g, expected: caloriesExpected ?? null });
