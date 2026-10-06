@@ -1553,8 +1553,6 @@ table.items-table.extracted-ingredients-table th:nth-child(4), table.items-table
 .cs-not ul { margin: 0; padding-left: 18px; line-height: 1.7; font-size: 13px; }
 .cs-names { display: block; font-size: 12px; color: var(--neutral); }
 /* Dish Catalog -> Remove old codes (openCodeRemovalModal) */
-.modal.crm-modal { width: 560px; }
-.modal.mib-modal { width: 620px; }
 /* Master Items (renderMasterItemsView, MV3) */
 .mi2-count { font-size: 12.5px; color: var(--neutral); }
 table.items-table.master-items-table th:nth-child(1), table.items-table.master-items-table td:nth-child(1) { width: 120px; }
@@ -1583,13 +1581,8 @@ table.items-table.master-items-table th:nth-child(5), table.items-table.master-i
 .rgd-folders ul { margin: 6px 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.5; }
 .rgd-folders li { margin-bottom: 4px; }
 .modal button.primary.danger-fill, .modal button.primary.danger-fill:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
-.mib-join { display: block; font-size: 13px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
-.mib-modal .ci-details ul { max-height: 220px; overflow: auto; }
-.calorie-review-bar .bar-group { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
-.calorie-review-bar .bar-group-label { padding-left: 12px; border-left: 1px solid var(--line); }
 .crm-groups { margin: 0 0 12px; padding-left: 18px; line-height: 1.7; font-size: 13.5px; }
 .crm-examples { display: block; font-size: 12px; color: var(--neutral); line-height: 1.5; }
-.crm-modal .actions { flex-wrap: wrap; align-items: center; }
 /* Ingredients -> Name map (renderNameMapTab) and merges (unification U2) */
 .nm-tabs { max-width: 320px; margin-bottom: 16px; }
 .nm-progress { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--neutral); margin-bottom: 14px; }

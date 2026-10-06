@@ -240,22 +240,8 @@ const handlers = {
   listMasterItems: () => ({ masters: MASTER_ITEMS.masters.map((m) => ({ id: m.id, name: m.name, codes: m.versions.filter((v) => v.recipe).map((v) => v.recipe.code),
     createdBy: m.id === 1 ? ['AI', 'OLD'] : [['OLD'], ['AI'], ['Tetiana']][m.id % 3], versions: m.versions.map((v) => ({ id: v.id, hasList: !!v.ingredients })) })) }),
   masterItemDetail: (id) => MASTER_ITEMS.masters.find((m) => m.id === id),
-  previewMasterItemsBuild: () => ({ token: 'mb1', conflicts: 0,
-    summary: { mastersToCreate: 2987, variantsToCreate: 3011, listsToCarry: 198, listRowsToLink: 202, joiningRows: 141, plainRowsToLink: 3105, rowsToPick: 9, savedListsInCatalog: 202 },
-    lists: Array.from({ length: 198 }, (_, i) => ({ dish: LONG[i % LONG.length], variant: 'KG-LP, MS-UP — 2 Oct 2026', from: [`#${100 + i} Lunch Main Course [KG-LP, MS-UP]`], joining: i % 3 ? [] : [`#${900 + i} Main Dish [Staff]`], ingredients: LIST })),
-    toPick: [{ dish: 'Macaroni & Cheese', variants: 2, rows: ['#4717 Main Dish [CEO]'] }] }),
-  // Dish Catalog -> Link rows without a version (MV6): one row of each kind, plus a long list to scroll.
-  previewLinkUnlinkedRows: () => ({ token: 'lr1', rows: [
-    ...Array.from({ length: 14 }, (_, i) => ({ id: 3500 + i, name: LONG[i % LONG.length], outcome: 'joined', where: 'Main Dish [Staff]' })),
-    { id: 3520, name: 'Macaroni & Cheese', outcome: 'new-version', where: 'Main Dish [CEO]' },
-    { id: 3521, name: 'Shakshuka with za\'atar', outcome: 'new-dish', where: 'AM Snack [Daycare, KG-LP]' }] }),
   ingredientMergeSuggestions: () => ({ suggestions: [{ why: 'spelling', items: [ING[20], ING[21]] }, { why: 'word order', items: [ING[22], ING[23]] }] }),
   previewIngredientMerge: ({ survivorId, mergedId }) => ({ survivor: ING.find((m) => m.id === survivorId), merged: ING.find((m) => m.id === mergedId), recipeRows: 2, aliases: 1, codeChoice: true }),
-  // Dish Catalog -> Remove old codes (U1): the real proportions from the U0 measurement.
-  previewCodeRemoval: () => ({ token: 'cr1', total: 2107, historyReady: true,
-    codes: { count: 493, examples: [{ name: LONG[0], code: 'RC-00237' }, { name: LONG[1], code: 'RC01-02288' }, { name: LONG[2], code: 'RC02-02771' }] },
-    placeholder: { count: 1614, examples: [{ name: LONG[3], code: 'NEW' }, { name: LONG[4], code: 'NEW' }, { name: LONG[5], code: 'NEW' }] },
-    other: { count: 0, examples: [] } }),
   previewCatalogIngredientsSave: () => CS_PLAN,
   applyCatalogIngredientsSave: () => ({ saved: Array.from({ length: 41 }, (_, i) => ({ itemId: i, name: 'x' })), failed: [{ itemId: 9, name: 'Lentil Soup', error: 'network error' }],
     conflicts: [{ itemId: 7, name: 'Slow-roasted herb chicken with saffron rice and toasted vermicelli', by: 'chef2', at: '2026-10-02T09:30:00.000+00:00' }], historyError: null }),

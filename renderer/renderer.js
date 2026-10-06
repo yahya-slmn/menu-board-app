@@ -916,9 +916,6 @@ async function renderItemsView(main) {
       <button class="secondary small" id="calorie-review-export-btn" title="An Excel file of every active Daycare, KG-LP and MS-UP dish with its current calories, for a researcher to fill in real values.">Export calories for review</button>
       <button class="secondary small" id="calorie-review-import-btn" title="Upload the reviewed file: shows what will change first (and which other rows share each dish version), then writes only the filled-in Reviewed values.">Import reviewed calories</button>
       <input type="file" id="calorie-review-file" accept=".xlsx" hidden />
-      <span class="bar-group"><span class="bar-group-label">Old dish codes:</span> <button class="secondary small" id="code-removal-btn" title="Removes the old RC codes (and the placeholder text &quot;NEW&quot;) from every dish, after a preview. A dish gets a code again from its Recipe Book recipe.">Remove old codes…</button></span>
-      <span class="bar-group"><span class="bar-group-label">Master items:</span> <button class="secondary small" id="master-build-btn" title="One master item per dish and its versions, from the Dish Catalog -- the saved ingredient lists move onto the versions. Preview first.">Build master items…</button>
-        <button class="secondary small" id="link-rows-btn" title="Every new dish gets its version when it is added. This links any row left without one (its dish's only version, else a new one). Preview first.">Link rows without a version…</button></span>
     </div>
     <div id="calorie-estimate-status" class="ai-progress" role="status" aria-live="polite"></div>
     <div class="search-bar">
@@ -937,9 +934,6 @@ async function renderItemsView(main) {
     <div id="items-content"><div class="loading-state" role="status">Loading…</div></div>
   `;
   document.getElementById('add-item-btn').addEventListener('click', () => openItemModal());
-  document.getElementById('code-removal-btn').addEventListener('click', () => openCodeRemovalModal(() => renderItemsView(main)));
-  document.getElementById('master-build-btn').addEventListener('click', () => openMasterItemsBuildModal(() => renderItemsView(main)));
-  document.getElementById('link-rows-btn').addEventListener('click', () => openLinkRowsModal(() => renderItemsView(main)));
   document.getElementById('catalog-import-btn').addEventListener('click', () => {
     Object.assign(state.catalogImport, { open: true, plan: null, result: null, sel: {}, overrides: {} });
     renderItemsView(main);
@@ -1407,7 +1401,7 @@ function ciRenderResult(main) {
       <ul>
         <li><strong>${r.created.length}</strong> dish(es) added to the Dish Catalog${r.createdByLabel ? ` as “${aiEsc(r.createdByLabel)}”` : ''}.</li>
         ${r.sectionsAdded.length ? `<li><strong>${r.sectionsAdded.length}</strong> existing dish(es) made available in another section.</li>` : ''}
-        ${(r.unlinked || []).length ? `<li class="ci-failed">${r.unlinked.length} new dish(es) could not be linked to a version: ${r.unlinked.slice(0, 5).map(u => aiEsc(u.name)).join(', ')}. Dish Catalog -> "Link rows without a version…" links them.</li>` : ''}
+        ${(r.unlinked || []).length ? `<li class="ci-failed">${r.unlinked.length} new dish(es) could not be linked to a version: ${r.unlinked.slice(0, 5).map(u => aiEsc(u.name)).join(', ')}. They are in the Dish Catalog, but their ingredient lists and calories can't be saved until they are linked. Please report it.</li>` : ''}
         ${r.failed.length ? `<li class="ci-failed">${r.failed.length} not added:<ul>${r.failed.map(f => `<li>${aiEsc(f.name)}: ${aiEsc(f.reason)}</li>`).join('')}</ul></li>` : ''}
       </ul>
       <p class="ci-hint">New dishes have no code, calories or Pastry / Cold Kitchen style yet, the same as a dish added with + Add Item.
@@ -1714,175 +1708,6 @@ function csRenderResult() {
       <div class="ci-result-actions"><button class="primary" id="cs-done">Back to Menu Ingredients</button></div>
     </div>`;
   document.getElementById('cs-done').addEventListener('click', () => document.getElementById('cs-back').click());
-}
-
-// Dish Catalog -> "Remove old codes…" (unification U1, lib/codeRemoval.js): preview what is in the Code field (RC codes,
-// the placeholder text "NEW"), let her save the full list, then remove them all. A dish gets a code again only from its
-// linked Recipe Book recipe. Every dish cleared is written to menu_item_code_history.
-async function openCodeRemovalModal(onDone) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal crm-modal" role="dialog" aria-modal="true" aria-labelledby="crm-title">
-    <h2 id="crm-title">Remove old dish codes</h2><div id="crm-body" role="status">Reading the Dish Catalog…</div></div>`;
-  document.body.appendChild(overlay);
-  const body = overlay.querySelector('#crm-body');
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-  let p;
-  try { p = await window.api.previewCodeRemoval(); } catch (err) { body.textContent = `Couldn't read the Dish Catalog: ${err.message}`; return; }
-  const group = (label, g) => (g.count ? `<li><strong>${g.count}</strong> ${label}<span class="crm-examples">e.g. ${g.examples.map(x => `${aiEsc(x.name)} (${aiEsc(x.code)})`).join(' · ')}</span></li>` : '');
-  if (!p.total) {
-    body.innerHTML = `<p>No dish has an old code any more.</p><div class="actions"><button class="primary" id="crm-close">Close</button></div>`;
-    body.querySelector('#crm-close').addEventListener('click', close);
-    return;
-  }
-  body.innerHTML = `
-    <p><strong>${p.total}</strong> dish(es) have something in Code:</p>
-    <ul class="crm-groups">
-      ${group('with an RC code', p.codes)}
-      ${group('with the placeholder text “NEW” (not a code)', p.placeholder)}
-      ${group('with something else', p.other)}
-    </ul>
-    <p class="ci-hint">All of them are removed. A dish gets a code again only from its Recipe Book recipe (TTY-). Each dish and the code it had are kept in the code history.</p>
-    ${p.historyReady ? '' : '<p class="field-warning">The code history table (migration 20261003100000) isn\'t applied yet, so nothing can be removed. Apply it, then open this again.</p>'}
-    <div class="actions">
-      <button class="secondary" id="crm-download">Download the list…</button>
-      <span id="crm-download-status" class="ci-hint"></span>
-      <button class="secondary" id="crm-cancel">Cancel</button>
-      <button class="primary" id="crm-apply" ${p.historyReady ? '' : 'disabled'}>Remove ${p.total} code(s)</button>
-    </div>`;
-  body.querySelector('#crm-cancel').addEventListener('click', close);
-  body.querySelector('#crm-download').addEventListener('click', async () => {
-    const st = body.querySelector('#crm-download-status');
-    try {
-      const r = await window.api.exportCodeRemovalList({ token: p.token });
-      st.textContent = r.success ? `Saved (${r.count} dishes).` : '';
-    } catch (err) { st.textContent = `Couldn't save: ${err.message}`; }
-  });
-  body.querySelector('#crm-apply').addEventListener('click', async (e) => {
-    e.currentTarget.disabled = true;
-    body.querySelector('#crm-cancel').disabled = true;
-    try {
-      const r = await window.api.applyCodeRemoval({ token: p.token });
-      body.innerHTML = `
-        <ul class="crm-groups">
-          <li><strong>${r.removed}</strong> code(s) removed.</li>
-          ${r.changed.length ? `<li class="ci-failed">${r.changed.length} not removed because the code changed after this preview: ${r.changed.slice(0, 8).map(c => aiEsc(c.name)).join(', ')}${r.changed.length > 8 ? '…' : ''}. Open this again to remove them.</li>` : ''}
-          ${r.failed ? `<li class="ci-failed">${r.failed} not removed (a connection error). Open this again to retry.</li>` : ''}
-          ${r.historyError ? `<li class="ci-failed">The code history couldn't be saved to the database (${aiEsc(r.historyError)}). It was saved on this computer instead: ${aiEsc(r.historyFile || '')}</li>` : ''}
-        </ul>
-        <div class="actions"><button class="primary" id="crm-close">Done</button></div>`;
-      body.querySelector('#crm-close').addEventListener('click', () => { close(); onDone(); });
-    } catch (err) {
-      body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was removed: ${aiEsc(err.message)}</p>`);
-    }
-  });
-}
-
-// Dish Catalog -> "Master items: Build master items…" (MV2, lib/masterItemsBuild.js): one master item per dish, its
-// versions (dish variants), each catalog row linked to the version it uses, and the saved ingredient lists carried onto the
-// versions. Nothing about where a dish is served changes. Preview -> confirm.
-async function openMasterItemsBuildModal(onDone) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal crm-modal mib-modal" role="dialog" aria-modal="true" aria-labelledby="mib-title">
-    <h2 id="mib-title">Build master items</h2><div id="mib-body" role="status">Reading the Dish Catalog…</div></div>`;
-  document.body.appendChild(overlay);
-  const body = overlay.querySelector('#mib-body');
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-  let p;
-  try { p = await window.api.previewMasterItemsBuild(); } catch (err) { body.textContent = `Couldn't read the Dish Catalog: ${err.message}`; return; }
-  if (p.unavailable) { body.innerHTML = '<p>The master items tables (migration 20261003120000) aren\'t applied yet.</p><div class="actions"><button class="primary" id="mib-x">Close</button></div>'; body.querySelector('#mib-x').addEventListener('click', close); return; }
-  const s = p.summary;
-  const carriedAll = s.listsToCarry === p.lists.length;
-  body.innerHTML = `
-    <ul class="crm-groups">
-      <li><strong>${s.mastersToCreate}</strong> master item(s) -- one per dish -- and <strong>${s.variantsToCreate}</strong> version(s) of them</li>
-      <li><strong>${s.listsToCarry}</strong> saved ingredient list(s) move onto their versions (rows with an identical list share one version)
-        <span class="crm-examples">${s.savedListsInCatalog} rows of the Dish Catalog have a saved list; each list lands on exactly one version, with who saved it and when</span></li>
-      <li><strong>${s.listRowsToLink + s.plainRowsToLink}</strong> catalog row(s) linked to the version they use</li>
-      ${s.rowsToPick ? `<li><strong>${s.rowsToPick}</strong> row(s) left for you to pick a version: their dish has 2+ versions and the row has no list of its own (Master Items screen, next step)</li>` : ''}
-      ${p.conflicts ? `<li class="ci-failed">${p.conflicts} group(s) skipped: their rows are already linked to different versions</li>` : ''}
-    </ul>
-    ${s.joiningRows ? `<label class="mib-join"><input type="checkbox" id="mib-joining" checked>
-      Also link <strong>${s.joiningRows}</strong> row(s) with no list of their own to their dish's <em>only</em> version
-      <span class="crm-examples">e.g. Staff's copy of a school dish. Once the ingredient features use versions, Menu Ingredients will serve these rows that version's saved list instead of asking the AI. Untick to leave them unlinked for now.</span></label>` : ''}
-    <p class="ci-hint">This only links rows to versions. Which sections and categories a dish is served in, its calories and the menus are unchanged.</p>
-    <details class="ci-details"><summary>Where each saved list goes (${p.lists.length})</summary><ul>
-      ${p.lists.map(l => `<li><strong>${aiEsc(l.dish)}</strong> → “${aiEsc(l.variant)}” from ${l.from.map(aiEsc).join(', ')}${l.joining.length ? `; joining: ${l.joining.map(aiEsc).join(', ')}` : ''}</li>`).join('')}</ul></details>
-    ${p.toPick.length ? `<details class="ci-details"><summary>Rows left for you to pick (${s.rowsToPick})</summary><ul>
-      ${p.toPick.map(t => `<li><strong>${aiEsc(t.dish)}</strong> (${t.variants} versions): ${t.rows.map(aiEsc).join(', ')}</li>`).join('')}</ul></details>` : ''}
-    ${carriedAll ? '' : '<p class="field-warning">The list count does not add up -- nothing should be built. Please report this.</p>'}
-    <div class="actions"><button class="secondary" id="mib-cancel">Cancel</button>
-      <button class="primary" id="mib-apply" ${carriedAll && (s.mastersToCreate || s.variantsToCreate || s.listRowsToLink || s.plainRowsToLink || s.joiningRows) ? '' : 'disabled'}>Build</button></div>`;
-  body.querySelector('#mib-cancel').addEventListener('click', close);
-  body.querySelector('#mib-apply').addEventListener('click', async (e) => {
-    e.currentTarget.disabled = true;
-    body.querySelector('#mib-cancel').disabled = true;
-    const includeJoining = !!body.querySelector('#mib-joining')?.checked;
-    try {
-      const r = await window.api.applyMasterItemsBuild({ token: p.token, includeJoining });
-      body.innerHTML = `<ul class="crm-groups">
-          <li><strong>${r.mastersCreated}</strong> master item(s) and <strong>${r.variantsCreated}</strong> version(s) created</li>
-          <li><strong>${r.listsCarried}</strong> saved list(s) carried · <strong>${r.rowsLinked}</strong> row(s) linked</li>
-          ${r.alreadyLinked ? `<li>${r.alreadyLinked} row(s) were linked by someone else meanwhile and kept their link</li>` : ''}
-          ${r.changedSincePreview.length ? `<li class="ci-failed">${r.changedSincePreview.length} list(s) were saved again after this preview: their version holds the earlier list (rows ${r.changedSincePreview.map(c => '#' + c.id).join(', ')}).</li>` : ''}
-          ${r.failed.length ? `<li class="ci-failed">Not everything was written: ${r.failed.map(f => aiEsc(`${f.step}: ${f.error}`)).join('; ')}. Open this again: it continues where it stopped.</li>` : ''}
-          ${r.historyError ? `<li class="ci-failed">The history rows could not be saved (${aiEsc(r.historyError)}).</li>` : ''}
-        </ul><div class="actions"><button class="primary" id="mib-done">Done</button></div>`;
-      body.querySelector('#mib-done').addEventListener('click', () => { close(); onDone(); });
-    } catch (err) {
-      body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was built: ${aiEsc(err.message)}</p>`);
-    }
-  });
-}
-
-// Dish Catalog -> "Link rows without a version…" (MV6, lib/variantLink.js): catches up rows a failed link left without a
-// version. Same rule as a new dish: its dish's only version, else a new empty one. Preview -> confirm.
-async function openLinkRowsModal(onDone) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal crm-modal mib-modal" role="dialog" aria-modal="true" aria-labelledby="lr-title">
-    <h2 id="lr-title">Link rows without a version</h2><div id="lr-body" role="status">Reading the Dish Catalog…</div></div>`;
-  document.body.appendChild(overlay);
-  const body = overlay.querySelector('#lr-body');
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-  let p;
-  try { p = await window.api.previewLinkUnlinkedRows(); } catch (err) { body.textContent = `Couldn't read the Dish Catalog: ${err.message}`; return; }
-  if (p.unavailable) { body.innerHTML = '<p>The master items tables (migration 20261003120000) aren\'t applied yet.</p><div class="actions"><button class="primary" id="lr-x">Close</button></div>'; body.querySelector('#lr-x').addEventListener('click', close); return; }
-  if (!p.rows.length) { body.innerHTML = '<p>Every Dish Catalog row uses a version. Nothing to link.</p><div class="actions"><button class="primary" id="lr-x">Close</button></div>'; body.querySelector('#lr-x').addEventListener('click', close); return; }
-  const by = (o) => p.rows.filter(r => r.outcome === o);
-  const list = (rs) => rs.map(r => `<li><strong>${aiEsc(r.name)}</strong> <span class="crm-examples">#${r.id} ${aiEsc(r.where)}</span></li>`).join('');
-  const group = (o, label) => by(o).length ? `<details class="ci-details"><summary>${label} (${by(o).length})</summary><ul>${list(by(o))}</ul></details>` : '';
-  body.innerHTML = `
-    <ul class="crm-groups">
-      <li><strong>${by('joined').length}</strong> row(s) join their dish's only version (and show its ingredients and calories)</li>
-      <li><strong>${by('new-version').length}</strong> row(s) get a new, empty version: their dish has 2+ versions (move them in Master Items if they should share one)</li>
-      <li><strong>${by('new-dish').length}</strong> row(s) are a dish not in Master Items yet: a new master item and version</li>
-    </ul>
-    ${group('joined', 'Join the only version')}${group('new-version', 'New version of an existing dish')}${group('new-dish', 'New dish')}
-    <p class="ci-hint">Only links rows to versions. Nothing else about the rows changes.</p>
-    <div class="actions"><button class="secondary" id="lr-cancel">Cancel</button><button class="primary" id="lr-apply">Link ${p.rows.length} row(s)</button></div>`;
-  body.querySelector('#lr-cancel').addEventListener('click', close);
-  body.querySelector('#lr-apply').addEventListener('click', async (e) => {
-    e.currentTarget.disabled = true;
-    body.querySelector('#lr-cancel').disabled = true;
-    try {
-      const r = await window.api.applyLinkUnlinkedRows({ token: p.token });
-      body.innerHTML = `<ul class="crm-groups"><li><strong>${r.linked}</strong> row(s) linked</li>
-          ${r.already ? `<li>${r.already} row(s) were linked meanwhile and kept their version</li>` : ''}
-          ${r.failed.length ? `<li class="ci-failed">${r.failed.length} could not be linked: ${r.failed.slice(0, 5).map(f => aiEsc(`#${f.id} ${f.name}: ${f.error}`)).join('; ')}</li>` : ''}
-        </ul><div class="actions"><button class="primary" id="lr-done">Done</button></div>`;
-      body.querySelector('#lr-done').addEventListener('click', () => { close(); onDone(); });
-    } catch (err) {
-      body.insertAdjacentHTML('beforeend', `<p class="field-warning">Nothing was linked: ${aiEsc(err.message)}</p>`);
-    }
-  });
 }
 
 // ============================================================
@@ -3958,7 +3783,7 @@ function openAiApproveModal(resume) {
       const res = await window.api.aiMenuApprove({ runId: state.aiMenu.runId });
       const body = overlay.querySelector('#ai-approve-body');
       if (res.ok) {
-        body.innerHTML = `<p><strong>Approved.</strong> ${res.created ?? 0} new dish(es) added to the Dish Catalog, ${res.linked ?? 0} linked to existing ones${res.portionsAdded ? `, ${res.portionsAdded} section portion(s) added` : ''}. All five menus are in History.</p>${(res.unlinked || []).length ? `<p class="field-warning">${res.unlinked.length} dish(es) could not be linked to a version: ${res.unlinked.slice(0, 5).map(u => aiEsc(u.name)).join(', ')}. Dish Catalog -> "Link rows without a version…" links them.</p>` : ''}
+        body.innerHTML = `<p><strong>Approved.</strong> ${res.created ?? 0} new dish(es) added to the Dish Catalog, ${res.linked ?? 0} linked to existing ones${res.portionsAdded ? `, ${res.portionsAdded} section portion(s) added` : ''}. All five menus are in History.</p>${(res.unlinked || []).length ? `<p class="field-warning">${res.unlinked.length} dish(es) could not be linked to a version: ${res.unlinked.slice(0, 5).map(u => aiEsc(u.name)).join(', ')}. They are in the Dish Catalog, but their ingredient lists and calories can't be saved until they are linked. Please report it.</p>` : ''}
           <p class="ai-muted">Calories for the new dishes are being estimated in the background now; the approved run shows when they're done.</p>
           ${(res.ceoWarnings || []).length ? `<p class="ai-muted">CEO menu notes: ${res.ceoWarnings.map(aiEsc).join('; ')}</p>` : ''}`;
         overlay.querySelector('.actions').innerHTML = `<button class="secondary" id="ai-ap-close">Close</button><button class="primary" id="ai-ap-export">Export workbook</button>`;

@@ -208,7 +208,7 @@ already in use; suggestions are every label in use plus the recipe people. The D
 By" dropdown (All / each stored label / Not set). The "Code" column (`menu_items.rc_code`) is EMPTY on every
 dish since 2026-10-03 (unification U1): the 493 old RC codes and 1,614 placeholder "NEW" texts were removed through Dish Catalog
 -> "Remove old codes…" (`lib/codeRemoval.js`: preview, downloadable list, each dish cleared only if its code was still the
-previewed one), every one recorded in `menu_item_code_history` (migration 20261003100000; batch id, old code, who / when;
+previewed one; the button was removed from the app 2026-10-06, the library and its check stay), every one recorded in `menu_item_code_history` (migration 20261003100000; batch id, old code, who / when;
 verified: 0 coded dishes, 2,107 rows, one batch). A dish gets a code again only from its linked Recipe Book recipe (TTY-, U3);
 the Code field in Add / Edit Item is read-only, `add-item` / `update-item` never write it, an empty one shows a grey "—". The
 column itself is dropped by hand later (U8). `update-item` only writes the label when it is sent. The old Tags column is three
@@ -275,6 +275,12 @@ with a confirmation). Edits: "Save changes", saved only if the entry is still th
 now always starts from a FRESH copy of the original (exporting twice = the same file). History never writes to the Dish
 Catalog (M2 / M3 unchanged; an entry is a snapshot, never refreshed from the catalog). `scripts/menu-ingredients-history-check.js`
 (npm test): history export byte-identical to the export after generation, edits export, a stale save refused.
+
+**One-time migration buttons removed** (2026-10-06): the Dish Catalog's "Remove old codes…", "Master items: Build master
+items…" and "Link rows without a version…" (with their dialogs, their 7 IPC handlers / preload entries and their tour steps;
+"Carry calories to versions…" had already gone in MV5b). Kept: the libraries (lib/codeRemoval.js, lib/masterItemsBuild.js,
+planLinks) because their checks in npm test and the read-only verify scripts use them; the Master Items screen; MV6's automatic
+version for new rows; calorie estimation and the calorie review import / export; `menu_item_code_history`; all data.
 
 **Menu Ingredients review = Build Menu's grid** (2026-10-06, `miRenderGrid` / `miOpenPop` in renderer.js; data, export,
 history and AI calls unchanged): one section at a time (`state.menuIngredients.activeSheet`), its days stacked as `.day-table`s
@@ -838,7 +844,7 @@ linking UI is about versions, never sections. Variant display name: "<section na
 then the recipe's name (`variantDisplayName`). Migration 20261003120000 (applied 2026-10-03). MV1 `lib/masterItemsPlan.js`
 (pure planner: identical lists share a version, different lists get their own, list-less rows join a dish's only version
 (assumption B, a tickbox) or are left to pick; checked on 2,000 random catalogs). MV2 `lib/masterItemsBuild.js` + Dish
-Catalog -> "Master items: Build master items…" (preview -> confirm; writes only master_items, dish_variants and the link;
+Catalog -> "Master items: Build master items…" (button removed from the app 2026-10-06, the library and its checks stay; preview -> confirm; writes only master_items, dish_variants and the link;
 re-runnable; one `menu_item_ingredient_history` row per list carried, source 'variant_migration'). The old list / calorie
 columns on menu_items stay as a frozen copy until the features move (MV4 ingredients, MV5 calories). MV2 was run on the
 live data 2026-10-03 and verified (`scripts/master-items-verify.js`: 202 lists each on one version, 3,499/3,499 rows linked).
@@ -876,8 +882,9 @@ rule for a row with no list): no dish of that name (name_key) -> new master item
 is a warning and the row stays unlinked; an abandoned link removes the version AND a master item it created (else the dish's next
 row would see an empty dish). Add Item's typed list goes on the version only if it has none (an existing shared list is never
 overwritten). A rename in Edit Item moves the row to the new name's dish by the same rule (`relinkRenamedRow`, compare-and-swap on
-the old version; the old version keeps its list and calories; the form says which way it went). Catch-up: Dish Catalog -> "Link
-rows without a version…" (`preview-` / `apply-link-unlinked-rows`, `planLinks` predicts each row). `scripts/variant-link-check.js`
+the old version; the old version keeps its list and calories; the form says which way it went). The catch-up button (Dish Catalog -> "Link
+rows without a version…") was removed 2026-10-06: a row whose automatic link fails now stays unlinked with a "please report it"
+warning; `scripts/variant-link-verify.js` lists such rows (0 on live data at its last run). `planLinks` stays in lib/variantLink.js. `scripts/variant-link-check.js`
 in npm test; `scripts/variant-link-verify.js` (read-only, login) on live data 2026-10-04: 3,499 rows, 3,289 master items, 3,292
 versions, 0 rows without a version, 0 under another name's dish, 0 empty masters, 0 unused versions -- PASS. Known limit: two
 rows of the same NEW dish added at the same moment can each get a version (merge in Master Items).

@@ -49,15 +49,12 @@ const { loadCalorieReviewRows, writeCalorieReviewWorkbook, parseCalorieReviewWor
 const { planCatalogImport } = require('./lib/catalogImport');
 const { planIngredientsSave, applyIngredientSaves } = require('./lib/catalogIngredientsSave');
 const { splitRowsByCatalog, annotateRow } = require('./lib/menuIngredientsCatalog');
-const { planCodeRemoval, applyCodeRemoval, writeCodeRemovalWorkbook } = require('./lib/codeRemoval');
 const { buildQueue, candidatesFor, suggestMerges } = require('./lib/ingredientMatch');
 const { planGeneratedDelete, nextRgCode } = require('./lib/generatedRecipeDelete');
 const { saveDecision, addIngredientFromReview, undoDecision, planMerge, applyMerge } = require('./lib/ingredientNames');
-const { planBuild, applyBuild } = require('./lib/masterItemsBuild');
 const miHistory = require('./lib/menuIngredientsHistory');
-const { variantDisplayName } = require('./lib/masterItemsPlan');
 const { withVariantLists, buildMasterList, buildMasterSummaries, saveVariantList, moveRowToVersion, deleteVersionOrMaster } = require('./lib/masterItems');
-const { linkNewRow, relinkRenamedRow, planLinks } = require('./lib/variantLink');
+const { linkNewRow, relinkRenamedRow } = require('./lib/variantLink');
 const { versionCalories, saveVersionCalories, setVersionCaloriesIfEmpty } = require('./lib/variantCalories');
 const { normalizeMix, summarizeMixReport } = require('./lib/createdByMix');
 const {
@@ -724,12 +721,12 @@ ipcMain.handle('add-item', async (e, { name, categoryCode, proteinCode, isDailyR
     }
   }
   // MV6: the new row gets its version now (lib/variantLink.js: its dish's only version, else a new empty one). Never
-  // blocks the add: a failure is a warning and the row stays unlinked (Dish Catalog -> "Link rows without a version…").
+  // blocks the add: a failure is a warning and the row stays unlinked (scripts/variant-link-verify.js lists such rows).
   const warnings = [];
   let variantId = null;
   if (await masterItemsReady()) {
     try { variantId = (await linkNewRow({ db: supabase, rowId: itemId, name, who: await signedInLogin() })).variantId; }
-    catch (err) { log.warn(`[variant link] add-item #${itemId}: ${err.message}`); warnings.push(`The dish was added, but it could not be linked to a version (${err.message}). Dish Catalog -> "Link rows without a version…" links it.`); }
+    catch (err) { log.warn(`[variant link] add-item #${itemId}: ${err.message}`); warnings.push(`The dish was added, but it could not be linked to a version (${err.message}): its ingredient list and calories can't be saved until it is. Please report it.`); }
   }
   // Calories typed in Add Item go on that version only if it has none yet (MV5b; an existing shared value is never overwritten).
   if (caloriesPer100g != null && caloriesPer100g !== '') {
@@ -900,7 +897,7 @@ ipcMain.handle('update-item', async (e, { id, name, categoryCode, proteinCode, i
     const { data: cur, error: curErr } = await supabase.from('menu_items').select('dish_variant_id').eq('id', id).maybeSingle();
     if (curErr) throw supaFail('update-item: read the dish version for calories', curErr);
     const variantId = cur ? cur.dish_variant_id : null;
-    if (variantId == null) warnings.push('The calories were not saved: this dish is not linked to a version yet (Dish Catalog -> "Link rows without a version…").');
+    if (variantId == null) warnings.push('The calories were not saved: this dish is not linked to a version yet. Please report it.');
     else if (moved) {
       if (caloriesPer100g != null) {
         const r = await setVersionCaloriesIfEmpty({ db: supabase, variantId, value: caloriesPer100g });
@@ -1262,154 +1259,11 @@ async function runCalorieBackfill({ send = () => {}, onlyItemIds = null } = {}) 
   return { success: true, estimated, flagged, totalMissing: items.length, failures };
 }
 
-// Remove the old dish codes (unification U1, lib/codeRemoval.js; migration 20261003100000). Preview -> optional
-// download of the list -> confirm. Apply clears only what the preview showed, each dish only if its code is still the
-// previewed one, and writes one menu_item_code_history row per dish cleared. It refuses to start if that history table
-// can't be reached; history rows that fail to save are written to a local file instead, so no old code is ever lost.
-let codeRemovalPlan = null; // { token, entries }
-
-async function loadCodeRemovalPlan() {
-  const coded = [];
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('menu_items').select('id, name, category_id, rc_code').not('rc_code', 'is', null).order('id').range(from, from + 999);
-    if (error) throw supaFail('code removal: load menu_items', error);
-    coded.push(...data);
-    if (data.length < 1000) break;
-  }
-  const sectionsById = new Map((await loadCatalogForImport()).map((it) => [it.id, it.sections]));
-  const sectionName = (code) => getSectionByCode(code)?.name || code;
-  return planCodeRemoval(coded.map((it) => ({ id: it.id, name: it.name, rc_code: it.rc_code, category_name: getCategoryById(it.category_id)?.name || '',
-    sections: (sectionsById.get(it.id) || []).map(sectionName) })));
-}
-
-async function codeHistoryReady() {
-  const { error } = await supabase.from('menu_item_code_history').select('id').limit(1);
-  return !error;
-}
-
-ipcMain.handle('preview-code-removal', async () => {
-  const plan = await loadCodeRemovalPlan();
-  codeRemovalPlan = { token: crypto.randomUUID(), entries: plan.entries };
-  const brief = (list) => ({ count: list.length, examples: list.slice(0, 6).map((e) => ({ name: e.name, code: e.oldCode })) });
-  return { token: codeRemovalPlan.token, total: plan.entries.length, historyReady: await codeHistoryReady(),
-    codes: brief(plan.groups.codes), placeholder: brief(plan.groups.placeholder), other: brief(plan.groups.other) };
-});
-
-ipcMain.handle('export-code-removal-list', async (e, { token }) => {
-  if (!codeRemovalPlan || codeRemovalPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save the list of old codes',
-    defaultPath: `dish-old-codes-${new Date().toISOString().slice(0, 10)}.xlsx`,
-    filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
-  });
-  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
-  await writeCodeRemovalWorkbook(codeRemovalPlan.entries, result.filePath);
-  return { success: true, path: result.filePath, count: codeRemovalPlan.entries.length };
-});
-
-ipcMain.handle('apply-code-removal', async (e, { token }) => {
-  if (!codeRemovalPlan || codeRemovalPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
-  if (!(await codeHistoryReady())) throw new Error('The code history table (migration 20261003100000) is not applied yet -- nothing was removed.');
-  const { entries } = codeRemovalPlan;
-  codeRemovalPlan = null;
-  const batchId = crypto.randomUUID();
-  const r = await applyCodeRemoval({ db: supabase, entries, who: await signedInLogin(), batchId });
-  let historyFile = null;
-  if (r.history.length) {
-    historyFile = path.join(app.getPath('userData'), `code-removal-history-${batchId}.json`);
-    await fs.writeFile(historyFile, JSON.stringify(r.history, null, 1));
-    log.warn(`[code removal] ${r.history.length} history row(s) could not be saved (${r.historyError}); kept in ${historyFile}`);
-  }
-  if (r.changed.length || r.failed.length) log.warn('[code removal] not removed:', { changed: r.changed, failed: r.failed });
-  return { removed: r.removed.length, changed: r.changed, failed: r.failed.reduce((n, f) => n + f.ids.length, 0), historyError: r.historyError, historyFile, batchId };
-});
-
-// Master Items + Dish Variants, MV2 (lib/masterItemsBuild.js; migration 20261003120000): build master items and variants
-// from the live Dish Catalog and link each row to the variant it uses, carrying the saved lists. Preview -> confirm; the
-// apply writes only master_items, dish_variants and menu_items.dish_variant_id (never the engine's data).
-let masterItemsBuildPlan = null; // { token, plan }
-
+// The Master Items tables (migration 20261003120000) are there when dish_variants answers. Used by every version-aware feature.
 async function masterItemsReady() {
   const { error } = await supabase.from('dish_variants').select('id').limit(1);
   return !error;
 }
-
-ipcMain.handle('preview-master-items-build', async () => {
-  if (!(await masterItemsReady())) return { unavailable: true };
-  const all = [];
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('menu_items')
-      .select(`id, name, category_id, is_active, dish_variant_id, ${INGREDIENT_COLUMNS}`).order('id').range(from, from + 999);
-    if (error) throw supaFail('master items: load menu_items', error);
-    all.push(...data);
-    if (data.length < 1000) break;
-  }
-  const sectionsById = new Map((await loadCatalogForImport()).map((it) => [it.id, it.sections]));
-  const rows = all.map((it) => ({ ...it, category_name: getCategoryById(it.category_id)?.name || '', sections: sectionsById.get(it.id) || [] }));
-  const { data: masters, error: mErr } = await supabase.from('master_items').select('id, name_key');
-  if (mErr) throw supaFail('master items: load master_items', mErr);
-  const plan = planBuild({ rows, existingMasters: masters || [] });
-  masterItemsBuildPlan = { token: crypto.randomUUID(), plan };
-  const byId = new Map(rows.map((r) => [r.id, r]));
-  const where = (id) => `${byId.get(id)?.category_name || ''} [${(byId.get(id)?.sections || []).map((c) => getSectionByCode(c)?.name || c).join(', ')}]`;
-  return {
-    token: masterItemsBuildPlan.token, summary: plan.summary, conflicts: plan.conflicts.length,
-    // Every list to carry, for the preview's details: dish, the variant's display name, the rows it comes from.
-    lists: plan.masters.flatMap((m) => m.variants.filter((v) => v.list && !v.reuseVariantId).map((v) => ({
-      dish: m.name, variant: variantDisplayName({ sections: v.sections, date: v.date }), from: v.list.fromRowIds.map((id) => `#${id} ${where(id)}`),
-      joining: v.joiningRowIds.map((id) => `#${id} ${where(id)}`), ingredients: v.list.ingredients }))),
-    toPick: plan.masters.filter((m) => m.unassigned.length).map((m) => ({ dish: m.name, rows: m.unassigned.map((id) => `#${id} ${where(id)}`), variants: m.variants.length })),
-  };
-});
-
-ipcMain.handle('apply-master-items-build', async (e, { token, includeJoining }) => {
-  if (!masterItemsBuildPlan || masterItemsBuildPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
-  const { plan } = masterItemsBuildPlan;
-  masterItemsBuildPlan = null;
-  const r = await applyBuild({ db: supabase, plan, includeJoining: !!includeJoining, who: await signedInLogin() });
-  if (r.failed.length || r.historyError || r.changedSincePreview.length || r.conflicts.length) log.warn('[master items build]', { failed: r.failed, historyError: r.historyError, changed: r.changedSincePreview, conflicts: r.conflicts });
-  return { ...r, conflicts: r.conflicts.length };
-});
-
-// Rows without a version (MV6, lib/variantLink.js): every new row is linked when it is created; this catches up any that a
-// failed link left behind. Preview (each row with what it will get) -> confirm; each row goes through linkNewRow, which
-// leaves a row linked meanwhile as it is.
-let linkRowsPlan = null; // { token, rows }
-
-ipcMain.handle('preview-link-unlinked-rows', async () => {
-  if (!(await masterItemsReady())) return { unavailable: true };
-  const [rows, masters, variants, catalog] = await Promise.all([
-    fetchAllParallel('menu_items', 'id, name, category_id', (q) => q.is('dish_variant_id', null).order('id'), 'link rows: load unlinked rows'),
-    fetchAllParallel('master_items', 'id, name_key', (q) => q.order('id'), 'link rows: load master_items'),
-    fetchAllParallel('dish_variants', 'id, master_item_id', (q) => q.order('id'), 'link rows: load dish_variants'),
-    loadCatalogForImport(),
-  ]);
-  const perMaster = new Map();
-  for (const v of variants) perMaster.set(v.master_item_id, (perMaster.get(v.master_item_id) || 0) + 1);
-  const versionsByKey = new Map(masters.map((m) => [m.name_key, perMaster.get(m.id) || 0]));
-  const sectionsById = new Map(catalog.map((it) => [it.id, it.sections]));
-  const catOf = new Map(rows.map((r) => [r.id, getCategoryById(r.category_id)?.name || '']));
-  const plan = planLinks(rows, versionsByKey).map((p) => ({ ...p,
-    where: `${catOf.get(p.id)} [${(sectionsById.get(p.id) || []).map((c) => getSectionByCode(c)?.name || c).join(', ')}]` }));
-  linkRowsPlan = { token: crypto.randomUUID(), rows: plan };
-  return { token: linkRowsPlan.token, rows: plan };
-});
-
-ipcMain.handle('apply-link-unlinked-rows', async (e, { token }) => {
-  if (!linkRowsPlan || linkRowsPlan.token !== token) throw new Error('That preview is out of date -- open it again.');
-  const { rows } = linkRowsPlan;
-  linkRowsPlan = null;
-  const who = await signedInLogin();
-  const out = { linked: 0, already: 0, failed: [] };
-  for (const r of rows) {
-    try {
-      const res = await linkNewRow({ db: supabase, rowId: r.id, name: r.name, who });
-      if (res.outcome === 'already') out.already++; else out.linked++;
-    } catch (err) { out.failed.push({ id: r.id, name: r.name, error: err.message }); }
-  }
-  if (out.failed.length) log.warn('[variant link] catch-up:', out.failed);
-  return out;
-});
 
 // Master Items screen (MV3, lib/masterItems.js): master items with their versions, the catalog rows using each, and the
 // version-level writes (list, move a row to another version of the same dish, delete / unlink-and-delete).
