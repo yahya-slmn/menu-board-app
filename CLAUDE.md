@@ -825,6 +825,13 @@ messages); the table and its columns keep their names. The shared ingredient pic
 ingredient" -- it adds to its own `extracted_ingredients`); `scripts/ingredient-picker-labels-check.js` (npm test) checks
 both. **General Ingredients** = `general_ingredients`, a separate REFERENCE list of ~2,150 world ingredients imported from the
 kitchen_ingredients Excel file: not linked to `ingredients`, not used by Recipe Book, the Name map or any generator.
+Migration 20261006110000 (applied by hand 2026-10-06; `name_key` is a GENERATED column, unique, as is `item_code`). Import:
+`scripts/general-ingredients-import.js [file]` (login; both sheets -- "Items" and "Department use" -> `departments` text[];
+preview: new / already present / skipped with reasons + the ~99 rows whose primary_department is a bread type, imported as they
+are; writes only after "IMPORT", 200 a batch, on conflict (name_key) do nothing, so re-running adds only what is missing; an
+existing row is never changed). `scripts/general-ingredients-verify.js` (read-only, login): table vs file, every field, PASS / FAIL.
+Logic in `lib/generalIngredients.js` (pure apart from the db passed to `applyImport`); `scripts/general-ingredients-check.js` in npm test.
+No screen (only if asked).
 U2 (built 2026-10-03; migration 20261003110000, applied by hand): `ingredient_aliases` (one row per spelling, unique
 `name_key` = lowercased / single-spaced; decision 'alias' -> `ingredient_id`, or 'per_recipe'), `ingredients.added_from`
 ('name_review' for rows created in the review) / `added_by`, `ingredient_merge_history`. `lib/ingredientMatch.js` (pure):
