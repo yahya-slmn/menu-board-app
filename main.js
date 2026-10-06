@@ -13,6 +13,7 @@ const {
   getAgeGroups, getAgeGroupsForSection, getAgeGroupByCode, getAgeGroupById,
   getCategoryPortionDefault,
 } = require('./lib/referenceData');
+const { retryOnce } = require('./lib/retryOnce');
 const { MenuGenerator, SECTION_SLOTS, createdByMixPoolCheck, eligibleItemsSupabase, sectionItemPoolSupabase, schoolDaysFrom, schoolDayCountBetween } = require('./lib/generator');
 const { suggestClassification } = require('./lib/classify');
 const {
@@ -419,8 +420,14 @@ ipcMain.handle('auth-sign-in', async (e, { id, password }) => {
   // synchronously throughout the app; RLS blocks anonymous reads of them (same as every
   // other table), so this can only run after sign-in succeeds -- and must complete before
   // createWindow() so the main renderer's first get-sections/get-categories calls hit a warm
-  // cache instead of an empty one.
-  await loadReferenceData();
+  // cache instead of an empty one. PGRST303 "JWT issued at future": the database's clock is a
+  // moment behind the Auth server that just issued the token -- the same token works a second
+  // later, so that one error gets one retry (lib/retryOnce.js); anything else fails as before.
+  await retryOnce(loadReferenceData, {
+    codes: ['PGRST303'],
+    delayMs: 1000,
+    onRetry: (err) => log.warn(`[auth-sign-in] reference data: ${err.message} -- retrying once in 1 s`),
+  });
 
   authenticated = true;
   if (loginWindow) { loginWindow.close(); loginWindow = null; }

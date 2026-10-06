@@ -40,6 +40,9 @@ a look on a Windows machine.
 Supabase client with `persistSession: false` (there's no `localStorage` in the
 main process to persist into), so quitting and reopening the app always shows
 the login screen again — this is intentional, not a bug.
+Right after sign-in, loading the reference lists can fail with PGRST303 "JWT issued at future" (Supabase's database clock a
+moment behind its Auth server; the Mac's clock plays no part): `auth-sign-in` waits 1 s and retries that ONE error once
+(`lib/retryOnce.js`, logged as "retrying once"); a second failure or any other error shows as before.
 
 **RLS gotcha:** every table has row-level security requiring an authenticated
 session. An unauthenticated (anonymous) `select` doesn't error — it silently
