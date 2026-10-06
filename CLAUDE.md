@@ -367,6 +367,21 @@ dough, syrup), never drained boiling / blanching water -- every row is scaled to
 kg on pasta, 36 of 196 recipes) shrank the real ingredients; on 65 trial dishes it went to 0, with absorbed water and soups
 unchanged and all 659 reviewed ingredients kept.
 
+**Edge Function sign-in check** (2026-10-06): the platform's JWT check (`verify_jwt`, still on) let the app's PUBLIC
+publishable key through, so anyone holding it could make the AI / image functions spend money without logging in. Every
+function now starts with `requireUser(req)` (`supabase/functions/_shared/requireUser.ts`, ONE helper): no token or an
+`sb_` key -> 401; otherwise `auth.getUser(token)` against this project's Auth -- no user -> 401; Auth unreachable -> 503
+(never let through). It runs before the method check, the body and any API key. The app is unaffected: its signed-in
+client sends the session token on every `functions.invoke`. Scripts that call a function with fetch sign in first and
+send the session (`scripts/script-auth.js`: the three prompt trials); `density-trial` always signs in. A NEW function
+must call it too, and deploys with `--use-api` upload `_shared/` with it. `scripts/edge-auth-probe.js` (empty bodies
+only, no AI call; `--no-login` for the three calls that need none): no credentials / publishable key / forged token ->
+401, a real session -> 200 with the function's own "Missing ..." message; deleted functions -> 404. Live on all 11
+functions 2026-10-06; `allergens-from-ingredients` (R2, unused) deleted (source kept in backups/r2-parked-2026-10-06/).
+Rollback: the sources as they were are in `backups/edge-functions-live-2026-10-06/` -- `supabase functions deploy <name>
+--use-api --project-ref qulbbwdffcttuabyscnb --workdir backups/edge-functions-live-2026-10-06`. `fdc-food` (not in git)
+keeps its own role check.
+
 **Menu Ingredients cross-section sharing** (2026-10-01, pipeline Phase D). An upload is read in three steps (main.js
 `parse-and-suggest-menu-ingredients`): read + parse every file; ONE suggestion pass for the whole upload -- one AI call
 per dish name ignoring case and spacing, whatever files / sections it is on (September x4: 833 calls, was 1,010 per
