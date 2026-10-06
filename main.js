@@ -2267,11 +2267,12 @@ ipcMain.handle('clean-menus-for-sharing', async (e, { files }) => {
 // independent insert, never a shared clobberable object.
 // ---------------------------------------------------------------
 const RECIPE_GEN_BATCH_SIZE = 8;
+const { SECONDS_PER_BATCH: RECIPE_SECONDS_PER_BATCH, existingRecipeIndex, checklistRows, selectDishes } = require('./lib/recipeSelection');
 let recipeGenToken = null;
 
 // Layout-agnostic fallback for a menu file that isn't one of this app's own exports (see
 // lib/menuIngredients.js's flattenSheetForAI and supabase/functions/extract-menu-dishes/index.ts
-// for the full reasoning) -- only reached from parse-and-generate-recipes below when
+// for the full reasoning) -- only reached from prepare-recipe-generation below when
 // parseWorkbookDishes' strict marker-based pass finds zero rows. Batches at 50 rows per call
 // (same size every other lightweight per-item AI batch in this file uses --
 // CALORIE_ESTIMATE_BATCH_SIZE/AM_SNACK_STYLE_BATCH_SIZE/MENU_INGREDIENTS_BATCH_SIZE), chunked
@@ -2346,7 +2347,7 @@ function formatDayLabel(date, weekday) {
 // FIRST time this waste type exists at all, unlike a later manual edit to an existing row, which
 // still goes through the normal onWastePercentUpdateClicked flow in renderer.js exactly as
 // before). `wasteTypeCache` is a name(lowercased)->id Map, pre-seeded from the catalog fetched
-// once at the start of parse-and-generate-recipes and extended here as new types are created --
+// once at the start of generate-selected-recipes and extended here as new types are created --
 // shared across the WHOLE upload (every dish in every batch), not just one call, so two dishes
 // independently proposing the same new name (e.g. two things both needing "Heating Waste") don't
 // create duplicate catalog rows.
@@ -2613,7 +2614,14 @@ ipcMain.handle('estimate-density', async (e, { masses } = {}) => {
   return { estimates: [...r.estimates].map(([index, est]) => ({ index, ...est })), cached: r.cached, promptVersion: r.promptVersion, missing: r.missing };
 });
 
-ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fileName }) => {
+// Recipe Generator in two steps (2026-10-06, "choose which dishes get a recipe"): prepare-recipe-generation reads, parses and
+// dedupes the upload exactly as before -- no AI for one of this app's own exports (a Menu Ingredients export included) --
+// and returns the distinct dishes as checklist rows; the dishes themselves stay HERE, under the upload's token, so each
+// keeps its own reviewed list. generate-selected-recipes then generates only the ticked ones, through the unchanged loop.
+// lib/recipeSelection.js (pure). Only the latest upload is kept.
+const preparedRecipeUploads = new Map(); // uploadToken -> { fileName, dishes }
+
+ipcMain.handle('prepare-recipe-generation', async (e, { base64, uploadToken, fileName }) => {
   recipeGenToken = uploadToken;
 
   e.sender.send('recipe-generator-progress', { message: 'Reading file…' });
@@ -2685,13 +2693,35 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
     return { success: false, error: 'No eligible dishes were found in this file (Bread, Milk, and Juice items, and CEO dishes, are intentionally excluded).' };
   }
 
-  // No cross-upload duplicate check (removed per the chef's own explicit request): every upload
-  // generates its own complete recipe set, one recipe per eligible dish, regardless of whether a
-  // similar-or-identical recipe already exists from an earlier upload. Within-upload dedup (the
-  // SAME dish repeating across multiple sections/days of THIS SAME file, e.g. "White Rice" in
-  // Daycare/KG-LP/MS-UP) still happened above, in dedupeWithinUpload -- that's a different thing
-  // and stays exactly as it was.
-  e.sender.send('recipe-generator-progress', { message: `Found ${uniqueDishes.length} eligible dish(es) -- starting AI recipe generation…` });
+  // Which dishes already have a Recipe Generator recipe (draft or confirmed), by exact name -- case and spacing aside. A label
+  // on the checklist only: the dish starts unticked like every other and can always be ticked.
+  const { data: existingRecipes, error: existingErr } = await supabase.from('generated_recipes').select('name, source_dish_name, status, code');
+  if (existingErr) throw supaFail('prepare-recipe-generation: load existing recipes', existingErr);
+  if (uploadToken !== recipeGenToken) return { success: false, cancelled: true };
+  preparedRecipeUploads.clear();
+  preparedRecipeUploads.set(uploadToken, { fileName, dishes: uniqueDishes });
+  return {
+    success: true, fileName, failures,
+    dishes: checklistRows(uniqueDishes, existingRecipeIndex(existingRecipes)),
+    estimate: { secondsPerBatch: RECIPE_SECONDS_PER_BATCH, batchSize: RECIPE_GEN_BATCH_SIZE },
+  };
+});
+
+// The ticked dishes of a prepared upload (keys = their positions in its deduped list); the others are skipped with no AI call.
+ipcMain.handle('generate-selected-recipes', async (e, { uploadToken, keys }) => {
+  const prepared = preparedRecipeUploads.get(uploadToken);
+  if (!prepared) return { success: false, error: 'This upload is no longer ready -- upload the file again.' };
+  const { selected: uniqueDishes, skipped } = selectDishes(prepared.dishes, keys);
+  if (uniqueDishes.length === 0) return { success: false, error: 'Tick at least one dish to generate.' };
+  recipeGenToken = uploadToken;
+  const fileName = prepared.fileName;
+  const failures = [];
+
+  // No cross-upload skip (removed per the chef's own explicit request): a dish that already has a recipe from an earlier
+  // upload is only LABELLED on the checklist (prepare-recipe-generation); she decides by ticking. Within-upload dedup (the
+  // SAME dish repeating across multiple sections/days of THIS SAME file, e.g. "White Rice" in Daycare/KG-LP/MS-UP) happened
+  // in prepare-recipe-generation, in dedupeWithinUpload, exactly as before.
+  e.sender.send('recipe-generator-progress', { message: `Generating ${uniqueDishes.length} ticked dish(es)${skipped.length ? ` (${skipped.length} not ticked, skipped)` : ''}…` });
 
   function chunk(arr, size) {
     const out = [];
@@ -2709,7 +2739,7 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
     // dish in every batch (not reset per batch) -- two dishes independently proposing the same new
     // waste name only ever create one new catalog row between them.
     const { data: wasteTypesCatalog, error: wasteTypesErr } = await supabase.from('waste_types').select('id, name');
-    if (wasteTypesErr) throw supaFail('parse-and-generate-recipes: load waste_types', wasteTypesErr);
+    if (wasteTypesErr) throw supaFail('generate-selected-recipes: load waste_types', wasteTypesErr);
     const existingWasteTypeNames = wasteTypesCatalog.map((w) => w.name);
     const wasteTypeCache = new Map(wasteTypesCatalog.map((w) => [w.name.trim().toLowerCase(), w.id]));
 
@@ -2833,8 +2863,11 @@ ipcMain.handle('parse-and-generate-recipes', async (e, { base64, uploadToken, fi
   });
   if (failures.length) log.warn(`[recipe-generator] ${failures.length} warning(s) from this upload:`, failures);
 
+  preparedRecipeUploads.delete(uploadToken);
   return {
     success: true, createdCount, dishCount: uniqueDishes.length, failures,
+    // Not ticked: no AI call, listed in the result summary.
+    skipped: skipped.map((d) => d.recipeName || d.name),
     // For the banner: dishes whose ingredients the chef reviewed (from a Menu Ingredients export) and those she didn't.
     reviewedCount: uniqueDishes.filter((d) => d.reviewedIngredients).length,
     unreviewedCount: uniqueDishes.filter((d) => !d.reviewedIngredients).length,
@@ -3140,7 +3173,7 @@ ipcMain.handle('get-generated-recipe-photo', async (e, photoPath) => {
 });
 
 // Saves edits to an existing draft or confirmed generated recipe -- never creates one (generated
-// recipes only ever come from AI generation, see parse-and-generate-recipes). `payload.confirm:
+// recipes only ever come from AI generation, see generate-selected-recipes). `payload.confirm:
 // true` additionally assigns the RG- code and flips draft -> confirmed in this SAME save, so
 // reviewing-and-confirming a draft is one click, not "Save Draft" then a separate confirm step --
 // a no-op on an already-confirmed recipe (code/status never move backward). Ingredient rows carry

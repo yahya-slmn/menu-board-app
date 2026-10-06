@@ -656,10 +656,36 @@ table.materials-table td.cat-cell {
 /* Day and category-group heading rows of both Generator tables (recipeDayCategoryRowsHtml): the day is the stronger band, the
    category group a lighter one under it. Each is one colspan cell, so the column rules around them (widths, padding) don't apply
    beyond its first-column padding. */
-:is(.rg-drafts-table, .rg-generated-table) tr.rg-day-head td { background: var(--paper-dim); font-weight: 600; padding-top: 10px; }
-:is(.rg-drafts-table, .rg-generated-table) tr.rg-group-head td { background: #f6f7f1; color: var(--sage-dark); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 6px; padding-bottom: 6px; }
-:is(.rg-drafts-table, .rg-generated-table) tr:is(.rg-day-head, .rg-group-head):hover { background: none; }
+:is(.rg-drafts-table, .rg-generated-table, .rg-pick-table) tr.rg-day-head td { background: var(--paper-dim); font-weight: 600; padding-top: 10px; }
+:is(.rg-drafts-table, .rg-generated-table, .rg-pick-table) tr.rg-group-head td { background: #f6f7f1; color: var(--sage-dark); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 6px; padding-bottom: 6px; }
+:is(.rg-drafts-table, .rg-generated-table, .rg-pick-table) tr:is(.rg-day-head, .rg-group-head):hover { background: none; }
 .rg-group-count { color: var(--neutral); font-weight: 400; text-transform: none; letter-spacing: 0; }
+/* "Choose which dishes get a recipe" (renderRecipePickList): a sticky bar (search, all / none, the live count and estimate,
+   Generate) over the checklist. The shared .items-table fixes a 740px minimum and widths by column position: reset here. */
+.rg-pick-bar { position: sticky; top: -32px; z-index: 3; background: var(--paper); padding: 10px 0 12px; margin-top: -10px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+.rg-pick-row1 { display: flex; gap: 16px; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.rg-pick-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; min-width: 0; }
+.rg-pick-actions { display: flex; gap: 10px; flex: none; }
+.rg-pick-meta { font-size: 12.5px; color: var(--neutral); }
+.rg-pick-tools { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.rg-pick-tools input[type=search] { flex: 0 1 300px; min-width: 180px; }
+.rg-pick-total { margin-left: auto; font-size: 13px; font-weight: 600; color: var(--ink); }
+table.items-table.rg-pick-table { min-width: 0; }
+table.items-table.rg-pick-table :is(th, td):nth-child(n) { width: auto; vertical-align: top; }
+table.items-table.rg-pick-table th:nth-child(1) { width: 36px; }
+table.items-table.rg-pick-table th:nth-child(3) { width: 190px; }
+table.items-table.rg-pick-table th:nth-child(4) { width: 130px; }
+table.items-table.rg-pick-table th:nth-child(5) { width: 130px; }
+.rg-pick-table tr:is(.rg-day-head, .rg-group-head) td > span:first-child { margin-right: 8px; }
+.rg-pick-table .rg-pick-count-cell { color: var(--neutral); font-weight: 400; text-transform: none; letter-spacing: 0; margin-right: 10px; }
+.rg-pick-table tr:is(.rg-day-head, .rg-group-head) .nm-link { padding: 0; font-size: 11.5px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.rg-pick-tag { display: inline-block; font-size: 11px; color: var(--neutral); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; background: var(--paper); white-space: nowrap; }
+.rg-pick-tag.rg-pick-nolist { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
+.rg-result { margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 13px; line-height: 1.5; }
+.rg-result details { margin-top: 6px; }
+/* A capped height with CSS columns would spill sideways; a grid scrolls down. */
+.rg-result-skipped { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 2px 24px; max-height: 240px; overflow-y: auto; margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; }
+.rg-result-skipped li { min-width: 0; overflow-wrap: anywhere; }
 /* The Drafts folder's re-group preview card. */
 .rg-regroup-card { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 13px; display: grid; gap: 6px; }
 .rg-regroup-warn { color: var(--danger); }

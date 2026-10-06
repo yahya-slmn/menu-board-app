@@ -147,7 +147,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   extractRecipeForExtractor: (payload) => ipcRenderer.invoke('extract-recipe-for-extractor', payload),
 
-  parseAndGenerateRecipes: (payload) => ipcRenderer.invoke('parse-and-generate-recipes', payload),
+  // Recipe Generator in two steps: read + dedupe (checklist), then generate the ticked dishes.
+  prepareRecipeGeneration: (payload) => ipcRenderer.invoke('prepare-recipe-generation', payload),
+  generateSelectedRecipes: (payload) => ipcRenderer.invoke('generate-selected-recipes', payload),
   // Shared manual "Generate Photo" button -- Recipe Book, Recipe Extractor, and Recipe
   // Generator's edit forms all call this same channel (see main.js's own comment on why one
   // handler covers all three).

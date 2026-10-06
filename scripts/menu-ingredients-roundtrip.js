@@ -266,7 +266,7 @@ async function reload(workbook) {
     check(Object.keys(EXPECTED_GROUP).every((code) => back.rows.some((r) => codeOfRow(r) === code)), 'category group: not every expected category was found in the export');
 
     // ---- 6. the Recipe Generator's dedup + group, by NAME, whatever the tab order ---------------------------
-    // Same steps as main.js parse-and-generate-recipes: section from the tab name, group from label + period, then
+    // Same steps as main.js prepare-recipe-generation: section from the tab name, group from label + period, then
     // dedupeWithinUpload. Run in file order and with the Staff tab first; both must give one entry per dish (one AI
     // call each) and the same group for every dish, as the chef's rule says.
     const meta = back.rows.map((r) => ({ ...r, section: sectionOfRow(r), dayLabel: `${r.weekday} ${r.date}`, categoryGroup: categoryGroupFor({ category: r.category, period: r.period }) }));

@@ -80,6 +80,9 @@ const state = {
     presentationMode: null, presentationText: '', presentationItems: [],
     importedRecipe: null,
     activeTab: 'drafts', fileName: '', uploadToken: null,
+    // "Choose which dishes get a recipe": pick = the checklist between upload and generation ({ uploadToken, fileName, dishes,
+    // estimate, ticked: Set of keys, query }); lastResult = the summary of the last generation (made / failed / skipped).
+    pick: null, lastResult: null,
     // Drafts are grouped into per-menu "folders" by source_menu_label (see
     // renderGeneratedDraftsList) -- null shows the folder list, a label string shows just that
     // menu's own drafts. Persists across tab switches the same way activeTab does, so leaving and
@@ -182,7 +185,7 @@ const RECIPE_NS = {
   // ingredients (no searchIngredients/addIngredient at all: its own bespoke form,
   // renderGeneratedRecipeFormView, never wires an ingredient-name autocomplete, unlike Book/
   // Extractor's shared renderRecipeFormView). No allowManualNew/extract entry point either --
-  // generated_recipes rows only ever come from parse-and-generate-recipes (Recipe Generator's own
+  // generated_recipes rows only ever come from generate-selected-recipes (Recipe Generator's own
   // "Upload Menu File" flow, see renderRecipeGeneratorView), never a blank form or a single-file
   // extraction. openNew/openEdit are still defined, for structural parity with book/extractor and
   // in case shared code ever calls them, but only openEdit is ever actually reached (from the
@@ -6830,7 +6833,7 @@ async function saveProcessRecipeForm(ns) {
 
 // ============================================================
 // RECIPE GENERATOR -- AI-generates a full ~150g reference recipe per dish pulled from an
-// uploaded menu file (main.js's parse-and-generate-recipes), for every dish EXCEPT Bread/Milk/
+// uploaded menu file (main.js's prepare-recipe-generation / generate-selected-recipes), for every dish EXCEPT Bread/Milk/
 // Juice (and the already-established Fruit Basket/Fruit Bar/Salad Bar/Water/Soft Drinks
 // exclusions) -- see lib/recipeGenerator.js's isExcludedCategory/isReadyMadeItem. Two tabs: Drafts (generated_recipes rows
 // with status='draft', reviewed/edited before being confirmed) and Recipe Generated (status=
@@ -6884,6 +6887,7 @@ async function renderRecipeGeneratorTabs(main, ns) {
     <input type="file" id="rg-file-input" accept=".xlsx" hidden />
     <div id="rg-progress-wrap"></div>
     <div id="rg-review-notice"></div>
+    <div id="rg-result"></div>
     ${s.fileName ? `<div style="color:var(--sage-dark); font-size:12.5px; margin:-10px 0 14px;">Last upload: "${s.fileName}"</div>` : ''}
     <div class="mode-toggle" style="margin-bottom:16px; max-width:360px;">
       <button type="button" class="mode-toggle-btn ${s.activeTab === 'drafts' ? 'active' : ''}" data-rg-tab="drafts">Drafts</button>
@@ -6901,6 +6905,7 @@ async function renderRecipeGeneratorTabs(main, ns) {
     e.target.value = '';
     if (!file) return;
 
+    // Step 1 of 2: read, parse and dedupe (no AI for a Menu Ingredients export) -> the checklist. Nothing is generated yet.
     const uploadBtn = document.getElementById('rg-upload-btn');
     uploadBtn.disabled = true;
     const uploadToken = crypto.randomUUID();
@@ -6915,30 +6920,14 @@ async function renderRecipeGeneratorTabs(main, ns) {
         reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(file);
       });
-      const result = await window.api.parseAndGenerateRecipes({ base64, uploadToken, fileName: file.name });
+      const result = await window.api.prepareRecipeGeneration({ base64, uploadToken, fileName: file.name });
       if (uploadToken !== s.uploadToken) return; // superseded by a newer upload
       if (!result.success) {
         if (!result.cancelled) alert(`Couldn't process this file: ${result.error}`);
         return;
       }
-      s.fileName = file.name;
-      const warningNote = result.failures && result.failures.length
-        ? `\n\n${result.failures.length} warning(s) -- see the app logs for details.` : '';
-      // No cross-upload skip anymore (removed per the chef's own explicit request) -- every
-      // eligible dish in this upload gets its own recipe every time, regardless of whether a
-      // similar one already exists from an earlier upload. dishCount can still exceed
-      // createdCount when a batch genuinely failed/timed out (see `failures`), not because
-      // anything was intentionally skipped.
-      const summary = `Generated ${result.createdCount} of ${result.dishCount} eligible recipe(s).`;
-      // Phase E: dishes with no reviewed ingredient list (a plain menu, not a Menu Ingredients export) are generated as
-      // before, from the AI's own guess -- said plainly, here and in a banner that stays until the next upload.
-      s.reviewNotice = result.unreviewedCount ? { fileName: file.name, unreviewed: result.unreviewedCount, total: result.dishCount } : null;
-      const reviewNote = result.unreviewedCount
-        ? `\n\n${result.unreviewedCount} of ${result.dishCount} dish(es) had no reviewed ingredient list, so the AI chose their ingredients.` : '';
-      alert(`${summary} Review them in the Drafts tab.${reviewNote}${warningNote}`);
-      renderRgReviewNotice(s);
-      s.activeTab = 'drafts';
-      s.draftFolder = null;
+      s.lastResult = null;
+      s.pick = { uploadToken, fileName: file.name, dishes: result.dishes, estimate: result.estimate, ticked: new Set(), query: '', readWarnings: (result.failures || []).length };
       renderRecipeGeneratorTabs(main, ns);
     } catch (err) {
       alert(`Couldn't process this file: ${err.message}`);
@@ -6948,6 +6937,14 @@ async function renderRecipeGeneratorTabs(main, ns) {
       if (document.body.contains(uploadBtn)) uploadBtn.disabled = false;
     }
   });
+
+  renderRgResult(s);
+  // Between the two steps the checklist takes the place of the Drafts / Recipe Generated lists.
+  if (s.pick) {
+    document.querySelector('[data-rg-tab]').parentElement.hidden = true;
+    renderRecipePickList(document.getElementById('rg-tab-content'), s, main, ns);
+    return;
+  }
 
   document.querySelectorAll('[data-rg-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -6967,6 +6964,186 @@ async function renderRecipeGeneratorTabs(main, ns) {
     s.returnScroll = null;
     main.scrollTo({ top, behavior: 'instant' });
   }
+}
+
+// ============================================================
+// "Choose which dishes get a recipe" (2026-10-06): the distinct dishes of an upload as a checklist, day -> category group
+// like the Drafts list, nothing ticked. Only the ticked dishes are generated (generate-selected-recipes); the others are
+// skipped with no AI call and listed in the result. Rows come from main.js prepare-recipe-generation (lib/recipeSelection.js
+// checklistRows): { key, name, category, dayLabel, group, groupLabel, groupOrder, listCount, existing }.
+// ============================================================
+// The same arithmetic as lib/recipeSelection.js generationEstimate (this is a classic script), with main.js's numbers.
+function rgPickEstimate(pick, n) {
+  const e = pick.estimate || { secondsPerBatch: 65, batchSize: 8 };
+  const minutes = Math.ceil((Math.ceil(n / e.batchSize) * e.secondsPerBatch) / 60);
+  return { minutes };
+}
+
+function renderRecipePickList(box, s, main, ns) {
+  const pick = s.pick;
+  const dishes = pick.dishes;
+  const withList = dishes.filter(d => d.listCount > 0).length;
+  // Day (calendar order, as the Drafts list) -> category group (serving order) -> the file's own order.
+  const byDay = new Map();
+  for (const d of dishes) {
+    const day = d.dayLabel || null;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(d);
+  }
+  const showDays = dishes.some(d => d.dayLabel);
+  let gi = 0;
+  const body = sortDayGroups([...byDay.entries()]).map(([day, rows], di) => {
+    const groups = new Map();
+    for (const d of rows) {
+      if (!groups.has(d.group)) groups.set(d.group, { label: d.groupLabel, order: d.groupOrder, rows: [] });
+      groups.get(d.group).rows.push(d);
+    }
+    return `${showDays ? `<tr class="rg-day-head" data-day="${di}"><td colspan="5"><span>${rgEscape(day || 'No day recorded')}</span>
+        <span class="rg-pick-count-cell" data-count-day="${di}"></span>
+        <button type="button" class="nm-link" data-sel="day" data-val="${di}" data-on="1">all</button> <button type="button" class="nm-link" data-sel="day" data-val="${di}" data-on="0">none</button></td></tr>` : ''}
+      ${[...groups.values()].sort((a, b) => a.order - b.order).map(g => {
+        const gid = gi++;
+        return `<tr class="rg-group-head" data-day="${di}" data-grp="${gid}"><td colspan="5"><span>${rgEscape(g.label)}</span>
+            <span class="rg-pick-count-cell" data-count-grp="${gid}"></span>
+            <button type="button" class="nm-link" data-sel="grp" data-val="${gid}" data-on="1">all</button> <button type="button" class="nm-link" data-sel="grp" data-val="${gid}" data-on="0">none</button></td></tr>
+          ${g.rows.map(d => `<tr class="rg-pick-row" data-key="${d.key}" data-day="${di}" data-grp="${gid}" data-find="${rgEscape(`${d.name} ${d.category}`.toLowerCase())}">
+            <td><input type="checkbox" data-key="${d.key}" ${pick.ticked.has(d.key) ? 'checked' : ''} aria-label="${rgEscape(d.name)}" /></td>
+            <td>${rgEscape(d.name)}</td>
+            <td>${rgEscape(d.category)}</td>
+            <td>${d.listCount ? `${d.listCount} ingredient${d.listCount === 1 ? '' : 's'}` : '<span class="rg-pick-tag rg-pick-nolist">no reviewed list</span>'}</td>
+            <td>${d.existing ? `<span class="rg-pick-tag" title="A Recipe Generator recipe with this exact name already exists. Tick it to make another.">${d.existing.status === 'confirmed' ? `recipe ${rgEscape(d.existing.code || '')}` : 'draft'}</span>` : ''}</td>
+          </tr>`).join('')}`;
+      }).join('')}`;
+  }).join('');
+
+  box.innerHTML = `
+    <div class="rg-pick">
+      <div class="rg-pick-bar">
+        <div class="rg-pick-row1">
+          <div class="rg-pick-head"><strong>Choose which dishes get a recipe</strong>
+            <span class="rg-pick-meta">"${rgEscape(pick.fileName)}" · ${dishes.length} distinct dish(es) · ${withList} with a reviewed ingredient list${pick.readWarnings ? ` · ${pick.readWarnings} reading warning(s) in the app log` : ''}</span></div>
+          <div class="rg-pick-actions">
+            <button type="button" class="secondary" id="rg-pick-cancel">Cancel</button>
+            <button type="button" class="primary" id="rg-pick-go" disabled>Generate</button>
+          </div>
+        </div>
+        <div class="rg-pick-tools">
+          <input type="search" id="rg-pick-search" placeholder="Search dishes or categories" aria-label="Search the dishes" value="${rgEscape(pick.query)}" />
+          <button type="button" class="nm-link" data-sel="all" data-on="1" title="Ticks every dish the search shows">Select all</button>
+          <button type="button" class="nm-link" data-sel="all" data-on="0" title="Unticks every dish the search shows">Select none</button>
+          <span class="rg-pick-total" id="rg-pick-total" role="status"></span>
+        </div>
+      </div>
+      <div class="table-scroll"><table class="items-table rg-pick-table">
+        <thead><tr><th></th><th>Dish</th><th>Menu category</th><th>Reviewed list</th><th>Already</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table></div>
+    </div>`;
+
+  const rows = [...box.querySelectorAll('tr.rg-pick-row')];
+  const boxOf = new Map(rows.map(r => [r, r.querySelector('input')]));
+  const refresh = () => {
+    const tickedBy = { day: new Map(), grp: new Map() }, totalBy = { day: new Map(), grp: new Map() }, shownBy = { day: new Map(), grp: new Map() };
+    for (const r of rows) {
+      for (const k of ['day', 'grp']) {
+        const v = r.dataset[k];
+        totalBy[k].set(v, (totalBy[k].get(v) || 0) + 1);
+        if (boxOf.get(r).checked) tickedBy[k].set(v, (tickedBy[k].get(v) || 0) + 1);
+        if (!r.hidden) shownBy[k].set(v, (shownBy[k].get(v) || 0) + 1);
+      }
+    }
+    box.querySelectorAll('[data-count-day]').forEach(el => { el.textContent = `${tickedBy.day.get(el.dataset.countDay) || 0} / ${totalBy.day.get(el.dataset.countDay) || 0}`; });
+    box.querySelectorAll('[data-count-grp]').forEach(el => { el.textContent = `${tickedBy.grp.get(el.dataset.countGrp) || 0} / ${totalBy.grp.get(el.dataset.countGrp) || 0}`; });
+    box.querySelectorAll('tr.rg-day-head').forEach(h => { h.hidden = !shownBy.day.get(h.dataset.day); });
+    box.querySelectorAll('tr.rg-group-head').forEach(h => { h.hidden = !shownBy.grp.get(h.dataset.grp); });
+    const n = pick.ticked.size;
+    const est = rgPickEstimate(pick, n);
+    box.querySelector('#rg-pick-total').textContent = n ? `${n} of ${dishes.length} ticked · about ${est.minutes} min` : `0 of ${dishes.length} ticked`;
+    const go = box.querySelector('#rg-pick-go');
+    go.disabled = !n;
+    go.textContent = n ? `Generate ${n} recipe${n === 1 ? '' : 's'}` : 'Generate';
+  };
+  const setTicked = (r, on) => { boxOf.get(r).checked = on; const k = Number(r.dataset.key); if (on) pick.ticked.add(k); else pick.ticked.delete(k); };
+  box.addEventListener('change', (e) => {
+    const k = e.target.dataset && e.target.dataset.key;
+    if (k == null || e.target.type !== 'checkbox') return;
+    if (e.target.checked) pick.ticked.add(Number(k)); else pick.ticked.delete(Number(k));
+    refresh();
+  });
+  // all / none: the overall buttons and each day / group heading act on the rows the search is showing.
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sel]');
+    if (!b) return;
+    const on = b.dataset.on === '1';
+    for (const r of rows) {
+      if (r.hidden) continue;
+      if (b.dataset.sel === 'all' || r.dataset[b.dataset.sel] === b.dataset.val) setTicked(r, on);
+    }
+    refresh();
+  });
+  const search = box.querySelector('#rg-pick-search');
+  const applySearch = () => {
+    const q = pick.query.trim().toLowerCase();
+    for (const r of rows) r.hidden = !!q && !r.dataset.find.includes(q);
+    refresh();
+  };
+  let t = null;
+  search.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { pick.query = search.value; applySearch(); }, 120); });
+  box.querySelector('#rg-pick-cancel').addEventListener('click', () => { s.pick = null; renderRecipeGeneratorTabs(main, ns); });
+  box.querySelector('#rg-pick-go').addEventListener('click', () => runSelectedRecipeGeneration(s, main, ns));
+  applySearch();
+}
+
+// Step 2 of 2: only the ticked dishes go to the AI, through the unchanged generation loop.
+async function runSelectedRecipeGeneration(s, main, ns) {
+  const pick = s.pick;
+  const keys = [...pick.ticked];
+  if (!keys.length) return;
+  const go = document.getElementById('rg-pick-go');
+  const cancel = document.getElementById('rg-pick-cancel');
+  const uploadBtn = document.getElementById('rg-upload-btn');
+  [go, cancel, uploadBtn].forEach(b => { if (b) b.disabled = true; });
+  const panel = createProgressPanel(document.getElementById('rg-progress-wrap'), { label: `Generating ${keys.length} recipe(s)…` });
+  const unsubscribe = window.api.onRecipeGeneratorProgress((payload) => panel.update(payload));
+  try {
+    const result = await window.api.generateSelectedRecipes({ uploadToken: pick.uploadToken, keys });
+    if (pick.uploadToken !== s.uploadToken) return; // superseded by a newer upload
+    if (!result.success) {
+      if (!result.cancelled) alert(`Couldn't generate: ${result.error}`);
+      return;
+    }
+    s.fileName = pick.fileName;
+    s.pick = null;
+    s.lastResult = { fileName: pick.fileName, created: result.createdCount, ticked: result.dishCount, failures: result.failures || [], skipped: result.skipped || [] };
+    // Phase E: ticked dishes with no reviewed ingredient list are generated as before, from the AI's own guess -- said plainly in a
+    // banner that stays until the next upload.
+    s.reviewNotice = result.unreviewedCount ? { fileName: pick.fileName, unreviewed: result.unreviewedCount, total: result.dishCount } : null;
+    s.activeTab = 'drafts';
+    s.draftFolder = null;
+    renderRecipeGeneratorTabs(main, ns);
+  } catch (err) {
+    alert(`Couldn't generate: ${err.message}`);
+  } finally {
+    unsubscribe();
+    panel.destroy();
+    [go, cancel, uploadBtn].forEach(b => { if (b && document.body.contains(b)) b.disabled = false; });
+  }
+}
+
+// The result of the last generation: made, failed, and the dishes that were not ticked (no AI call). Stays until dismissed or
+// the next upload.
+function renderRgResult(s) {
+  const el = document.getElementById('rg-result');
+  if (!el) return;
+  const r = s.lastResult;
+  el.innerHTML = !r ? '' : `
+    <div class="rg-result" role="status">
+      <div><strong>Generated ${r.created} of ${r.ticked} ticked dish(es)</strong> from "${rgEscape(r.fileName)}". Review them in the Drafts tab.
+        <button type="button" class="rg-review-dismiss" aria-label="Dismiss">Dismiss</button></div>
+      ${r.failures.length ? `<details><summary>${r.failures.length} warning(s)</summary><ul>${r.failures.map(f => `<li>${rgEscape(f)}</li>`).join('')}</ul></details>` : ''}
+      ${r.skipped.length ? `<details><summary>Not ticked, skipped with no AI call: ${r.skipped.length}</summary><ul class="rg-result-skipped">${r.skipped.map(n => `<li>${rgEscape(n)}</li>`).join('')}</ul></details>` : ''}
+    </div>`;
+  el.querySelector('.rg-review-dismiss')?.addEventListener('click', () => { s.lastResult = null; renderRgResult(s); });
 }
 
 // Drafts' day headings ("Monday 27-09-2026", or just "Monday", or nothing) must read in calendar order. The groups used to come out

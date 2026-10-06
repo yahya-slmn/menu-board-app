@@ -98,6 +98,20 @@ const STEPS = [
     (await t.until(() => document.querySelector('[data-rg-tab=drafts]'))).click(); await t.sleep(600);
     (await t.until(() => document.querySelector('[data-rg-open-folder="0"]'))).click(); await t.until(() => document.querySelector('.rg-drafts-table'));`],
   ['Recipe Generator: Recipe Generated', 'app', `document.querySelector('[data-rg-tab=generated]').click(); await t.until(() => document.querySelector('.rg-generated-table'));`],
+  ['Recipe Generator: choose dishes (1,500 rows)', 'app', `const r = await window.api.prepareRecipeGeneration({});
+    state.generatedRecipes.uploadToken = 'tour';
+    state.generatedRecipes.pick = { uploadToken: 'tour', fileName: r.fileName, dishes: r.dishes, estimate: r.estimate, ticked: new Set([0, 1, 2, 9, 40, 97]), query: '', readWarnings: 0 };
+    renderView(); await t.until(() => document.querySelector('.rg-pick-table'));
+    document.querySelector('[data-sel="grp"][data-val="3"][data-on="1"]').click(); await t.sleep(200);`],
+  ['Recipe Generator: choose dishes, searched and scrolled', 'app', `const q = document.getElementById('rg-pick-search'); q.value = 'kebab'; q.dispatchEvent(new Event('input')); await t.sleep(400);
+    document.querySelector('[data-sel="all"][data-on="1"]').click(); await t.sleep(200); document.getElementById('main').scrollTo({ top: 1400, behavior: 'instant' }); await t.sleep(300);`],
+  ['Recipe Generator: result summary', 'app', `document.getElementById('main').scrollTo({ top: 0, behavior: 'instant' });
+    const g = state.generatedRecipes; const p = g.pick; g.pick = null;
+    g.lastResult = { fileName: p.fileName, created: 22, ticked: 24, failures: ['"Grilled Salmon" was skipped, not generated: Genuinely a seafood dish; not permitted for this student section'],
+      skipped: p.dishes.filter(d => !p.ticked.has(d.key)).map(d => d.name) };
+    g.reviewNotice = { fileName: p.fileName, unreviewed: 8, total: 24 };
+    renderView(); await t.until(() => document.querySelector('.rg-result'));
+    document.querySelectorAll('.rg-result details').forEach(d => { d.open = true; }); await t.sleep(200);`],
   ['RoF Setup (empty)', 'rof', `document.querySelector('[data-view=recipeOnFire]').click(); await t.sleep(900);`],
   ['RoF Setup, one process + tray', 'rof', pickRecipe(1, 'Croissant') + pickTray(1)],
   ['RoF Shape & Place: Place', 'rof', `await t.click('Continue'); await t.sleep(1500);`],

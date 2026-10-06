@@ -139,7 +139,22 @@ const MASTER_ITEMS = { unlinkedRows: 0, masters: [
     MV(200 + i, ['KG-LP, MS-UP — 2 Oct 2026', 'Daycare — 3 Oct 2026', 'Staff — 3 Oct 2026'][i % 3], [MR(500 + i, LONG[i % LONG.length], 'Lunch Main Course', ['KG-LP', 'MS-UP'])], i % 2 ? LIST : '')] })),
 ] };
 
+// Recipe Generator, "choose which dishes get a recipe": 1,500 distinct dishes over 20 days (four weeks), every category group,
+// long names (the longest real one is 152 characters), a third with no reviewed list, some already with a draft / recipe.
+const PICK_GROUPS = [['AM_SNACK_BREAKFAST', 'Breakfast', 0], ['SOUP_APPETIZER', 'Soup / Appetizer', 1], ['SALAD', 'Salad', 2], ['MAIN', 'Main Hot Dish', 3],
+  ['SIDES', 'Starch / Side Vegetables', 4], ['SWEETS', 'Sweets', 5], ['LUNCH_BOX', 'Lunch Box', 6], ['PM_SNACK', 'PM Snack', 7], ['OTHER', 'Other', 8]];
+const PICK_DAYS = Array.from({ length: 20 }, (_, i) => { const d = new Date(Date.UTC(2026, 8, 6 + Math.floor(i / 5) * 7 + (i % 5))); return `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'][i % 5]} ${String(d.getUTCDate()).padStart(2, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-2026`; });
+const PICK_DISHES = Array.from({ length: 1500 }, (_, key) => {
+  const [group, groupLabel, groupOrder] = PICK_GROUPS[key % PICK_GROUPS.length];
+  const name = key % 97 === 0 ? 'Chicken Kebab Served with Saffron Sauce, Zereshk Rice and Tomatoes, a Side of Grilled Vegetables and Garlic Yogurt Dip with Fresh Mint and Sumac Onions'
+    : `${LONG[key % LONG.length]}${key % 3 ? '' : ' (Staff)'} ${key}`;
+  return { key, name, menuName: name, category: ['AM Snack', 'Soup/Appetizer', 'Lunch SALAD Side', 'Lunch Main Course', 'Lunch Starch/Side', 'Sweets', 'Option 1', 'PM Snack', 'Main Dish'][key % 9],
+    dayLabel: PICK_DAYS[Math.floor(key / 75)], group, groupLabel, groupOrder, listCount: key % 3 === 1 ? 0 : 6 + (key % 9),
+    existing: key % 11 === 0 ? { status: 'draft', code: null } : key % 17 === 0 ? { status: 'confirmed', code: `RG-0${1000 + key}` } : null };
+});
+
 const handlers = {
+  prepareRecipeGeneration: () => ({ success: true, fileName: 'September week_01-04_Ingredients.xlsx', failures: [], dishes: PICK_DISHES, estimate: { secondsPerBatch: 65, batchSize: 8 } }),
   listGeneratedRecipeDrafts: () => GEN_DRAFTS, listGeneratedRecipes: () => GEN_CONFIRMED,
   // "Re-group from the original menu...": a canned preview (main.js builds it from the picked file) and its apply.
   previewRegroupGeneratedRecipes: ({ fileName } = {}) => ({ success: true, token: 't1', total: 6, willGroup: 5, notFound: ['Mystery Dish'],

@@ -251,6 +251,26 @@ Recipe Generator's own recipes are touched. RG codes are never reused (`deleted_
 applied by hand; `nextRgCode` counts past them). `lib/generatedRecipeDelete.js` (pure) plans it; `scripts/rg-delete-check.js` in
 npm test; `scripts/rg-delete-verify.js` (read-only, login) PASS; first real delete 2026-10-02.
 
+**Recipe Generator: choose which dishes get a recipe** (2026-10-06): an upload is now two steps. `prepare-recipe-generation`
+reads, parses and dedupes exactly as before (no AI for this app's own exports, a Menu Ingredients export included; the AI
+reading fallback for foreign layouts is unchanged) and returns checklist rows (`lib/recipeSelection.js` `checklistRows`: name,
+menu category, day, category group, how many reviewed ingredients, an "already" label = a Recipe Generator draft / confirmed
+recipe of the EXACT name, case and spacing aside -- a label only). The deduped dishes stay in main.js under the upload token;
+`generate-selected-recipes` generates only the ticked keys through the unchanged loop (Phase E/F, retry, flags) and returns the
+skipped names. Each deduped entry carries its own reviewed list, so a subset can't move a list (checked in
+`scripts/recipe-selection-check.js`, npm test). The checklist (`renderRecipePickList`): nothing ticked, all / none per day, per
+category group and overall (acting on the rows the search shows), search, live count with a TIME estimate only (65 s per batch
+of 8, measured 2026-10-03; no cost is shown, the user's decision 2026-10-06). The result panel (`renderRgResult`) lists made / warnings / skipped. Dedupe still merges
+near-identical spellings (`findDuplicateMatch`), as before.
+
+**Master Items recipes (R1 / R2): STOPPED 2026-10-06** -- the company's own system will own recipes, prices and the ingredients
+master; Menu Board does no ingredients-master matching. The R2 code is parked, never committed: `git stash` "R2 Master Items
+recipes (parked 2026-10-06)" on one Mac, and `backups/r2-parked-2026-10-06/` (patch + untracked files). Left live on purpose:
+its two migrations (columns on generated_recipes / generated_recipe_ingredients / recipe_ingredients, two indexes,
+`approve_master_recipe`), the `allergens-from-ingredients` function, and five tables made by SQL from elsewhere
+(master_recipe_drafts, recipe_ingredient_decisions, recipe_ingredient_row_overrides, ingredient_queue_items,
+ingredient_row_overrides) -- nothing in the app uses them. `generate-dish-recipes` was redeployed from git (byte-identical).
+
 **Recipe Generator category groups** (2026-09-30, Menu Ingredients -> Recipe Generator pipeline, Phase B): drafts and
 confirmed recipes are listed day (ascending) -> menu category group -> recipe (`recipeDayCategoryRowsHtml` in renderer.js,
 one function for both lists; confirmed recipes stay under their source menu first). `lib/recipeCategoryGroups.js` (pure):
